@@ -27,8 +27,6 @@ import {
   writeWorkspace,
 } from "./workspace.js";
 
-export { serializeGraph } from "./workspace.js";
-
 export type ScanOptions = {
   /** The clock for `generatedAt`, `lastChangedAt` and history. Tests pin it. */
   readonly now?: Date;
