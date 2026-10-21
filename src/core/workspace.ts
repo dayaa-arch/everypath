@@ -4,14 +4,16 @@ import { join, posix, resolve } from "node:path";
 import { CONFIG_FILE, type Config, DEFAULT_CONFIG, parseConfig } from "./config.js";
 import { parseEventName, parseStateName } from "./expr.js";
 import { parseFindings, rootRelative } from "./findings.js";
-import { asItems, asText, errorMessage, isRecord, readJsonFile } from "./json.js";
+import { asItems, asText, errorMessage, isMissing, isRecord, readJsonFile } from "./json.js";
 import { NO_PROPERTIES, PROPERTIES_FILE, parseProperties } from "./properties.js";
 import { parseStoredVerdicts, type StoredVerdicts, type TlcRecord } from "./tla/result.js";
 import type {
+  Approval,
   EdgeRef,
   Finding,
   Graph,
   HistoryEntry,
+  Layout,
   PropertiesFile,
   ScanWarning,
   StateName,
@@ -21,6 +23,7 @@ import type {
 export const OUTPUT_DIRECTORY = ".everypath";
 const TLA_DIRECTORY = `${OUTPUT_DIRECTORY}/tla`;
 const TLC_RESULT_FILE = `${TLA_DIRECTORY}/result.json`;
+const REVIEW_FILE = `${OUTPUT_DIRECTORY}/review.json`;
 
 const IGNORED_DIRECTORIES: ReadonlySet<string> = new Set(
   "node_modules .git dist build out .next __pycache__ venv .venv coverage target vendor .everypath".split(
@@ -36,6 +39,12 @@ const FINDINGS_FILES: readonly string[] = [
   "semgrep.json",
   "bandit.json",
 ];
+/** The files under `.everypath/` that a scan reads. Everything else there is output. */
+const OUTPUT_INPUTS: ReadonlySet<string> = new Set([
+  REVIEW_FILE,
+  TLC_RESULT_FILE,
+  ...FINDINGS_FILES.filter((file) => file.startsWith(`${OUTPUT_DIRECTORY}/`)),
+]);
 
 export type Source = { readonly path: string; readonly bytes: Buffer };
 
@@ -117,6 +126,77 @@ export async function writeWorkspace(
     await appendFile(join(directory, "history.jsonl"), `${JSON.stringify(entry)}\n`);
   }
   await replaceFile(join(directory, "graph.json"), serializeGraph(graph));
+}
+
+/**
+ * Sets one node's approval in `review.json`, or removes it with `null`, and keeps every other entry as
+ * it was. Keys are sorted, so the git diff of this record shows only the node that changed. A file that
+ * is there but does not read as a review file is never overwritten. A file left with no approval is
+ * removed: it says what a missing one says, so approving and revoking leave the repository as it was.
+ */
+export async function writeApproval(
+  root: string,
+  id: StateName,
+  approval: Approval | null,
+): Promise<void> {
+  const path = join(root, REVIEW_FILE);
+  const file = await readJsonFile(path);
+  if (file.kind === "invalid") {
+    throw new Error(`${REVIEW_FILE} を読めないので書き換えません: ${file.reason}`);
+  }
+  const before = file.kind === "missing" ? {} : isRecord(file.value) ? file.value.approvals : null;
+  if (!isRecord(before)) throw new Error(`${REVIEW_FILE} に approvals が無いので書き換えません`);
+  const entries = Object.entries(before).filter(([key]) => key !== id);
+  if (approval === null && entries.length === Object.keys(before).length) return;
+  if (approval !== null) entries.push([id, approval]);
+  if (entries.length === 0) return rm(path, { force: true });
+  entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const review = { version: 1, approvals: Object.fromEntries(entries) };
+  await mkdir(join(root, OUTPUT_DIRECTORY), { recursive: true });
+  await replaceFile(path, `${JSON.stringify(review, null, 2)}\n`);
+}
+
+/** `.everypath/layout.json`, as the viewer sent it. */
+export async function writeLayout(root: string, layout: Layout): Promise<void> {
+  await mkdir(join(root, OUTPUT_DIRECTORY), { recursive: true });
+  await replaceFile(
+    join(root, OUTPUT_DIRECTORY, "layout.json"),
+    `${JSON.stringify(layout, null, 2)}\n`,
+  );
+}
+
+/** An output file the server hands out as it is, or `null` before anything wrote it. */
+export async function readOutput(
+  root: string,
+  file: "layout.json" | "tla/Model.tla",
+): Promise<string | null> {
+  try {
+    return await readFile(join(root, OUTPUT_DIRECTORY, file), "utf8");
+  } catch (error) {
+    if (isMissing(error)) return null;
+    throw error;
+  }
+}
+
+/**
+ * Whether a change at `path` (root-relative, `/`) can change what a scan reads: the server's watcher
+ * asks only this. Under `.everypath/` only the scan's inputs count, so its own writes never start
+ * another scan. Elsewhere, outside the walk's ignored directories, a source file counts, and so does
+ * any JSON file (the config, the properties, every findings file wherever `findings` points) and any
+ * name without an extension, which may be a directory moved or removed with its files.
+ * `isDirectory` asks whether a poller should look inside.
+ */
+export function isScanInput(path: string, isDirectory = false): boolean {
+  if (path === OUTPUT_DIRECTORY || path.startsWith(`${OUTPUT_DIRECTORY}/`)) {
+    return isDirectory
+      ? [...OUTPUT_INPUTS].some((input) => input.startsWith(`${path}/`))
+      : OUTPUT_INPUTS.has(path);
+  }
+  if (path.split("/").some((name) => IGNORED_DIRECTORIES.has(name))) return false;
+  const extension = posix.extname(path);
+  return (
+    isDirectory || extension === "" || extension === ".json" || SOURCE_EXTENSIONS.has(extension)
+  );
 }
 
 /** Model.tla and Model.cfg in `.everypath/tla/`, for a person to open. `tla export` writes only these. */
@@ -272,10 +352,10 @@ async function readFindings(root: string, config: Config) {
 }
 
 async function readApprovals(root: string) {
-  const path = `${OUTPUT_DIRECTORY}/review.json`;
-  const file = await readJsonFile(join(root, path));
+  const file = await readJsonFile(join(root, REVIEW_FILE));
   const approvals = new Map<string, string>();
-  if (file.kind === "invalid") return { approvals, warnings: [unreadable(path, file.reason)] };
+  if (file.kind === "invalid")
+    return { approvals, warnings: [unreadable(REVIEW_FILE, file.reason)] };
   if (file.kind === "ok" && isRecord(file.value) && isRecord(file.value.approvals)) {
     for (const [id, approval] of Object.entries(file.value.approvals)) {
       const hash = isRecord(approval) ? asText(approval.hash) : null;

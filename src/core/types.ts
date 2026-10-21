@@ -277,6 +277,9 @@ export type Approval = {
   readonly note: string;
 };
 
+/** `.everypath/layout.json`: where the viewer drew each node, by node id. No scan reads it. */
+export type Layout = Readonly<Record<string, { readonly x: number; readonly y: number }>>;
+
 /** `.everypath/review.json`. Written by the viewer, read by the scanner. */
 export type ReviewFile = {
   readonly version: 1;

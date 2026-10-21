@@ -84,9 +84,20 @@ export async function analyze(
 
 /** SPEC §8. `analyze`, then writes `.everypath/graph.json` and, if something changed, `history.jsonl`. */
 export async function scan(root: string, options: ScanOptions = {}): Promise<Graph> {
+  return (await scanWithHistory(root, options)).graph;
+}
+
+/**
+ * `scan` that also returns the history line, which the server sends as an event's `diff`. The graph
+ * it writes is always the one it just analyzed, so no caller can write an older one.
+ */
+export async function scanWithHistory(
+  root: string,
+  options: ScanOptions = {},
+): Promise<{ readonly graph: Graph; readonly history: HistoryEntry | null }> {
   const { graph, history } = await analyze(root, options);
   await writeWorkspace(graph.root, graph, history);
-  return graph;
+  return { graph, history };
 }
 
 /** One file's bytes to its facts. Pure and per file, so every cross-file decision waits for `fold`. */

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { errorMessage } from "./core/json.js";
 import { PROPERTIES_FILE } from "./core/properties.js";
@@ -14,16 +16,21 @@ import {
 } from "./core/tla/run.js";
 import type { Counterexample, Graph, PropertyResult, ScanWarning } from "./core/types.js";
 import { serializeGraph } from "./core/workspace.js";
+import { startServer } from "./server/server.js";
 
 const USAGE = [
   "使い方: everypath scan [dir] [--json] [--quiet]",
   "        everypath check [dir] [--tlc [--timeout 秒]]",
   "        everypath tla export [dir]",
   "        everypath tla install",
+  "        everypath serve [dir] [--port 4747] [--open]",
 ].join("\n");
 const USAGE_ERROR = 2;
+const DEFAULT_PORT = 4747;
+/** `dist/ui.html` of this package, from `src/cli.ts` and from the built `dist/cli.js` alike. */
+const UI_PATH = fileURLToPath(new URL("../dist/ui.html", import.meta.url));
 
-type Label = "scan" | "check" | "tla export" | "tla install";
+type Label = "scan" | "check" | "tla export" | "tla install" | "serve";
 
 /** The options each command takes; `--help` goes with every one. */
 const ACCEPTS: Readonly<Record<Label, readonly string[]>> = {
@@ -31,6 +38,7 @@ const ACCEPTS: Readonly<Record<Label, readonly string[]>> = {
   check: ["tlc", "timeout"],
   "tla export": [],
   "tla install": [],
+  serve: ["port", "open"],
 };
 const OPTIONS: ReadonlySet<string> = new Set(["help", ...Object.values(ACCEPTS).flat()]);
 
@@ -47,6 +55,13 @@ type Command =
       readonly directory: string;
       /** `timeoutMs` is absent without `--timeout`: the run's own default applies. */
       readonly tlc: { readonly timeoutMs?: number } | null;
+    }
+  | {
+      readonly kind: "serve";
+      readonly directory: string;
+      /** 0 asks the system for a free port. */
+      readonly port: number;
+      readonly open: boolean;
     }
   | { readonly kind: "tla-export"; readonly directory: string }
   | { readonly kind: "tla-install"; readonly source: InstallSource | null };
@@ -111,6 +126,18 @@ function parseCheck(positionals: readonly string[], values: Values): Result<Comm
   return accept({ kind: "check", directory, tlc: { timeoutMs: Number(seconds) * 1000 } });
 }
 
+function parseServe(positionals: readonly string[], values: Values): Result<Command> {
+  const [, directory = ".", ...extra] = positionals;
+  if (extra.length > 0) return unknownCommand(positionals);
+  const refused = unaccepted("serve", values);
+  if (refused !== null) return refused;
+  const port = values.port ?? String(DEFAULT_PORT);
+  if (typeof port !== "string" || !/^\d+$/.test(port) || Number(port) > 65_535) {
+    return refuse("--port は 0 から 65535 の整数にしてください");
+  }
+  return accept({ kind: "serve", directory, port: Number(port), open: values.open === true });
+}
+
 /** Both variables or neither: a URL with no hash, or a hash with no URL, would install something unchecked or nothing. */
 function parseInstallSource(env: NodeJS.ProcessEnv): Result<InstallSource | null> {
   const url = env.EVERYPATH_TLA_URL ?? "";
@@ -167,6 +194,8 @@ function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Result<C
         quiet: { type: "boolean" },
         tlc: { type: "boolean" },
         timeout: { type: "string" },
+        port: { type: "string" },
+        open: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -184,6 +213,8 @@ function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Result<C
         return parseCheck(positionals, values);
       case "tla":
         return parseTla(positionals, values, env);
+      case "serve":
+        return parseServe(positionals, values);
       default:
         return unknownCommand(positionals);
     }
@@ -330,6 +361,8 @@ async function main(args: readonly string[]): Promise<number> {
       return runCheck(root, command.tlc);
     case "tla-export":
       return runExport(root);
+    case "serve":
+      return runServe(root, command);
   }
 }
 
@@ -379,6 +412,40 @@ async function runExport(root: string): Promise<number> {
   for (const { reason } of exported.rejected) process.stderr.write(`  警告 ${reason}\n`);
   process.stdout.write(`Model.tla と Model.cfg を ${exported.directory}/ に書きました\n`);
   return 0;
+}
+
+/** One line on stdout, the URL, then serves until SIGINT or SIGTERM. */
+async function runServe(
+  root: string,
+  { port, open }: Extract<Command, { readonly kind: "serve" }>,
+): Promise<number> {
+  const server = await startServer({ root, port, uiPath: UI_PATH });
+  process.stdout.write(`${server.url}\n`);
+  if (open) openBrowser(server.url);
+  await new Promise<void>((resolve) => {
+    const stop = (): void => {
+      process.off("SIGINT", stop);
+      process.off("SIGTERM", stop);
+      resolve();
+    };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+  });
+  await server.close();
+  return 0;
+}
+
+/** `--open`. A missing opener leaves the printed URL to click. */
+function openBrowser(url: string): void {
+  const [command, args] =
+    process.platform === "darwin"
+      ? ["open", [url]]
+      : process.platform === "win32"
+        ? ["cmd", ["/c", "start", "", url]]
+        : ["xdg-open", [url]];
+  spawn(command, args, { stdio: "ignore", detached: true })
+    .on("error", () => {})
+    .unref();
 }
 
 async function runInstall(source: InstallSource | null): Promise<number> {
