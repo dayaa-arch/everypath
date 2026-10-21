@@ -266,6 +266,8 @@ set    := VAR "=" VALUE ("," VAR "=" VALUE)*       ; VALUE は TRUE/FALSE/整数
 
 ### 6.1 `.everypath/graph.json`
 
+`guard`・`set`・`model.vars` の実際の形と、まだ書かないフィールドは `docs/specs/scan.md` の「データの形」が優先する。
+
 ```jsonc
 {
   "version": 1,
@@ -766,7 +768,7 @@ src/auth/reset.ts（機能: パスワードリセット）を修正してくだ�
 1. **ルートとノードの対応づけ**: 観測遷移で `/reset` → 「パスワードリセット」を結ぶのに `@state-route /reset` を必須にするか、Next.js の `pages/` 構造から自動推定するか。推奨: タグ必須で始め、フレームワーク検出は後から足す。
 2. **TLA+ の識別子**: 非 ASCII の状態名を連番識別子に落とす（§10.1）方針で良いか。生成 TLA+ の可読性を優先するならローマ字化も検討。推奨: 連番 + コメントで表示名。
 3. **イベントの発生モデル**: イベントは「いつでも起きうる」（環境が非決定的に選ぶ）として生成する。ユーザー操作系はそれで正しいが、システム内部イベント（タイマー、API 応答）も同じ扱いで始めてよいか。推奨: 同じ扱いで始め、必要になったら `@state-event` に `kind:` を足す。
-4. **ノード id の衝突**: `@state` 未指定のファイル名が別ディレクトリで重複したとき、`dir/name` にするか警告を出すか。推奨: 衝突時のみ `dir/name`。
+4. ~~ノード id の衝突~~ → 決定済み（`docs/specs/scan.md`）: 衝突したファイルだけパス由来の id（`src/a/utils.ts` は `src_a_utils`）にする。`dir/name` は状態名の識別子規則に合わないため、区切りも `_` に置き換える。
 5. **レイアウト安定の「空き地探索」アルゴリズム**: 親の直下 → 右 → 左 の順に 1 グリッド（20px）刻みで衝突判定、で十分か。
 6. ~~review.json を git 管理させるか~~ → 決定済み（`docs/decisions/0003-review-json-in-git.md`）: 常に git 管理。`init` は `.gitignore` に `.everypath/*` と `!.everypath/review.json` を書き、聞かない。
 7. ~~ダークモード~~ → 決定済み（`docs/REQUIREMENTS.md` 非目標）: やらない。色が意味を持つ UI なので配色を 2 系統維持しない。
