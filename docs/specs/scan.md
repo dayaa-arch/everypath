@@ -16,10 +16,10 @@
 - [ ] 9. エッジ。ファイル間 import をノード間の dep に集約し、自己ループを除く。flow は自己ループを許す。from・to・宣言文が同じ flow は 1 本にまとめ、`via` を合わせる。存在しない遷移先は `status.planned: true` のノードになる（`test/scan.test.ts`）
 - [ ] 10. モデル。全ファイルの `@state-var` を `model.vars` に集める。同じ宣言の重複は 1 つにまとめ、食い違えば警告して先のファイルを採る。未宣言の変数や型の合わない値を使う `if:`・`set:` は警告して、ガード無し・代入無しにする。`model.events` は `on:` と `@state-event` の和集合、`model.initial` は `@state-initial` のノードで、2 つ以上なら警告して先のファイルを採る（`test/scan.test.ts`）
 - [ ] 11. `hash` は、ノードのファイル内容を相対パス順に連結した sha1 になる（`test/scan.test.ts` で `node:crypto` から期待値を計算）
-- [ ] 12. findings と risks。semgrep 形式と bandit 形式を共通形にしてファイルのノードに付け、`status.vuln` を true にする。探す順は `config.findings`、`everypath.findings.json`、`.everypath/findings.json`、`semgrep.json`、`bandit.json`。`@state-risk` は `risks[]` になる（`test/scan.test.ts`）
+- [ ] 12. findings と risks。semgrep 形式と bandit 形式を共通形にしてファイルのノードに付け（semgrep の `ERROR`・`WARNING`・`INFO` は `high`・`medium`・`low`、パス先頭の `./` と絶対パスはルート相対に直す）、`status.vuln` を true にする。探す順は `config.findings`、`everypath.findings.json`、`.everypath/findings.json`、`semgrep.json`、`bandit.json`。`@state-risk` は `risks[]` になる（`test/scan.test.ts`）
 - [ ] 13. `review.json` の hash が一致すれば `reviewed: true`、不一致なら `changedSinceReview: true` になる（`test/scan.test.ts`）
-- [ ] 14. 2 回目のスキャンで hash が同じノードは前回の `lastChangedAt` を引き継ぎ、変わったノードは今の時刻になる。`history.jsonl` には差分のあるスキャンだけが 1 行追記される（`test/scan.test.ts`）
-- [ ] 15. CLI。`everypath scan [dir] [--json] [--quiet]` は警告があっても exit 0 で、`--json` の標準出力は graph.json と同じ JSON になる。存在しないディレクトリは exit 2（`test/cli.test.ts`）
+- [ ] 14. 2 回目のスキャンで hash が同じノードは前回の `lastChangedAt` を引き継ぎ、変わったノードは今の時刻になる。`history.jsonl` には差分のあるスキャンだけが 1 行追記される。`reason` の既定値は `scan`（`test/scan.test.ts`）
+- [ ] 15. CLI。`everypath scan [dir] [--json] [--quiet]` は警告があっても exit 0 で、`--json` の標準出力は graph.json と同じ JSON になる。`--quiet` は標準出力と標準エラーに何も出さない。`dir` の既定はカレントディレクトリ。存在しないディレクトリと未知のコマンドは exit 2（`test/cli.test.ts`）
 - [ ] 16. 小さな fixture リポジトリで `npx tsx src/cli.ts scan` を実行し、出力の `graph.json` を読んで中身を確かめる（手で実行し、返答に要点を貼る）
 
 ## データの形
@@ -47,7 +47,7 @@ declare function scan(root: string, options?: { now?: Date; reason?: string }): 
 ```
 表し方: ファイルごとの抽出結果（`FileFacts`）を作る段と、それをノード・エッジ・モデルに畳む純粋な段の 2 段のパイプライン。理由: §8 の手順がそのまま関数の並びになり、読み書きは `scan()` の入口と出口に集まる。
 
-パスはルートからの相対で `/` 区切り。`nodes` は id 順、`edges` は type・from・to・event・text 順、`warnings` は file・line 順に並べ、同じ入力から同じ JSON を出す（`generatedAt` と `lastChangedAt` を除く）。`model.initial` は `@state-initial` だけから決める。`properties.entry` と「入エッジの無い状態」への後退は、§9 と TLA+ 生成が読む側で行う。`@state-hidden` のファイルは何も出さない。ファイル名の置換は、識別子に使えない文字を `_` に、数字で始まれば先頭に `_` を、予約語なら末尾に `_` を付ける（`SPEC.md` §17.4 もこの規則で決める）。
+パスはルートからの相対で `/` 区切り。`nodes` は id 順、`edges` は type・from・to・event・text 順、`warnings` は file・line 順、`model.vars` は最初に宣言したファイルと行の順、`model.events` は名前順に並べ、同じ入力から同じ JSON を出す（`generatedAt` と `lastChangedAt` を除く）。`model.initial` は `@state-initial` だけから決める。`properties.entry` と「入エッジの無い状態」への後退は、§9 と TLA+ 生成が読む側で行う。`@state-hidden` のファイルは何も出さない。`lines` は末尾の改行を数えない行数の和。ファイル名の置換は、識別子に使えない文字を `_` に、数字で始まれば先頭に `_` を、予約語なら末尾に `_` を付ける（`SPEC.md` §17.4 もこの規則で決める）。
 
 ## 非目標
 - §9 の簡易検査と `properties`・`violations` の計算。`violations` は常に `[]` を書く
