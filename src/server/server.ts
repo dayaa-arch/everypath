@@ -67,7 +67,12 @@ export async function startServer({
   const watcher = watchRepository(root, () => {
     void opening.then((writer) => writer.submit({ kind: "rescan", reason: "watch" })).catch(report);
   });
+  /** A page served by this server sends one of these; any other page is someone else's. */
+  const ownOrigins: ReadonlySet<string> = new Set(
+    ["localhost", "127.0.0.1"].map((host) => `http://${host}:${listening}`),
+  );
   http.on("request", (request: IncomingMessage, response: ServerResponse) => {
+    response.setHeader("x-content-type-options", "nosniff");
     void opening
       .then((writer) => route(writer, request, response))
       .catch((error: unknown) => send(response, 500, errorMessage(error)));
@@ -142,6 +147,10 @@ export async function startServer({
       return send(response, 403, "localhost か 127.0.0.1 で開いてください");
     }
     const method = request.method ?? "GET";
+    const origin = request.headers.origin;
+    if (method !== "GET" && origin !== undefined && !ownOrigins.has(origin)) {
+      return send(response, 403, "このサーバーが配ったページからだけ受け付けます");
+    }
     if (method !== "GET" && !isJson(request)) {
       return send(response, 415, "Content-Type: application/json で送ってください");
     }
@@ -413,7 +422,10 @@ function answer(response: ServerResponse, result: JobResult): void {
   send(response, status, body);
 }
 
+/** The viewer may not be framed by another page, nor have its relative URLs moved by a `<base>`. */
 async function sendViewer(response: ServerResponse, uiPath: string): Promise<void> {
+  response.setHeader("content-security-policy", "frame-ancestors 'none'; base-uri 'none'");
+  response.setHeader("x-frame-options", "DENY");
   try {
     send(response, 200, await readFile(uiPath, "utf8"), "text/html; charset=utf-8");
   } catch (error) {

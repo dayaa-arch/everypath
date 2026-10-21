@@ -794,6 +794,39 @@ describe("serve: request bodies", () => {
   });
 });
 
+/** The response headers of a GET, without waiting for the body, which `/events` never ends. */
+function headersOf(
+  serve: { readonly url: string },
+  path: string,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const outgoing = get(new URL(path, serve.url), (response) => {
+      resolve({ status: response.statusCode, ...response.headers });
+      outgoing.destroy();
+    });
+    outgoing.on("error", (error) => {
+      if (!outgoing.destroyed) reject(error);
+    });
+  });
+}
+
+describe("serve: response headers", () => {
+  it("sends nosniff on every response, and refuses framing and <base> on GET /", async () => {
+    const root = await makeRepo(small);
+    const serve = await serveRepo(root);
+
+    for (const path of ["/", "/graph.json", "/events", "/layout.json", "/nowhere"]) {
+      const headers = await headersOf(serve, path);
+      assert.equal(headers["x-content-type-options"], "nosniff", path);
+    }
+    const rescan = await request(serve, "POST", "/rescan");
+    assert.equal(rescan.headers.get("x-content-type-options"), "nosniff");
+    const viewer = await headersOf(serve, "/");
+    assert.equal(viewer["content-security-policy"], "frame-ancestors 'none'; base-uri 'none'");
+    assert.equal(viewer["x-frame-options"], "DENY");
+  });
+});
+
 describe("serve: guards on state-changing requests", () => {
   const note = JSON.stringify({ note: "x" });
   const layout = JSON.stringify({ Home: { x: 1, y: 2 } });
@@ -852,6 +885,34 @@ describe("serve: guards on state-changing requests", () => {
     for (const host of [`localhost:${port}`, `127.0.0.1:${port}`]) {
       const reply = await rawRequest(serve, "POST", reviewPath("Home"), { ...json, host }, note);
       assert.ok(succeeded(reply), `${host} -> ${reply.status} ${reply.text}`);
+    }
+  });
+
+  it("answers 403 to a state-changing request whose Origin is not this server", async () => {
+    const root = await makeRepo(small);
+    const serve = await serveRepo(root);
+    const json = { "content-type": "application/json" };
+    const port = Number(new URL(serve.url).port);
+    const strangers = ["http://evil.example", "null", `http://localhost:${port + 1}`];
+
+    for (const origin of strangers) {
+      for (const [method, path, body] of [
+        ["POST", reviewPath("Home"), note],
+        ["DELETE", reviewPath("Home"), ""],
+        ["PUT", "/layout.json", layout],
+        ["POST", "/rescan", ""],
+        ["POST", "/check/tlc", ""],
+      ] as const) {
+        const reply = await rawRequest(serve, method, path, { ...json, origin }, body);
+        assert.equal(reply.status, 403, `${method} ${path} from ${origin} -> ${reply.status}`);
+      }
+    }
+    assert.deepEqual((await readReview(root)).approvals, {});
+    await assert.rejects(readOutput(root, "layout.json"), { code: "ENOENT" });
+
+    for (const origin of [`http://localhost:${port}`, `http://127.0.0.1:${port}`]) {
+      const reply = await rawRequest(serve, "POST", reviewPath("Home"), { ...json, origin }, note);
+      assert.ok(succeeded(reply), `${origin} -> ${reply.status} ${reply.text}`);
     }
   });
 });
