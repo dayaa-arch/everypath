@@ -54,7 +54,7 @@ export const EXAMPLE_NAMES = {
   },
 } as const;
 
-const EVENT_IDS = new Map(
+const EVENT_IDS = new Map<string, string>(
   Object.entries(EXAMPLE_NAMES.events).flatMap(([id, name]) => (name === null ? [] : [[name, id]])),
 );
 

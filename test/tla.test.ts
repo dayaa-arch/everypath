@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { PROPERTIES_FILE } from "../src/core/properties.js";
-import { analyze } from "../src/core/scan.js";
+import { analyze, scan } from "../src/core/scan.js";
 import { generateTla, type TlaNames } from "../src/core/tla/generate.js";
 import { parseTlcOutput } from "../src/core/tla/parse.js";
 import type { Graph, PropertyResult } from "../src/core/types.js";
@@ -247,6 +247,26 @@ const TRANSLATED: readonly (readonly [string, string])[] = [
 ];
 
 describe("tla: generating Model.tla and Model.cfg", () => {
+  it("starts from analyze, which folds the repository exactly as scan does and writes nothing", async () => {
+    const root = await exampleRepo();
+    const now = new Date("2026-10-21T00:00:00.000Z");
+
+    const analyzed = await analyze(root, { now });
+
+    assert.deepEqual((await readdir(root)).sort(), [
+      "README.md",
+      "everypath.properties.json",
+      "src",
+      "test",
+    ]);
+    assert.deepEqual(analyzed.graph, await scan(root, { now }));
+    assert.deepEqual(
+      analyzed.properties.properties.map((p) => p.id),
+      ["no-unauth-home", "lock-after-3", "logout-eventually-login", "no-dead-end"],
+    );
+    assert.equal(analyzed.history?.reason, "scan");
+  });
+
   it("writes the example as ASCII identifiers with the display names in comments", async () => {
     const { graph, properties } = await analyze(await exampleRepo());
     const generated = generateTla(graph, properties);
@@ -574,15 +594,15 @@ describe("tla: running TLC and merging its verdicts", () => {
 
     assert.equal(result.status, 1, result.stderr);
     assert.deepEqual(await java.cfgs(), EXPECTED_EXAMPLE_RUNS);
-    const [first] = await java.calls();
-    assert.ok(first?.split(" ")[0]?.endsWith(join(".everypath", "tla")), first);
+    const first = (await java.calls())[0] ?? "";
+    assert.ok(first.split(" ")[0]?.endsWith(join(".everypath", "tla")), first);
     assert.ok(
-      first?.includes(
+      first.includes(
         `-XX:+UseParallelGC -jar ${java.jar} -workers auto -deadlock -config Model.cfg -metadir `,
       ),
       first,
     );
-    assert.ok(first?.endsWith(" Model.tla"), first);
+    assert.ok(first.endsWith(" Model.tla"), first);
     const directory = join(root, ".everypath", "tla");
     assert.equal(await readFile(join(directory, "Model.cfg"), "utf8"), EXPECTED_EXAMPLE_CFG);
     assert.equal(await readFile(join(directory, "Model.tla"), "utf8"), EXPECTED_EXAMPLE_TLA);
@@ -669,8 +689,9 @@ describe("tla: running TLC and merging its verdicts", () => {
     assert.equal(result.status, 1);
     const cfgs = await java.cfgs();
     assert.equal(cfgs.length, 3);
-    assert.ok(cfgs[1]?.includes("CONSTRAINT TypeOK"), cfgs[1]);
-    assert.ok(!cfgs[1]?.includes("INVARIANT TypeOK"), cfgs[1]);
+    const second = cfgs[1] ?? "";
+    assert.ok(second.includes("CONSTRAINT TypeOK"), second);
+    assert.ok(!second.includes("INVARIANT TypeOK"), second);
     const stored = await readResult(root);
     assert.equal(stored.typeOk.steps.length, 3);
     assert.ok(

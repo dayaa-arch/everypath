@@ -237,6 +237,7 @@ describe("properties: never-reach", () => {
     assert.equal(nr.result, "violated");
     assert.deepEqual(paths(nr), [["ログイン", "Home", "ログアウト"]]);
     assert.deepEqual(events(nr), [null, "login_ok", "logout"]);
+    assert.equal(nr.counterexamples[0]?.loopStart, null);
     assert.deepEqual(
       nr.counterexamples[0]?.steps.map((s) => s.state),
       nr.counterexamples[0]?.path,

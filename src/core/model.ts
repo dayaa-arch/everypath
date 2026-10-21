@@ -77,7 +77,7 @@ function checkGuard(expr: GuardExpr, vars: VarTable): string | null {
   }
 }
 
-function checkComparison({ name, op, value }: Comparison, vars: VarTable): string | null {
+export function checkComparison({ name, op, value }: Comparison, vars: VarTable): string | null {
   const decl = vars.get(name);
   if (decl === undefined) return undeclared(name);
   if (op === "==" || op === "!=") {
