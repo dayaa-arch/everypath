@@ -1,0 +1,65 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 112 and seed 846475095831473479 with 8 workers on 8 cores with 4096MB heap and 64MB offheap memory [pid: 95111] (Mac OS X 15.7.4 aarch64, Eclipse Adoptium 17.0.8.1 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /work/example/.everypath/tla/Model.tla
+Parsing file /tmp/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module Model
+Starting... (2026-10-21 23:01:46)
+Implied-temporal checking--satisfiability problem has 1 branches.
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-21 23:01:46.
+Progress(9) at 2026-10-21 23:01:46: 113 states generated, 47 distinct states found, 0 states left on queue.
+Checking temporal properties for the complete state space with 47 total distinct states at (2026-10-21 23:01:46)
+Error: Temporal properties were violated.
+
+Error: The following behavior constitutes a counter-example:
+
+State 1: <Initial predicate>
+/\ state = "S6"
+/\ lastEvent = "tau"
+/\ authed = FALSE
+/\ retries = 0
+
+State 2: <T2 line 25, col 7 to line 25, col 128 of module Model>
+/\ state = "S6"
+/\ lastEvent = "login_fail"
+/\ authed = FALSE
+/\ retries = 1
+
+State 3: <T2 line 25, col 7 to line 25, col 128 of module Model>
+/\ state = "S6"
+/\ lastEvent = "login_fail"
+/\ authed = FALSE
+/\ retries = 2
+
+State 4: <T5 line 28, col 7 to line 28, col 89 of module Model>
+/\ state = "S3"
+/\ lastEvent = "tau"
+/\ authed = FALSE
+/\ retries = 2
+
+State 5: <T10 line 33, col 8 to line 33, col 102 of module Model>
+/\ state = "S2_Home"
+/\ lastEvent = "reset_done"
+/\ authed = FALSE
+/\ retries = 2
+
+State 6: <T6 line 29, col 7 to line 29, col 102 of module Model>
+/\ state = "S4"
+/\ lastEvent = "open_mypage"
+/\ authed = FALSE
+/\ retries = 2
+
+State 7: <T7 line 30, col 7 to line 30, col 95 of module Model>
+/\ state = "S2_Home"
+/\ lastEvent = "back"
+/\ authed = FALSE
+/\ retries = 2
+
+Back to state 6: <T6 line 29, col 7 to line 29, col 102 of module Model>
+
+Finished checking temporal properties in 00s at 2026-10-21 23:01:46
+113 states generated, 47 distinct states found, 0 states left on queue.
+Finished in 00s at (2026-10-21 23:01:46)
