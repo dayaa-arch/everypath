@@ -621,7 +621,10 @@ describe("tla: running TLC and merging its verdicts", () => {
     assert.equal(result.status, 1, result.stderr);
     assert.deepEqual(await java.cfgs(), EXPECTED_EXAMPLE_RUNS);
     const first = (await java.calls())[0] ?? "";
-    assert.ok(first.split(" ")[0]?.endsWith(join(".everypath", "tla")), first);
+    assert.ok(
+      !(first.split(" ")[0] ?? root).startsWith(root),
+      `TLC runs outside the repository: ${first}`,
+    );
     assert.ok(
       first.includes(
         `-XX:+UseParallelGC -jar ${java.jar} -workers auto -deadlock -config Model.cfg -metadir `,
