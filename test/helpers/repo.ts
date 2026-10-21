@@ -37,9 +37,10 @@ export async function readGraph(root: string): Promise<Graph> {
   return JSON.parse(await readFile(join(root, ".everypath", "graph.json"), "utf8")) as Graph;
 }
 
-export function runCli(args: readonly string[], cwd = repoRoot) {
+export function runCli(args: readonly string[], cwd = repoRoot, env = process.env) {
   const result = spawnSync(process.execPath, ["--import", tsx, cli, ...args], {
     cwd,
+    env,
     encoding: "utf8",
   });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
