@@ -144,8 +144,8 @@ function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Gra
   };
   const shape = { nodes: built, edges, model: graphModel };
   const checked = checkProperties(shape, workspace.properties, at);
-  const settled = withTlcResults(shape, workspace.properties, checked.properties, workspace.tlc);
-  const violations = violationsOf(settled.properties);
+  const properties = withTlcResults(shape, workspace.properties, checked.properties, workspace.tlc);
+  const violations = violationsOf(properties);
   const nodes = built.map((node) => ({ ...node, violations: violations.get(node.id) ?? [] }));
   const real = nodes.filter((node) => !node.status.planned);
 
@@ -167,14 +167,13 @@ function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Gra
     nodes,
     edges,
     model: graphModel,
-    properties: settled.properties,
+    properties,
     warnings: [
       ...workspace.warnings,
       ...facts.flatMap((file) => file.warnings),
       ...model.warnings,
       ...flows.warnings,
       ...checked.warnings,
-      ...settled.warnings,
     ].sort(compareWarnings),
   };
 }

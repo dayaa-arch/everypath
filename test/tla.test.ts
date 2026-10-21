@@ -814,10 +814,10 @@ describe("tla: running TLC and merging its verdicts", () => {
     const typo = resultOf(graph, "typo");
     assert.deepEqual([typo.checkedBy, typo.result, typo.statesExplored], ["tlc", "pending", null]);
     assert.ok(!stored.properties.some((p: PropertyResult) => p.id === "typo"));
-    const warnings = graph.warnings.filter((w) => w.file === PROPERTIES_FILE);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0]?.message ?? "", /typo/);
-    assert.match(warnings[0]?.message ?? "", /retriez/);
+    const warnings = result.stderr.split("\n").filter((line) => line.includes(PROPERTIES_FILE));
+    assert.equal(warnings.length, 1, result.stderr);
+    assert.match(warnings[0] ?? "", /typo/);
+    assert.match(warnings[0] ?? "", /retriez/);
     assert.equal(resultOf(graph, "no-unauth-home").result, "violated");
     assert.ok(!Object.values(stored.names.checks).includes("typo"));
   });
@@ -974,5 +974,33 @@ describe("tla: a stored verdict only fills what the quick check left pending", (
     assert.deepEqual([lock.result, lock.checkedBy], ["violated", "bfs"]);
     const home = resultOf(graph, "no-unauth-home");
     assert.deepEqual([home.result, home.checkedBy], ["ok", "tlc"]);
+  });
+});
+
+describe("tla: definitions the model leaves out", () => {
+  const rejectedWarning = /typo.*TLA\+ にできません|TLA\+ にできません.*retriez/;
+
+  it("are warned about by check --tlc and tla export only, so a plain check exits the same with or without result.json", async () => {
+    const root = await exampleRepo();
+    await addProperty(root, { id: "typo", kind: "invariant", expr: "retriez <= 3" });
+    const before = runCli(["check", root]);
+    const java = await fakeJava({ rules: [], otherwise: { output: await fixture("ok") } });
+
+    const checked = runCli(["check", "--tlc", root], root, java.env);
+    const exported = runCli(["tla", "export", root]);
+    const after = runCli(["check", root]);
+
+    assert.equal(checked.status, 1, checked.stdout);
+    assert.match(checked.stderr, rejectedWarning);
+    assert.match(exported.stderr, rejectedWarning);
+    assert.equal(before.status, 0, `${before.stdout}\n${before.stderr}`);
+    assert.equal(after.status, before.status, `${after.stdout}\n${after.stderr}`);
+    assert.doesNotMatch(after.stderr, rejectedWarning);
+    const scanned = runCli(["scan", "--json", "--quiet", root]);
+    const graph: Graph = JSON.parse(scanned.stdout);
+    assert.ok(
+      !graph.warnings.some((w) => /TLA\+ にできません/.test(w.message)),
+      JSON.stringify(graph.warnings),
+    );
   });
 });

@@ -35,7 +35,12 @@ export type TlcOutcome =
   | { readonly kind: "missing"; readonly guide: readonly string[] }
   /** No model could be generated, so TLC never ran. */
   | { readonly kind: "unmodeled"; readonly reason: string }
-  | { readonly kind: "checked"; readonly record: TlcRecord };
+  /** `rejected`: the definitions the model left out, which got no verdict. */
+  | {
+      readonly kind: "checked";
+      readonly record: TlcRecord;
+      readonly rejected: TlaModel["rejected"];
+    };
 
 /**
  * `$EVERYPATH_TLA_JAR`, else `~/.everypath/tla2tools.jar`. Where both `check --tlc` and `tla install`
@@ -85,7 +90,7 @@ export async function runTlc(
       states: outcome.states,
       error: outcome.error,
     };
-    return { kind: "checked", record };
+    return { kind: "checked", record, rejected: model.rejected };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

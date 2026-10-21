@@ -126,7 +126,10 @@ export function parseStoredVerdicts(raw: unknown): StoredVerdicts | null {
   return { key, byId };
 }
 
-/** One properties-file warning per definition the model leaves out; a warning there fails the check. */
+/**
+ * One properties-file warning per definition the model leaves out; a warning there fails the check.
+ * Only `check --tlc` and `tla export` say this: a plain scan does not depend on whether TLC ever ran.
+ */
 export function rejectionWarnings({ rejected }: Pick<TlaModel, "rejected">): ScanWarning[] {
   return rejected.map(({ reason }) => ({
     file: PROPERTIES_FILE,
@@ -153,14 +156,13 @@ export function withTlcResults(
   file: PropertiesFile,
   quick: readonly PropertyResult[],
   stored: StoredVerdicts | null,
-): { readonly properties: readonly PropertyResult[]; readonly warnings: readonly ScanWarning[] } {
-  if (stored === null) return { properties: quick, warnings: [] };
+): readonly PropertyResult[] {
+  if (stored === null) return quick;
   const generated = generateTla(graph, file);
   const fresh = generated.ok && modelKey(generated.model) === stored.key;
-  const properties = quick.map((result): PropertyResult => {
+  return quick.map((result): PropertyResult => {
     const verdict = stored.byId.get(result.id);
     if (verdict === undefined || verdict.kind !== result.kind || !awaitsTlc(result)) return result;
     return fresh ? { ...result, ...verdict } : { ...result, ...verdict, staleModel: true };
   });
-  return { properties, warnings: generated.ok ? rejectionWarnings(generated.model) : [] };
 }

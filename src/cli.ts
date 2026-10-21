@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 import { errorMessage } from "./core/json.js";
 import { PROPERTIES_FILE } from "./core/properties.js";
 import { scan } from "./core/scan.js";
+import { rejectionWarnings } from "./core/tla/result.js";
 import {
   checkTlc,
   exportTla,
@@ -292,7 +293,10 @@ function describeProperty({
   return [title, ...stale, ...counterexamples.flatMap(describe)];
 }
 
-function summarizeChecks({ properties, warnings }: Graph): string {
+function summarizeChecks(
+  properties: Graph["properties"],
+  warnings: readonly ScanWarning[],
+): string {
   const counts = Object.entries(STATUS_WORDS).flatMap(([result, word]) => {
     const count = properties.filter((p) => p.result === result).length;
     return count > 0 ? [`${word} ${count}`] : [];
@@ -308,9 +312,13 @@ function summarizeChecks({ properties, warnings }: Graph): string {
 }
 
 /** `extra` is what only TLC can say, printed before the count. */
-function reportChecks(graph: Graph, extra: readonly string[]): string[] {
-  if (graph.properties.length === 0) return [`性質がありません（${PROPERTIES_FILE}）`, ...extra];
-  return [...graph.properties.flatMap(describeProperty), ...extra, summarizeChecks(graph)];
+function reportChecks(
+  { properties }: Graph,
+  warnings: readonly ScanWarning[],
+  extra: readonly string[],
+): string[] {
+  if (properties.length === 0) return [`性質がありません（${PROPERTIES_FILE}）`, ...extra];
+  return [...properties.flatMap(describeProperty), ...extra, summarizeChecks(properties, warnings)];
 }
 
 /** What only TLC can say: a variable out of its range, and its error. `null` when TLC did not fail. */
@@ -381,10 +389,10 @@ async function runScan(
 
 /**
  * A property the file defines but the check could not read fails the run too, so CI never passes it
- * silently. So does any TLC error, which includes a property TLC could not decide, and a variable
- * out of its range. With `--tlc` but no Java or jar the quick check alone decides the exit code.
- * The scan reads TLC's record, so a plain check also counts the last run's violations, unless the
- * model has changed since.
+ * silently. Under `--tlc` so does a definition the model left out, and any TLC error, which includes
+ * a property TLC could not decide, and a variable out of its range. With `--tlc` but no Java or jar
+ * the quick check alone decides the exit code. The scan reads TLC's record, so a plain check also
+ * counts the last run's violations, unless the model has changed since.
  */
 async function runCheck(
   root: string,
@@ -392,13 +400,17 @@ async function runCheck(
 ): Promise<number> {
   const outcome = tlc === null ? null : await checkTlc(root, tlc);
   const graph = await scan(root, { reason: "check" });
-  const stderr = graph.warnings.map(describeWarning);
+  const warnings = [
+    ...graph.warnings,
+    ...(outcome?.kind === "checked" ? rejectionWarnings(outcome) : []),
+  ];
+  const stderr = warnings.map(describeWarning);
   const failure = tlcFailure(outcome);
   if (outcome?.kind === "missing") stderr.push(...outcome.guide);
   if (stderr.length > 0) process.stderr.write(`${stderr.join("\n")}\n`);
-  process.stdout.write(`${reportChecks(graph, failure ?? []).join("\n")}\n`);
+  process.stdout.write(`${reportChecks(graph, warnings, failure ?? []).join("\n")}\n`);
 
-  const rejected = graph.warnings.some((warning) => warning.file === PROPERTIES_FILE);
+  const rejected = warnings.some((warning) => warning.file === PROPERTIES_FILE);
   const violated = graph.properties.some((p) => p.result === "violated" && !p.staleModel);
   return rejected || violated || failure !== null ? 1 : 0;
 }
