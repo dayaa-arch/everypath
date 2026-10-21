@@ -16,7 +16,9 @@ export async function exampleRepo(): Promise<string> {
 }
 
 /** A real TLC 2.19 output captured from a hand-written model of `example/`. */
-export function fixture(name: "violation" | "ok" | "liveness" | "stuttering" | "parse-error") {
+export function fixture(
+  name: "violation" | "ok" | "liveness" | "stuttering" | "parse-error" | "initial",
+) {
   return readFile(join(repoRoot, "test", "fixtures", `tlc-output-${name}.txt`), "utf8");
 }
 

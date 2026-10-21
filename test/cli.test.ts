@@ -222,6 +222,37 @@ describe("everypath check --tlc", () => {
     assert.ok(result.stdout.includes("  3. →(reset_done) Home（authed=FALSE, retries=0）"));
   });
 
+  it("prints no parentheses for a model without variables", async () => {
+    const root = await makeRepo({
+      "src/a.ts": ts("@state A", "@state-initial", "@state-next B on:go"),
+      "src/b.ts": ts("@state B"),
+      "everypath.properties.json": JSON.stringify({
+        properties: [{ id: "reach-b", kind: "leads-to", from: "state == A", to: "state == B" }],
+      }),
+    });
+    const java = await fakeJava({
+      rules: [],
+      otherwise: {
+        output: [
+          "Error: Temporal properties were violated.",
+          "Error: The following behavior constitutes a counter-example:",
+          "State 1: <Initial predicate>",
+          '/\\ state = "S1_A"',
+          '/\\ lastEvent = "tau"',
+          "",
+          "State 2: Stuttering",
+          "",
+        ].join("\n"),
+        exit: 13,
+      },
+    });
+
+    const result = runCli(["check", "--tlc", root], root, java.env);
+
+    assert.equal(result.status, 1, result.stderr);
+    assert.ok(result.stdout.includes("違反 reach-b [leads-to]\n  1. A\n  → 1 に戻って繰り返す\n"));
+  });
+
   it("is not run by a plain check", async () => {
     const root = await exampleRepo();
     const java = await fakeJava({ rules: [], otherwise: { output: await fixture("ok") } });

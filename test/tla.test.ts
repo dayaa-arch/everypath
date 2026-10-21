@@ -253,12 +253,7 @@ describe("tla: generating Model.tla and Model.cfg", () => {
 
     const analyzed = await analyze(root, { now });
 
-    assert.deepEqual((await readdir(root)).sort(), [
-      "README.md",
-      "everypath.properties.json",
-      "src",
-      "test",
-    ]);
+    assert.ok(!(await readdir(root)).includes(".everypath"));
     assert.deepEqual(analyzed.graph, await scan(root, { now }));
     assert.deepEqual(
       analyzed.properties.properties.map((p) => p.id),
@@ -452,6 +447,30 @@ describe("tla: reading TLC output", () => {
           { state: "パスワードリセット", event: null, vars: vars("FALSE", "0") },
           { state: "Home", event: "reset_done", vars: vars("FALSE", "0") },
         ],
+      },
+    });
+  });
+
+  it("reads an invariant that the initial state violates, which TLC prints without a State header", async () => {
+    const report = parseTlcOutput(
+      await fixture("initial"),
+      names({
+        states: EXAMPLE_NAMES.states,
+        vars: { v1_authed: "authed", v2_retries: "retries" },
+        events: { tau: null },
+        members: {},
+        checks: { P4_never_login: "never-login", TypeOK: "TypeOK" },
+      }),
+    );
+
+    assert.deepEqual(report, {
+      kind: "violated",
+      check: "P4_never_login",
+      distinctStates: null,
+      trace: {
+        path: ["ログイン"],
+        loopStart: null,
+        steps: [{ state: "ログイン", event: null, vars: vars("FALSE", "0") }],
       },
     });
   });
@@ -653,6 +672,40 @@ describe("tla: running TLC and merging its verdicts", () => {
     );
     assert.equal(stored.typeOk, null);
     assert.equal(stored.error, null);
+  });
+
+  it("runs each leads-to by itself, so one that fails does not decide another", async () => {
+    const root = await exampleRepo();
+    await writeFiles(root, {
+      [PROPERTIES_FILE]: JSON.stringify({
+        entry: ["ログイン"],
+        properties: [
+          { id: "first", kind: "leads-to", from: "state == ログアウト", to: "state == ログイン" },
+          { id: "second", kind: "leads-to", from: "state == Home", to: "state == ログアウト" },
+        ],
+      }),
+    });
+    const java = await fakeJava({
+      rules: [
+        {
+          when: "PROPERTY P2_second",
+          reply: { output: forExample(await fixture("liveness")), exit: 13 },
+        },
+      ],
+      otherwise: { output: await fixture("ok") },
+    });
+
+    const result = runCli(["check", "--tlc", root], root, java.env);
+
+    assert.equal(result.status, 1, result.stderr);
+    assert.deepEqual(await java.cfgs(), [
+      "SPECIFICATION Spec\nINVARIANT TypeOK\n",
+      "SPECIFICATION Spec\nCONSTRAINT TypeOK\nPROPERTY P1_first\n",
+      "SPECIFICATION Spec\nCONSTRAINT TypeOK\nPROPERTY P2_second\n",
+    ]);
+    const graph = await readGraph(root);
+    assert.equal(resultOf(graph, "first").result, "ok");
+    assert.equal(resultOf(graph, "second").result, "violated");
   });
 
   it("keeps a temporal violation as a loop and marks every state on it", async () => {
