@@ -1,0 +1,30 @@
+{
+  "entry": ["ログイン"],
+  "properties": [
+    {
+      "id": "no-unauth-home",
+      "kind": "invariant",
+      "description": "未認証で Home・マイページにいない",
+      "expr": "state in {Home, マイページ} => authed"
+    },
+    {
+      "id": "lock-after-3",
+      "kind": "invariant",
+      "description": "4 回目の失敗は存在しない",
+      "expr": "retries <= 3"
+    },
+    {
+      "id": "logout-eventually-login",
+      "kind": "leads-to",
+      "description": "ログアウトしたら必ずログイン画面に戻る",
+      "from": "state == ログアウト",
+      "to": "state == ログイン"
+    },
+    {
+      "id": "no-dead-end",
+      "kind": "no-dead-end",
+      "description": "ロックと遷移を持たない DB層 のほかに行き止まりが無い",
+      "except": ["ロック", "DB層"]
+    }
+  ]
+}
