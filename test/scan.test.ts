@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { parseConfig } from "../src/core/config.js";
 import { parseStateName } from "../src/core/expr.js";
 import { scan } from "../src/core/scan.js";
 import type { FlowEdge, HistoryEntry, ModelVar } from "../src/core/types.js";
@@ -58,6 +59,51 @@ describe("scan: walk", () => {
     const graph = await scan(root, { now: T1 });
 
     assert.deepEqual(ids(graph), ["a", "h", "i", "j", "k"]);
+  });
+});
+
+describe("config: ignore globs", () => {
+  const glob = (pattern: string) => {
+    const [compiled] = parseConfig({ ignore: [pattern] }).config.ignore;
+    assert.ok(compiled, pattern);
+    return compiled;
+  };
+
+  it("keeps the meaning of **, *, ? and literal characters", () => {
+    const cases: readonly (readonly [string, string, boolean])[] = [
+      ["**/x", "x", true],
+      ["**/x", "a/b/x", true],
+      ["**/x", "ax", false],
+      ["**/**/x", "a/x", true],
+      ["generated/**", "generated/", true],
+      ["generated/**", "generated/a/b.ts", true],
+      ["generated/**", "generated", false],
+      ["src/*.ts", "src/a.ts", true],
+      ["src/*.ts", "src/a/b.ts", false],
+      ["src/?.ts", "src/a.ts", true],
+      ["src/?.ts", "src/ab.ts", false],
+      ["a.ts", "abts", false],
+      ["./lib/**", "lib/x.ts", true],
+      ["lib\\*.ts", "lib/x.ts", true],
+      ["**", "any/thing", true],
+    ];
+    for (const [pattern, path, expected] of cases) {
+      assert.equal(glob(pattern).test(path), expected, `${pattern} against ${path}`);
+    }
+  });
+
+  it("matches in time linear in the path, however many wildcards the pattern repeats", () => {
+    const deep = Array.from({ length: 30 }, (_, i) => `d${i}`).join("/");
+    const stacked = glob(`${"**/".repeat(10)}x`);
+    const stars = glob(`${"*a".repeat(12)}b`);
+    const started = performance.now();
+
+    assert.equal(stacked.test(deep), false);
+    assert.equal(stacked.test(`${deep}/x`), true);
+    assert.equal(stars.test("a".repeat(200)), false);
+
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 50, `${elapsed.toFixed(1)} ms`);
   });
 });
 
