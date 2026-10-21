@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { errorMessage } from "../json.js";
 import { PROPERTIES_FILE, violationsOf } from "../properties.js";
 import { analyze } from "../scan.js";
@@ -11,6 +11,8 @@ import { OUTPUT_DIRECTORY, replaceFile, writeWorkspace } from "../workspace.js";
 import { generateTla, type TlaModel, type TlaNames, TYPE_OK } from "./generate.js";
 import { parseTlcOutput, type TlcReport } from "./parse.js";
 
+export type InstallSource = { readonly url: string; readonly sha256: string };
+
 /** SPEC §10.3. Pinned to v1.7.4: the hash is checked before the jar is renamed into place. */
 const RELEASE: InstallSource = {
   url: "https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar",
@@ -18,9 +20,6 @@ const RELEASE: InstallSource = {
 };
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 
-export type InstallSource = { readonly url: string; readonly sha256: string };
-
-/** What happened to one `java` process. */
 type TlcRun =
   | { readonly kind: "missing"; readonly what: "java" | "jar"; readonly jar: string }
   | { readonly kind: "exited"; readonly output: string }
@@ -55,10 +54,13 @@ export type TlcCheck =
       readonly error: string | null;
     };
 
-/** `$EVERYPATH_TLA_JAR`, else `~/.everypath/tla2tools.jar`. Where both `check --tlc` and `tla install` look. */
+/**
+ * `$EVERYPATH_TLA_JAR`, else `~/.everypath/tla2tools.jar`. Where both `check --tlc` and `tla install`
+ * look. Absolute, because TLC runs in another directory.
+ */
 function jarPath(): string {
   const configured = process.env.EVERYPATH_TLA_JAR;
-  return configured ? configured : join(homedir(), ".everypath", "tla2tools.jar");
+  return configured ? resolve(configured) : join(homedir(), ".everypath", "tla2tools.jar");
 }
 
 /**
@@ -115,7 +117,6 @@ export async function checkTlc(
 export async function exportTla(root: string): Promise<
   | {
       readonly ok: true;
-      /** Root-relative, for the message. */
       readonly directory: string;
       readonly rejected: TlaModel["rejected"];
     }

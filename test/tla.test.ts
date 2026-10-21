@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { readdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { describe, it } from "node:test";
 import { PROPERTIES_FILE } from "../src/core/properties.js";
 import { analyze, scan } from "../src/core/scan.js";
@@ -632,6 +632,17 @@ describe("tla: running TLC and merging its verdicts", () => {
     const directory = join(root, ".everypath", "tla");
     assert.equal(await readFile(join(directory, "Model.cfg"), "utf8"), EXPECTED_EXAMPLE_CFG);
     assert.equal(await readFile(join(directory, "Model.tla"), "utf8"), EXPECTED_EXAMPLE_TLA);
+  });
+
+  it("hands TLC the absolute path of a jar that was given relative to the working directory", async () => {
+    const root = await exampleRepo();
+    const java = await fakeJava({ rules: [], otherwise: { output: await fixture("ok") } });
+    const env = { ...java.env, EVERYPATH_TLA_JAR: relative(root, java.jar) };
+
+    const result = runCli(["check", "--tlc", root], root, env);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok((await java.calls())[0]?.includes(` -jar ${await realpath(java.jar)} `));
   });
 
   it("replaces the pending results in graph.json and marks the counterexample's states", async () => {
