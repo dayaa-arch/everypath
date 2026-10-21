@@ -16,7 +16,7 @@ import type {
   VarName,
 } from "../types.js";
 
-/** The identifier of the check on the declared variable ranges. Never a property id's identifier. */
+/** The name of the range check. Property checks are `P`, a digit and a name, so none can be it. */
 export const TYPE_OK = "TypeOK";
 
 /** ASCII identifier to display name. TLC prints only the keys; `result.json` stores the whole table. */
@@ -40,15 +40,15 @@ export type TlaModel = {
   readonly names: TlaNames;
   /** Every `invariant` in file order, then `TypeOK`. */
   readonly invariants: readonly string[];
-  /** Every `leads-to` in file order. */
   readonly temporal: readonly string[];
   /** Definitions left out of the model, with the reason. They fail the check without stopping the rest. */
   readonly rejected: readonly { readonly id: PropertyId; readonly reason: string }[];
 };
 
-type Checked = Extract<PropertyDef, { readonly kind: "invariant" | "leads-to" }>;
+/** The kinds TLC checks. The rest stay with the BFS lane. */
+type TlcDef = Extract<PropertyDef, { readonly kind: "invariant" | "leads-to" }>;
 
-function isChecked(def: PropertyDef): def is Checked {
+function isTlcDef(def: PropertyDef): def is TlcDef {
   return def.kind === "invariant" || def.kind === "leads-to";
 }
 
@@ -135,7 +135,6 @@ function literal(value: Value, naming: Naming): string {
   }
 }
 
-/** The first problem `checkComparison` finds in a comparison of `expr`, or null. */
 function problemIn(expr: PropExpr, vars: VarTable): string | null {
   switch (expr.kind) {
     case "cmp":
@@ -256,7 +255,7 @@ function action(edge: FlowEdge, name: string, graph: Pick<Graph, "model">, namin
   ].join("\n");
 }
 
-function definition(def: Checked, name: string, naming: Naming): string {
+function definition(def: TlcDef, name: string, naming: Naming): string {
   const what = def.description === null ? def.id : `${def.id}（${def.description}）`;
   const body =
     def.kind === "invariant"
@@ -265,23 +264,23 @@ function definition(def: Checked, name: string, naming: Naming): string {
   return [comment(`everypath.properties.json: ${what}`), `${name} == ${body}`].join("\n");
 }
 
-function problemOfDef(def: Checked, vars: VarTable): string | null {
+function problemOfDef(def: TlcDef, vars: VarTable): string | null {
   return def.kind === "invariant"
     ? problemIn(def.expr.expr, vars)
     : firstOf([def.from.expr, def.to.expr], vars);
 }
 
-/** The module, as blocks separated by one blank line. */
 function render(
   graph: Pick<Graph, "nodes" | "edges" | "model">,
   entry: readonly StateName[],
-  accepted: readonly Checked[],
+  accepted: readonly TlcDef[],
   naming: Naming,
 ): string {
   const { vars } = graph.model;
   const flows = graph.edges.filter((edge): edge is FlowEdge => edge.type === "flow");
   const names = (table: Table<string>) => [...table.id.values()];
-  const actions = flows.map((_edge, index) => `A${index + 1}`);
+  const variables = ["state", ...names(naming.vars), "lastEvent"].join(", ");
+  const actions = flows.map((edge, index) => ({ edge, name: `A${index + 1}` }));
   const blocks = [
     [
       "---- MODULE Model ----",
@@ -300,8 +299,8 @@ function render(
     [
       ...vars.map((decl) => comment(`${nameOf(naming.vars, decl.name)} = ${decl.name}`)),
       ...[...naming.members.id].map(([member, name]) => comment(`${name} = ${member}`)),
-      `VARIABLES ${["state", ...names(naming.vars), "lastEvent"].join(", ")}`,
-      `vars == <<${["state", ...names(naming.vars), "lastEvent"].join(", ")}>>`,
+      `VARIABLES ${variables}`,
+      `vars == <<${variables}>>`,
     ],
     [
       "TypeOK ==",
@@ -320,10 +319,10 @@ function render(
         'lastEvent = "tau"',
       ]),
     ],
-    ...flows.map((edge, index) => [action(edge, actions[index] ?? "", graph, naming)]),
+    ...actions.map(({ edge, name }) => [action(edge, name, graph, naming)]),
     actions.length === 0
       ? ["Next == FALSE"]
-      : ["Next ==", ...actions.map((name) => `  \\/ ${name}`)],
+      : ["Next ==", ...actions.map(({ name }) => `  \\/ ${name}`)],
     ["Spec == Init /\\ [][Next]_vars /\\ WF_vars(Next)"],
     ...accepted.map((def) => [definition(def, nameOf(naming.checks, def.id), naming)]),
   ];
@@ -349,9 +348,9 @@ export function generateTla(
     };
   }
   const vars: VarTable = new Map(graph.model.vars.map((decl) => [decl.name, decl]));
-  const accepted: Checked[] = [];
+  const accepted: TlcDef[] = [];
   const rejected: { id: PropertyId; reason: string }[] = [];
-  for (const def of file.properties.filter(isChecked)) {
+  for (const def of file.properties.filter(isTlcDef)) {
     const problem = problemOfDef(def, vars);
     if (problem === null) accepted.push(def);
     else
@@ -362,8 +361,11 @@ export function generateTla(
     graph,
     accepted.map((def) => def.id),
   );
-  const checkName = (def: Checked) => nameOf(naming.checks, def.id);
-  const invariants = accepted.filter((def) => def.kind === "invariant").map(checkName);
+  const checkName = (def: TlcDef) => nameOf(naming.checks, def.id);
+  const invariants = [
+    ...accepted.filter((def) => def.kind === "invariant").map(checkName),
+    TYPE_OK,
+  ];
   const temporal = accepted.filter((def) => def.kind === "leads-to").map(checkName);
   const events: Record<string, EventName | null> = { tau: null, ...naming.events.back };
 
@@ -372,7 +374,7 @@ export function generateTla(
     model: {
       tla: render(graph, entry, accepted, naming),
       cfg: (checks) => {
-        const invariant = checks.filter((check) => check === TYPE_OK || invariants.includes(check));
+        const invariant = checks.filter((check) => invariants.includes(check));
         return `${[
           "SPECIFICATION Spec",
           ...(invariant.includes(TYPE_OK) ? [] : [`CONSTRAINT ${TYPE_OK}`]),
@@ -387,7 +389,7 @@ export function generateTla(
         members: naming.members.back,
         checks: { ...naming.checks.back, [TYPE_OK]: TYPE_OK },
       },
-      invariants: [...invariants, TYPE_OK],
+      invariants,
       temporal,
       rejected,
     },

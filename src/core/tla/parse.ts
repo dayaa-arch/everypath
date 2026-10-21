@@ -48,10 +48,11 @@ export function parseTlcOutput(output: string, names: TlaNames): TlcReport {
       ? { kind: "violated", check: invariant ?? null, trace: trace.trace, distinctStates }
       : fail(trace.message);
   }
-  return fail(firstProblemLine(lines));
+  return fail(failureOf(lines));
 }
 
-function firstProblemLine(lines: readonly string[]): string {
+/** What went wrong, in TLC's own words when it said: its first `Error:` line, else a Java exception. */
+function failureOf(lines: readonly string[]): string {
   const error = lines.find((line) => line.startsWith("Error: "));
   if (error !== undefined) return error.slice("Error: ".length);
   const exception = lines.find(
@@ -63,34 +64,27 @@ function firstProblemLine(lines: readonly string[]): string {
 }
 
 type Block = Map<string, string>;
+type Loop = { readonly back: number } | "stuttering" | null;
 type Trace =
   | { readonly ok: true; readonly trace: Counterexample }
   | { readonly ok: false; readonly message: string };
 
 /**
  * The lines after the `Error:` line: `State N: <action>` followed by `/\ name = value` lines, a blank
- * line between states. An initial-state violation may have the `/\` lines with no header. The trace
- * ends at `Back to state N`, at `State N: Stuttering`, or at the first line that is none of those.
- * `lasso` says the behavior must loop: a temporal violation.
+ * line between states. An initial-state violation has the `/\` lines with no header. The trace ends
+ * at `Back to state N`, at `State N: Stuttering`, or at the first other line once it has started.
  */
-function readTrace(lines: readonly string[], names: TlaNames, lasso: boolean): Trace {
+function splitTrace(lines: readonly string[]): { blocks: Block[]; loop: Loop } {
   const blocks: Block[] = [];
-  let loop: { readonly back: number } | "stuttering" | null = null;
   for (const line of lines) {
     const header = STATE_HEADER.exec(line);
     if (header !== null) {
-      if (header[1] === "Stuttering") {
-        loop = "stuttering";
-        break;
-      }
+      if (header[1] === "Stuttering") return { blocks, loop: "stuttering" };
       blocks.push(new Map());
       continue;
     }
     const back = BACK_TO.exec(line)?.[1];
-    if (back !== undefined) {
-      loop = { back: Number(back) - 1 };
-      break;
-    }
+    if (back !== undefined) return { blocks, loop: { back: Number(back) - 1 } };
     const binding = BINDING.exec(line);
     if (binding !== null) {
       const [, name = "", value = ""] = binding;
@@ -100,7 +94,12 @@ function readTrace(lines: readonly string[], names: TlaNames, lasso: boolean): T
       break;
     }
   }
+  return { blocks, loop: null };
+}
 
+/** `lasso` says the behavior must loop: a temporal violation. */
+function readTrace(lines: readonly string[], names: TlaNames, lasso: boolean): Trace {
+  const { blocks, loop } = splitTrace(lines);
   const [head, ...tail] = blocks;
   if (head === undefined) return { ok: false, message: "TLC の反例から状態を読めません" };
   const first = stepOf(head, names, true);
@@ -119,7 +118,8 @@ function readTrace(lines: readonly string[], names: TlaNames, lasso: boolean): T
   return { ok: true, trace: { path, steps, loopStart } };
 }
 
-function loopIndex(loop: { readonly back: number } | "stuttering" | null, length: number) {
+/** `Back to state N` goes to step N - 1; a stuttering behavior repeats its last step. */
+function loopIndex(loop: Loop, length: number): number | undefined {
   if (loop === null) return undefined;
   if (loop === "stuttering") return length - 1;
   return loop.back >= 0 && loop.back < length ? loop.back : undefined;
@@ -131,21 +131,20 @@ type StepResult =
 
 const unquote = (value: string | undefined): string | undefined => value?.match(/^"(.*)"$/)?.[1];
 
+/** An own key only, so a printed `constructor` is unknown rather than a function. */
+function lookup<T>(table: Readonly<Record<string, T>>, key: string | undefined): T | undefined {
+  return key !== undefined && Object.hasOwn(table, key) ? table[key] : undefined;
+}
+
 function stepOf(block: Block, names: TlaNames, initial: boolean): StepResult {
-  const unknown = (what: string, value: string | undefined): StepResult => ({
+  const unknown = (what: string, printed: string | undefined): StepResult => ({
     ok: false,
-    message: `TLC の反例に ${what} ${value ?? "（無し）"} があります。生成した名前表にありません`,
+    message: `TLC の反例に ${what} ${printed ?? "（無し）"} があります。生成した名前表にありません`,
   });
-  const stateId = unquote(block.get("state"));
-  if (stateId === undefined || !Object.hasOwn(names.states, stateId)) {
-    return unknown("状態", block.get("state"));
-  }
-  const state = names.states[stateId];
-  const eventId = unquote(block.get("lastEvent"));
-  if (!initial && (eventId === undefined || !Object.hasOwn(names.events, eventId))) {
-    return unknown("イベント", block.get("lastEvent"));
-  }
-  const event = initial || eventId === undefined ? null : (names.events[eventId] ?? null);
+  const state = lookup(names.states, unquote(block.get("state")));
+  if (state === undefined) return unknown("状態", block.get("state"));
+  const event = initial ? null : lookup(names.events, unquote(block.get("lastEvent")));
+  if (event === undefined) return unknown("イベント", block.get("lastEvent"));
 
   const vars: Record<string, string> = {};
   for (const [id, display] of Object.entries(names.vars)) {
@@ -153,17 +152,11 @@ function stepOf(block: Block, names: TlaNames, initial: boolean): StepResult {
     if (value === undefined) return unknown(`変数 ${id} の値`, block.get(id));
     vars[display] = value;
   }
-  return state === undefined
-    ? unknown("状態", stateId)
-    : { ok: true, step: { state, event, vars } };
+  return { ok: true, step: { state, event, vars } };
 }
 
-/** `TRUE`, `FALSE` and integers as printed; a quoted enum member through the table. */
 function printedValue(raw: string | undefined, names: TlaNames): string | undefined {
   if (raw === undefined) return undefined;
   if (raw === "TRUE" || raw === "FALSE" || /^\d+$/.test(raw)) return raw;
-  const member = unquote(raw);
-  return member !== undefined && Object.hasOwn(names.members, member)
-    ? names.members[member]
-    : undefined;
+  return lookup(names.members, unquote(raw));
 }

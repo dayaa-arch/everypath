@@ -46,58 +46,116 @@ type Command =
   | {
       readonly kind: "check";
       readonly directory: string;
-      /** `null` without `--tlc`. */
       readonly tlc: { readonly timeoutMs: number } | null;
     }
   | { readonly kind: "tla-export"; readonly directory: string }
   | { readonly kind: "tla-install"; readonly source: InstallSource | null };
 
-type Parsed =
-  | { readonly ok: true; readonly command: Command }
+type Result<T> =
+  | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly message: string };
 
 type Values = Readonly<Record<string, string | boolean | undefined>>;
 
-function usage(message: string): Parsed {
+function refuse(message: string): Result<never> {
   return { ok: false, message };
 }
 
+function accept<T>(value: T): Result<T> {
+  return { ok: true, value };
+}
+
+function unknownCommand(positionals: readonly string[]): Result<never> {
+  return refuse(`未知のコマンドか引数です: ${positionals.join(" ")}`);
+}
+
 /** An option the command does not take is a message, so `scan --tlc` is not silently a plain scan. */
-function unaccepted(label: Label, values: Values): string | null {
+function unaccepted(label: Label, values: Values): Result<never> | null {
   const refused = Object.keys(values).filter(
     (key) => key !== "help" && !ACCEPTS[label].includes(key),
   );
   return refused.length === 0
     ? null
-    : `${label} は ${refused.map((key) => `--${key}`).join(" ")} を受け付けません`;
+    : refuse(`${label} は ${refused.map((key) => `--${key}`).join(" ")} を受け付けません`);
 }
 
-function parseTlc(values: Values): { readonly timeoutMs: number } | null | string {
+function parseScan(positionals: readonly string[], values: Values): Result<Command> {
+  const [, directory = ".", ...extra] = positionals;
+  if (extra.length > 0) return unknownCommand(positionals);
+  return (
+    unaccepted("scan", values) ??
+    accept({
+      kind: "scan",
+      directory,
+      json: values.json === true,
+      quiet: values.quiet === true,
+    })
+  );
+}
+
+function parseCheck(positionals: readonly string[], values: Values): Result<Command> {
+  const [, directory = ".", ...extra] = positionals;
+  if (extra.length > 0) return unknownCommand(positionals);
+  const refused = unaccepted("check", values);
+  if (refused !== null) return refused;
   if (values.tlc !== true) {
-    return values.timeout === undefined ? null : "--timeout は --tlc と一緒に使います";
+    return values.timeout === undefined
+      ? accept({ kind: "check", directory, tlc: null })
+      : refuse("--timeout は --tlc と一緒に使います");
   }
   const seconds = values.timeout ?? String(DEFAULT_TIMEOUT_SECONDS);
   if (typeof seconds !== "string" || !/^[1-9]\d*$/.test(seconds)) {
-    return "--timeout は 1 以上の整数（秒）にしてください";
+    return refuse("--timeout は 1 以上の整数（秒）にしてください");
   }
-  return { timeoutMs: Number(seconds) * 1000 };
+  return accept({ kind: "check", directory, tlc: { timeoutMs: Number(seconds) * 1000 } });
 }
 
 /** Both variables or neither: a URL with no hash, or a hash with no URL, would install something unchecked or nothing. */
-function parseInstallSource(env: NodeJS.ProcessEnv): InstallSource | null | string {
+function parseInstallSource(env: NodeJS.ProcessEnv): Result<InstallSource | null> {
   const url = env.EVERYPATH_TLA_URL ?? "";
   const sha256 = env.EVERYPATH_TLA_SHA256 ?? "";
-  if (url === "" && sha256 === "") return null;
-  if (sha256 === "")
-    return "EVERYPATH_TLA_URL を使うときは EVERYPATH_TLA_SHA256 も指定してください";
-  if (url === "") return "EVERYPATH_TLA_SHA256 を使うときは EVERYPATH_TLA_URL も指定してください";
-  if (!/^[0-9a-f]{64}$/i.test(sha256))
-    return "EVERYPATH_TLA_SHA256 は 64 桁の 16 進数にしてください";
-  return { url, sha256 };
+  if (url === "" && sha256 === "") return accept(null);
+  if (sha256 === "") {
+    return refuse("EVERYPATH_TLA_URL を使うときは EVERYPATH_TLA_SHA256 も指定してください");
+  }
+  if (url === "") {
+    return refuse("EVERYPATH_TLA_SHA256 を使うときは EVERYPATH_TLA_URL も指定してください");
+  }
+  if (!/^[0-9a-f]{64}$/i.test(sha256)) {
+    return refuse("EVERYPATH_TLA_SHA256 は 64 桁の 16 進数にしてください");
+  }
+  return accept({ url, sha256 });
+}
+
+function parseTla(
+  positionals: readonly string[],
+  values: Values,
+  env: NodeJS.ProcessEnv,
+): Result<Command> {
+  const [, subcommand, ...rest] = positionals;
+  switch (subcommand) {
+    case undefined:
+      return refuse("tla には export か install を指定してください");
+    case "export":
+      if (rest.length > 1) return unknownCommand(positionals);
+      return (
+        unaccepted("tla export", values) ??
+        accept({ kind: "tla-export", directory: rest[0] ?? "." })
+      );
+    case "install": {
+      if (rest.length > 0) return unknownCommand(positionals);
+      const refused = unaccepted("tla install", values);
+      if (refused !== null) return refused;
+      const source = parseInstallSource(env);
+      return source.ok ? accept({ kind: "tla-install", source: source.value }) : source;
+    }
+    default:
+      return unknownCommand(positionals);
+  }
 }
 
 /** The command line and the install variables are a boundary: whatever was typed becomes a `Command` or a message. */
-function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Parsed {
+function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Result<Command> {
   try {
     const { positionals, values } = parseArgs({
       args: [...args],
@@ -113,52 +171,23 @@ function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Parsed {
     });
     const unknown = Object.keys(values).filter((key) => !OPTIONS.has(key));
     if (unknown.length > 0) {
-      return usage(`未知のオプションです: ${unknown.map((key) => `--${key}`).join(" ")}`);
+      return refuse(`未知のオプションです: ${unknown.map((key) => `--${key}`).join(" ")}`);
     }
-    if (values.help) return { ok: true, command: { kind: "help" } };
-    const [name, second, ...others] = positionals;
-    if (name === undefined) return usage("コマンドがありません");
-    const unknownCommand = usage(`未知のコマンドか引数です: ${positionals.join(" ")}`);
-
-    if (name === "tla") {
-      if (second === undefined) return usage("tla には export か install を指定してください");
-      if (second === "export" && others.length <= 1) {
-        const refused = unaccepted("tla export", values);
-        if (refused !== null) return usage(refused);
-        return { ok: true, command: { kind: "tla-export", directory: others[0] ?? "." } };
-      }
-      if (second === "install" && others.length === 0) {
-        const refused = unaccepted("tla install", values);
-        if (refused !== null) return usage(refused);
-        const source = parseInstallSource(env);
-        return typeof source === "string"
-          ? usage(source)
-          : { ok: true, command: { kind: "tla-install", source } };
-      }
-      return unknownCommand;
+    if (values.help) return accept({ kind: "help" });
+    switch (positionals[0]) {
+      case undefined:
+        return refuse("コマンドがありません");
+      case "scan":
+        return parseScan(positionals, values);
+      case "check":
+        return parseCheck(positionals, values);
+      case "tla":
+        return parseTla(positionals, values, env);
+      default:
+        return unknownCommand(positionals);
     }
-
-    if ((name !== "scan" && name !== "check") || others.length > 0) return unknownCommand;
-    const directory = second ?? ".";
-    const refused = unaccepted(name, values);
-    if (refused !== null) return usage(refused);
-    if (name === "check") {
-      const tlc = parseTlc(values);
-      return typeof tlc === "string"
-        ? usage(tlc)
-        : { ok: true, command: { kind: "check", directory, tlc } };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "scan",
-        directory,
-        json: values.json === true,
-        quiet: values.quiet === true,
-      },
-    };
   } catch (error) {
-    return usage(errorMessage(error));
+    return refuse(errorMessage(error));
   }
 }
 
@@ -278,7 +307,7 @@ async function main(args: readonly string[]): Promise<number> {
     process.stderr.write(`${parsed.message}\n${USAGE}\n`);
     return USAGE_ERROR;
   }
-  const { command } = parsed;
+  const command = parsed.value;
   if (command.kind === "help") {
     process.stdout.write(`${USAGE}\n`);
     return 0;
