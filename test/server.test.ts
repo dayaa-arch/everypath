@@ -597,6 +597,34 @@ describe("serve: what triggers a rescan", () => {
     await events.graph((graph) => hasNode(graph, "設定"), { since });
   });
 
+  it("writes and sends nothing for a rescan that changes nothing, and one graph event for an approval", async () => {
+    const root = await makeRepo(small);
+    const serve = await serveRepo(root);
+    const events = await ready(serve);
+    const graphFile = await readOutput(root, "graph.json");
+    const historyFile = await readOutput(root, "history.jsonl");
+    let since = events.received.length;
+
+    const rescan = await request(serve, "POST", "/rescan");
+    assert.ok(succeeded(rescan), `${rescan.status} ${rescan.text}`);
+    await delay(1_000);
+
+    assert.deepEqual(events.received.slice(since), []);
+    assert.equal(await readOutput(root, "graph.json"), graphFile);
+    assert.equal(await readOutput(root, "history.jsonl"), historyFile);
+
+    since = events.received.length;
+    const approved = await request(serve, "POST", reviewPath("Home"), { body: { note: "x" } });
+    assert.ok(succeeded(approved), `${approved.status} ${approved.text}`);
+    await delay(1_000);
+
+    const sent = events.received.slice(since);
+    assert.deepEqual(
+      sent.map((event) => (event.type === "graph" ? event.reason : event.type)),
+      ["approve"],
+    );
+  });
+
   const triggers: readonly {
     readonly file: string;
     readonly content: unknown;

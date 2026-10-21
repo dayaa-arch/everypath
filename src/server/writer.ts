@@ -1,4 +1,4 @@
-import { scanWithHistory } from "../core/scan.js";
+import { rescanWithHistory, scanWithHistory } from "../core/scan.js";
 import type { TlcRecord } from "../core/tla/result.js";
 import type { Graph, HistoryEntry, Layout, StateName } from "../core/types.js";
 import { commitTlc, writeApproval, writeLayout } from "../core/workspace.js";
@@ -41,25 +41,25 @@ export type Writer = {
 
 /**
  * The only path from the server to the disk. Scans once before it resolves, so `current()` always
- * has a graph, and hands every later graph to `publish` in the order it was written. `reviewer` is the
- * `by` of each approval.
+ * has a graph, and hands every later graph that differs from it to `publish` in the order it was
+ * written. `reviewer` is the `by` of each approval.
  */
 export async function openWriter(
   root: string,
   reviewer: string,
   publish: (published: Published) => void,
 ): Promise<Writer> {
-  const scanned = async (reason: string): Promise<Published> => {
-    const { graph, history } = await scanWithHistory(root, { reason });
-    return { graph, diff: history, reason };
-  };
-  let current = await scanned("serve");
+  const first = await scanWithHistory(root, { reason: "serve" });
+  let current: Published = { graph: first.graph, diff: first.history, reason: "serve" };
   let tail: Promise<unknown> = Promise.resolve();
   let waitingRescan: Promise<JobResult> | null = null;
   let closed = false;
 
+  /** A rescan that changes nothing a viewer reads publishes nothing. */
   const rescan = async (reason: string): Promise<JobResult> => {
-    current = await scanned(reason);
+    const scanned = await rescanWithHistory(root, current.graph, { reason });
+    if (scanned === null) return "done";
+    current = { graph: scanned.graph, diff: scanned.history, reason };
     publish(current);
     return "done";
   };

@@ -180,11 +180,13 @@ export async function readOutput(
 
 /**
  * Whether a change at `path` (root-relative, `/`) can change what a scan reads: the server's watcher
- * asks only this. Under `.everypath/` only the scan's inputs count, so its own writes never start
- * another scan. Elsewhere, outside the walk's ignored directories, a source file counts, and so does
- * any JSON file (the config, the properties, every findings file wherever `findings` points) and any
- * name without an extension, which may be a directory moved or removed with its files.
- * `isDirectory` asks whether a poller should look inside.
+ * asks only this. Under `.everypath/` only the scan's inputs count, so `graph.json`, `history.jsonl`,
+ * the layout and every temporary file never start a scan. `review.json` and `tla/result.json` do,
+ * though the server writes them too: that rescan finds the graph it already sent and writes nothing.
+ * Elsewhere, outside the walk's ignored directories, a source file counts, and so does any JSON file
+ * (the config, the properties, every findings file wherever `findings` points) and any name without
+ * an extension, which may be a directory moved or removed with its files. `isDirectory` asks whether
+ * a poller should look inside.
  */
 export function isScanInput(path: string, isDirectory = false): boolean {
   if (path === OUTPUT_DIRECTORY || path.startsWith(`${OUTPUT_DIRECTORY}/`)) {

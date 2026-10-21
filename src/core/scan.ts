@@ -100,6 +100,33 @@ export async function scanWithHistory(
   return { graph, history };
 }
 
+/**
+ * The server's rescan: `scanWithHistory`, except that a graph equal to `last` but for the times every
+ * scan renews writes nothing and answers `null`. Nothing a viewer reads changed, so there is nothing
+ * to send; the server's own writes to `review.json` and `result.json` end here when they come back.
+ */
+export async function rescanWithHistory(
+  root: string,
+  last: Graph,
+  options: ScanOptions = {},
+): Promise<{ readonly graph: Graph; readonly history: HistoryEntry | null } | null> {
+  const { graph, history } = await analyze(root, options);
+  if (lasting(graph) === lasting(last)) return null;
+  await writeWorkspace(graph.root, graph, history);
+  return { graph, history };
+}
+
+/**
+ * The graph without `generatedAt` and the quick check's `checkedAt`, which is the same instant: what
+ * every scan renews. A TLC verdict keeps the `checkedAt` of its run, so a new run still counts.
+ */
+function lasting(graph: Graph): string {
+  const properties = graph.properties.map((result) =>
+    result.checkedAt === graph.generatedAt ? { ...result, checkedAt: null } : result,
+  );
+  return JSON.stringify({ ...graph, generatedAt: null, properties });
+}
+
 /** One file's bytes to its facts. Pure and per file, so every cross-file decision waits for `fold`. */
 function extractFacts({ path, bytes }: Source, context: ImportContext): FileFacts {
   const content = bytes.toString("utf8");
