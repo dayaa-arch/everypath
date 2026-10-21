@@ -6,6 +6,18 @@ import { delimiter, join, relative } from "node:path";
 import { describe, it } from "node:test";
 import type { FlowEdge } from "../src/core/types.js";
 import { flows, makeRepo, readGraph, runCli, ts } from "./helpers/repo.js";
+import {
+  javaEnv,
+  propertyOf,
+  readOutput,
+  readReview,
+  ready,
+  request,
+  reviewPath,
+  serveRepo,
+  succeeded,
+  violationRun,
+} from "./helpers/server.js";
 import { exampleRepo, fakeJava, fixture } from "./helpers/tlc.js";
 
 /** sha1 of every file outside `.everypath/`, keyed by root-relative path. */
@@ -219,5 +231,42 @@ describe("R-01: check --tlc writes only under .everypath/", () => {
     assert.deepEqual(await snapshot(root), before);
     const tla = (await readdir(join(root, ".everypath", "tla"))).sort();
     assert.deepEqual(tla, ["Model.cfg", "Model.tla", "result.json"]);
+  });
+});
+
+/** Every file and directory outside `.everypath/`, root-relative and sorted. */
+async function listing(root: string): Promise<string[]> {
+  const entries = await readdir(root, { recursive: true });
+  return entries.filter((path) => path.split(/[\\/]/)[0] !== ".everypath").sort();
+}
+
+describe("R-01: serve writes only under .everypath/", () => {
+  it("leaves every other file and directory untouched through approve, layout, rescan and a TLC run", async () => {
+    const root = await exampleRepo();
+    const java = await fakeJava(await violationRun());
+    const hashes = await snapshot(root);
+    const entries = await listing(root);
+    const serve = await serveRepo(root, javaEnv(java));
+    const events = await ready(serve);
+    const since = events.received.length;
+
+    const steps = [
+      await request(serve, "POST", reviewPath("Home"), { body: { note: "確認済み" } }),
+      await request(serve, "PUT", "/layout.json", { body: { Home: { x: 40, y: 80 } } }),
+      await request(serve, "POST", "/rescan"),
+    ];
+    for (const step of steps) assert.ok(succeeded(step), `${step.status} ${step.text}`);
+    const started = await request(serve, "POST", "/check/tlc");
+    assert.equal(started.status, 202, started.text);
+    await events.tlc("done", { since });
+    await events.graph((graph) => propertyOf(graph, "no-unauth-home").result === "violated", {
+      since,
+    });
+
+    assert.ok((await readReview(root)).approvals.Home, "the approval was written");
+    assert.ok(await readOutput(root, "layout.json"), "the layout was written");
+    assert.match(await readOutput(root, "tla", "Model.tla"), /MODULE Model/);
+    assert.deepEqual(await snapshot(root), hashes);
+    assert.deepEqual(await listing(root), entries);
   });
 });
