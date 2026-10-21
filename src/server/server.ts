@@ -51,10 +51,10 @@ export async function startServer({
   readonly port: number;
   readonly uiPath: string;
 }): Promise<RunningServer> {
-  const clients = new Set<ServerResponse>();
+  const streams = new Set<Stream>();
   const broadcast = (event: ServerEvent): void => {
-    const frame = eventFrame(event);
-    for (const client of clients) client.write(frame);
+    let frame: string | undefined;
+    for (const stream of streams) push(stream, event, () => (frame ??= eventFrame(event)));
   };
   let lane: TlcLane = { kind: "idle" };
 
@@ -118,13 +118,19 @@ export async function startServer({
       "cache-control": "no-store",
       connection: "keep-alive",
     });
-    const { graph } = writer.current();
-    response.write(eventFrame({ type: "graph", graph, diff: null, reason: "connect" }));
-    if (lane.kind === "running") {
-      response.write(eventFrame({ type: "tlc", status: "running", states: null, message: null }));
-    }
-    clients.add(response);
-    request.on("close", () => clients.delete(response));
+    const stream: Stream = { response, missed: null };
+    const send = (event: ServerEvent): void => push(stream, event, () => eventFrame(event));
+    send({ type: "graph", graph: writer.current().graph, diff: null, reason: "connect" });
+    if (lane.kind === "running")
+      send({ type: "tlc", status: "running", states: null, message: null });
+    response.on("drain", () => {
+      const missed = stream.missed;
+      stream.missed = null;
+      if (missed?.tlc) send(missed.tlc);
+      if (missed?.graph) send({ ...writer.current(), type: "graph", diff: null });
+    });
+    streams.add(stream);
+    request.on("close", () => streams.delete(stream));
   }
 
   async function route(
@@ -201,8 +207,8 @@ export async function startServer({
         watcher.close();
         const running = lane.kind === "running" ? lane : null;
         running?.abort.abort();
-        for (const client of clients) client.end();
-        clients.clear();
+        for (const stream of streams) stream.response.end();
+        streams.clear();
         await stopHttp();
         await running?.finished;
         await writer.close();
@@ -230,6 +236,26 @@ const LOCAL_HOST = /^(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
 
 function eventFrame(event: ServerEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;
+}
+
+/**
+ * One `/events` stream. `missed` is `null` while its socket takes frames. Once a write leaves the
+ * socket full, frames are left out until `drain`, which sends the last TLC event left out and then
+ * the current graph: a viewer that fell behind needs the latest state, not every step to it, and a
+ * stream that never reads cannot make the server hold every graph for it.
+ */
+type Stream = { readonly response: ServerResponse; missed: Missed | null };
+type Missed = { graph: boolean; tlc: TlcEvent | null };
+
+/** `frame` serializes `event`, only once some stream takes it: a server with no viewer serializes nothing. */
+function push(stream: Stream, event: ServerEvent, frame: () => string): void {
+  if (stream.missed === null) {
+    if (!stream.response.write(frame())) stream.missed = { graph: false, tlc: null };
+  } else if (event.type === "graph") {
+    stream.missed.graph = true;
+  } else {
+    stream.missed.tlc = event;
+  }
 }
 
 /** A violation is a result, so `done`. Only a run that could not decide is an `error`. */

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
+import { get } from "node:http";
 import { createServer, type Server } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -776,5 +777,64 @@ describe("serve: guards on state-changing requests", () => {
       const reply = await rawRequest(serve, "POST", reviewPath("Home"), { ...json, host }, note);
       assert.ok(succeeded(reply), `${host} -> ${reply.status} ${reply.text}`);
     }
+  });
+});
+
+/** `GET /events` read by hand and left unread, as a viewer in a background tab or on a slow link. */
+async function stalledEvents(base: string): Promise<{
+  read(until: (events: readonly ServerFrame[]) => boolean): Promise<ServerFrame[]>;
+  close(): void;
+}> {
+  return new Promise((resolve, reject) => {
+    const outgoing = get(new URL("/events", base), (response) => {
+      response.pause();
+      resolve({
+        read: (until) =>
+          new Promise((done) => {
+            const events: ServerFrame[] = [];
+            let pending = "";
+            response.setEncoding("utf8").on("data", (chunk: string) => {
+              pending += chunk;
+              for (let end = pending.indexOf("\n\n"); end !== -1; end = pending.indexOf("\n\n")) {
+                events.push(JSON.parse(pending.slice("data: ".length, end)));
+                pending = pending.slice(end + 2);
+              }
+              if (until(events)) done(events);
+            });
+            response.resume();
+          }),
+        close: () => outgoing.destroy(),
+      });
+    });
+    outgoing.on("error", reject);
+  });
+}
+
+type ServerFrame = { readonly type: string; readonly graph?: Graph };
+
+describe("serve: an /events client that stops reading", () => {
+  it("is sent no frames while its socket is full, then the latest graph once", async () => {
+    const ids = ["N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"];
+    const files = Object.fromEntries(
+      ids.map((id) => [`src/${id}.ts`, ts(`@state ${id}`, `@state-desc ${"x".repeat(500_000)}`)]),
+    );
+    const root = await makeRepo(files);
+    const serve = await serveRepo(root);
+    const stalled = await stalledEvents(serve.url);
+    const approvals = ids.slice(0, 6);
+
+    for (const id of approvals) {
+      const reply = await request(serve, "POST", reviewPath(id), { body: { note: "x" } });
+      assert.ok(succeeded(reply), `${reply.status} ${reply.text}`);
+    }
+    const allReviewed = (event: ServerFrame | undefined): boolean => {
+      const graph = event?.graph;
+      return graph !== undefined && approvals.every((id) => node(graph, id).status.reviewed);
+    };
+    const events = await stalled.read((received) => allReviewed(received.at(-1)));
+    stalled.close();
+
+    assert.ok(events.length < approvals.length + 1, `${events.length} frames`);
+    assert.ok(allReviewed(events.at(-1)), "the last frame is the latest graph");
   });
 });
