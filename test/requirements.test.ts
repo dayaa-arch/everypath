@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { delimiter, join, relative } from "node:path";
 import { describe, it } from "node:test";
 import type { FlowEdge } from "../src/core/types.js";
 import { flows, makeRepo, readGraph, runCli, ts } from "./helpers/repo.js";
+import { exampleRepo, fakeJava, fixture } from "./helpers/tlc.js";
 
 /** sha1 of every file outside `.everypath/`, keyed by root-relative path. */
 async function snapshot(root: string): Promise<Map<string, string>> {
@@ -120,5 +121,103 @@ describe("R-03 and R-01: check runs without Java and writes only under .everypat
     assert.ok(result.status === 0 || result.status === 1, `${result.status}: ${result.stderr}`);
     assert.deepEqual(await snapshot(root), before);
     await rm(emptyPath, { recursive: true, force: true });
+  });
+});
+
+describe("R-03: check --tlc without Java or the jar decides by the quick check", () => {
+  const withProperties = {
+    "src/a.ts": ts("@state A", "@state-initial", "@state-next B on:go"),
+    "src/b.ts": ts("@state B"),
+    "everypath.properties.json": JSON.stringify({
+      properties: [
+        { id: "nr", kind: "never-reach", target: ["B"] },
+        { id: "vars", kind: "invariant", expr: "x" },
+      ],
+    }),
+  };
+  const withoutEntry = {
+    "src/a.ts": ts("@state A", "@state-next B"),
+    "src/b.ts": ts("@state B", "@state-next A"),
+    "everypath.properties.json": JSON.stringify({
+      properties: [{ id: "lt", kind: "leads-to", from: "state == A", to: "state == B" }],
+    }),
+  };
+
+  async function expectInstallGuidance(
+    files: Record<string, string>,
+    environment: (jarDirectory: string) => NodeJS.ProcessEnv,
+  ): Promise<void> {
+    const root = await makeRepo(files);
+    const jarDirectory = await makeRepo({ "tla2tools.jar": "not a jar" });
+    const plain = runCli(["check", root]);
+    const before = await snapshot(root);
+
+    const result = runCli(["check", "--tlc", root], root, environment(jarDirectory));
+
+    assert.ok(result.status === 0 || result.status === 1, `${result.status}: ${result.stderr}`);
+    assert.equal(result.status, plain.status);
+    assert.equal(result.stdout, plain.stdout);
+    assert.match(result.stderr, /everypath tla install/);
+    assert.deepEqual(await snapshot(root), before);
+  }
+
+  it("says how to install when java is not on the PATH, though a property cannot become TLA+", async () => {
+    const emptyPath = await mkdtemp(join(tmpdir(), "everypath-nojava-"));
+    await expectInstallGuidance(withProperties, (jarDirectory) => ({
+      ...process.env,
+      PATH: emptyPath,
+      EVERYPATH_TLA_JAR: join(jarDirectory, "tla2tools.jar"),
+    }));
+    await rm(emptyPath, { recursive: true, force: true });
+  });
+
+  it("says so first when java is missing and no state can start the model", async () => {
+    const emptyPath = await mkdtemp(join(tmpdir(), "everypath-nojava-"));
+    await expectInstallGuidance(withoutEntry, (jarDirectory) => ({
+      ...process.env,
+      PATH: emptyPath,
+      EVERYPATH_TLA_JAR: join(jarDirectory, "tla2tools.jar"),
+    }));
+    await rm(emptyPath, { recursive: true, force: true });
+  });
+
+  it("treats a java that cannot run, like the macOS stub with no JDK, as missing", async () => {
+    const stub = await makeRepo({ "bin/java": "#!/bin/sh\nexit 1\n" });
+    await chmod(join(stub, "bin", "java"), 0o755);
+    await expectInstallGuidance(withProperties, (jarDirectory) => ({
+      ...process.env,
+      PATH: `${join(stub, "bin")}${delimiter}${process.env.PATH ?? ""}`,
+      EVERYPATH_TLA_JAR: join(jarDirectory, "tla2tools.jar"),
+    }));
+  });
+
+  it("says how to install when the jar is missing", async () => {
+    await expectInstallGuidance(withProperties, (jarDirectory) => ({
+      ...process.env,
+      EVERYPATH_TLA_JAR: join(jarDirectory, "missing", "tla2tools.jar"),
+    }));
+  });
+
+  it("says so first even when no state can start the model", async () => {
+    await expectInstallGuidance(withoutEntry, (jarDirectory) => ({
+      ...process.env,
+      EVERYPATH_TLA_JAR: join(jarDirectory, "missing", "tla2tools.jar"),
+    }));
+  });
+});
+
+describe("R-01: check --tlc writes only under .everypath/", () => {
+  it("leaves every other file byte-identical while TLC runs", async () => {
+    const root = await exampleRepo();
+    const java = await fakeJava({ rules: [], otherwise: { output: await fixture("ok") } });
+    const before = await snapshot(root);
+
+    const result = runCli(["check", "--tlc", root], root, java.env);
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal((await java.cfgs()).length, 2);
+    assert.deepEqual(await snapshot(root), before);
+    const tla = (await readdir(join(root, ".everypath", "tla"))).sort();
+    assert.deepEqual(tla, ["Model.cfg", "Model.tla", "result.json"]);
   });
 });

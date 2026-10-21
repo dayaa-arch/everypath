@@ -1,0 +1,15 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 114 and seed 8127385812333579472 with 8 workers on 8 cores with 3641MB heap and 64MB offheap memory [pid: 73673] (Mac OS X 15.7.4 aarch64, Eclipse Adoptium 17.0.8.1 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /work/example/.everypath/tla/Model.tla
+Parsing file /tmp/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module Model
+Starting... (2026-10-21 23:26:36)
+Computing initial states...
+Error: Invariant P4_never_login is violated by the initial state:
+/\ state = "S6"
+/\ lastEvent = "tau"
+/\ v2_retries = 0
+/\ v1_authed = FALSE
+
+Finished in 00s at (2026-10-21 23:26:36)

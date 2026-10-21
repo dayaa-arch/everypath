@@ -97,7 +97,6 @@ export async function readWorkspace(root: string): Promise<Workspace> {
   };
 }
 
-/** The graph is renamed into place so a reader never sees half of it. */
 export async function writeWorkspace(
   root: string,
   graph: Graph,
@@ -109,11 +108,15 @@ export async function writeWorkspace(
   if (entry !== null) {
     await appendFile(join(directory, "history.jsonl"), `${JSON.stringify(entry)}\n`);
   }
-  const target = join(directory, "graph.json");
-  const temporary = `${target}.${randomUUID()}.tmp`;
+  await replaceFile(join(directory, "graph.json"), serializeGraph(graph));
+}
+
+/** Writes beside `path` and renames onto it, so a reader sees the old file or the new one, never half. */
+export async function replaceFile(path: string, data: string | Uint8Array): Promise<void> {
+  const temporary = `${path}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, serializeGraph(graph));
-    await rename(temporary, target);
+    await writeFile(temporary, data);
+    await rename(temporary, path);
   } catch (error) {
     await rm(temporary, { force: true });
     throw error;

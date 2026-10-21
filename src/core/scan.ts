@@ -15,6 +15,7 @@ import type {
   Graph,
   HistoryEntry,
   ModelVar,
+  PropertiesFile,
   ScanWarning,
   StateName,
   StateNode,
@@ -52,17 +53,37 @@ type FileFacts = {
 /** A file that becomes part of a node, with that node's id. */
 type Member = { readonly file: FileFacts; readonly id: StateName };
 
-/** SPEC §8. Reads the repository, writes `.everypath/graph.json` and, if something changed, `history.jsonl`. */
-export async function scan(root: string, options: ScanOptions = {}): Promise<Graph> {
-  const absolute = resolve(root);
-  const workspace = await readWorkspace(absolute);
+/**
+ * SPEC §8. Reads the repository and folds it into the graph without writing anything. The TLA+ lane
+ * starts here because `graph.json` holds property results but not the definitions they came from.
+ * `history` is the line a scan would append; it does not depend on property results.
+ */
+export async function analyze(
+  root: string,
+  options: ScanOptions = {},
+): Promise<{
+  readonly graph: Graph;
+  readonly properties: PropertiesFile;
+  readonly history: HistoryEntry | null;
+}> {
+  const workspace = await readWorkspace(resolve(root));
   const context: ImportContext = {
     files: new Set(workspace.sources.map((source) => source.path)),
     aliases: workspace.config.aliases,
   };
   const facts = workspace.sources.map((source) => extractFacts(source, context));
   const graph = fold(workspace, facts, options.now ?? new Date());
-  await writeWorkspace(absolute, graph, diff(workspace.previous, graph, options.reason ?? "scan"));
+  return {
+    graph,
+    properties: workspace.properties,
+    history: diff(workspace.previous, graph, options.reason ?? "scan"),
+  };
+}
+
+/** SPEC §8. `analyze`, then writes `.everypath/graph.json` and, if something changed, `history.jsonl`. */
+export async function scan(root: string, options: ScanOptions = {}): Promise<Graph> {
+  const { graph, history } = await analyze(root, options);
+  await writeWorkspace(graph.root, graph, history);
   return graph;
 }
 

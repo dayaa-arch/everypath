@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -44,6 +44,23 @@ export function runCli(args: readonly string[], cwd = repoRoot, env = process.en
     encoding: "utf8",
   });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** For tests that serve HTTP from this process: `spawnSync` would block the server. */
+export function runCliAsync(
+  args: readonly string[],
+  cwd = repoRoot,
+  env = process.env,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", tsx, cli, ...args], { cwd, env });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
 }
 
 export function node(graph: Graph, id: string): StateNode {

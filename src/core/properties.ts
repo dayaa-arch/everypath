@@ -228,14 +228,17 @@ function isDeadEnd(flow: Flow, state: StateName): boolean {
   return (flow.outgoing.get(state) ?? NONE).length === 0;
 }
 
-/** `entry`, else the model's initial state, else the states nothing else leads to. */
-function entryOf(
-  { model }: Pick<Graph, "model">,
+/**
+ * `entry`, else the model's initial state, else the states nothing else leads to. The TLA+ lane
+ * starts from the same states, so it asks here.
+ */
+export function entryOf(
+  graph: Pick<Graph, "nodes" | "edges" | "model">,
   { entry }: PropertiesFile,
-  flow: Flow,
+  flow: Flow = flowOf(graph),
 ): readonly StateName[] {
   if (entry !== null) return entry.filter((state) => flow.states.has(state));
-  if (model.initial !== null) return [model.initial];
+  if (graph.model.initial !== null) return [graph.model.initial];
   return flow.real.filter(
     (state) => !(flow.incoming.get(state) ?? NONE).some((from) => from !== state),
   );
@@ -279,7 +282,7 @@ function stepAt(state: StateName, reached: Reached): Step {
 
 function counterexampleOf(steps: NonEmpty<Step>): Counterexample {
   const [first, ...rest] = steps;
-  return { path: [first.state, ...rest.map((step) => step.state)], steps };
+  return { path: [first.state, ...rest.map((step) => step.state)], steps, loopStart: null };
 }
 
 /** The path from the start that reached `goal`, ending at `goal`. */
@@ -470,7 +473,7 @@ function entryWarnings(
 }
 
 /** The properties whose counterexample passes through each state, in file order. */
-function violationsOf(results: readonly PropertyResult[]): Map<StateName, PropertyId[]> {
+export function violationsOf(results: readonly PropertyResult[]): Map<StateName, PropertyId[]> {
   const violations = new Map<StateName, PropertyId[]>();
   for (const { id, counterexamples } of results) {
     for (const state of new Set(counterexamples.flatMap((example) => example.path))) {

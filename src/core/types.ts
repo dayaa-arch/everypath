@@ -232,6 +232,11 @@ export type Counterexample = {
   /** The `state` of each step. */
   readonly path: NonEmpty<StateName>;
   readonly steps: NonEmpty<Step>;
+  /**
+   * 0-based index into `steps`: after the last step the behavior goes back to `steps[loopStart]` and
+   * repeats forever. `null` for a finite trace, which is every BFS counterexample.
+   */
+  readonly loopStart: number | null;
 };
 
 export type PropertyResult = {

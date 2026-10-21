@@ -5,12 +5,35 @@ import { parseArgs } from "node:util";
 import { errorMessage } from "./core/json.js";
 import { PROPERTIES_FILE } from "./core/properties.js";
 import { scan } from "./core/scan.js";
+import {
+  checkTlc,
+  exportTla,
+  type InstallSource,
+  installTla,
+  type TlcCheck,
+} from "./core/tla/run.js";
 import type { Counterexample, Graph, PropertyResult, ScanWarning } from "./core/types.js";
 import { serializeGraph } from "./core/workspace.js";
 
-const USAGE = "使い方: everypath scan [dir] [--json] [--quiet]\n        everypath check [dir]";
+const USAGE = [
+  "使い方: everypath scan [dir] [--json] [--quiet]",
+  "        everypath check [dir] [--tlc [--timeout 秒]]",
+  "        everypath tla export [dir]",
+  "        everypath tla install",
+].join("\n");
 const USAGE_ERROR = 2;
-const OPTIONS: readonly string[] = ["json", "quiet", "help"];
+const DEFAULT_TIMEOUT_SECONDS = 120;
+
+type Label = "scan" | "check" | "tla export" | "tla install";
+
+/** The options each command takes; `--help` goes with every one. */
+const ACCEPTS: Readonly<Record<Label, readonly string[]>> = {
+  scan: ["json", "quiet"],
+  check: ["tlc", "timeout"],
+  "tla export": [],
+  "tla install": [],
+};
+const OPTIONS: ReadonlySet<string> = new Set(["help", ...Object.values(ACCEPTS).flat()]);
 
 type Command =
   | { readonly kind: "help" }
@@ -20,14 +43,119 @@ type Command =
       readonly json: boolean;
       readonly quiet: boolean;
     }
-  | { readonly kind: "check"; readonly directory: string };
+  | {
+      readonly kind: "check";
+      readonly directory: string;
+      readonly tlc: { readonly timeoutMs: number } | null;
+    }
+  | { readonly kind: "tla-export"; readonly directory: string }
+  | { readonly kind: "tla-install"; readonly source: InstallSource | null };
 
-type Parsed =
-  | { readonly ok: true; readonly command: Command }
+type Result<T> =
+  | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly message: string };
 
-/** The command line is a boundary: whatever the user typed becomes a `Command` or a message. */
-function parseCommand(args: readonly string[]): Parsed {
+type Values = Readonly<Record<string, string | boolean | undefined>>;
+
+function refuse(message: string): Result<never> {
+  return { ok: false, message };
+}
+
+function accept<T>(value: T): Result<T> {
+  return { ok: true, value };
+}
+
+function unknownCommand(positionals: readonly string[]): Result<never> {
+  return refuse(`未知のコマンドか引数です: ${positionals.join(" ")}`);
+}
+
+/** An option the command does not take is a message, so `scan --tlc` is not silently a plain scan. */
+function unaccepted(label: Label, values: Values): Result<never> | null {
+  const refused = Object.keys(values).filter(
+    (key) => key !== "help" && !ACCEPTS[label].includes(key),
+  );
+  return refused.length === 0
+    ? null
+    : refuse(`${label} は ${refused.map((key) => `--${key}`).join(" ")} を受け付けません`);
+}
+
+function parseScan(positionals: readonly string[], values: Values): Result<Command> {
+  const [, directory = ".", ...extra] = positionals;
+  if (extra.length > 0) return unknownCommand(positionals);
+  return (
+    unaccepted("scan", values) ??
+    accept({
+      kind: "scan",
+      directory,
+      json: values.json === true,
+      quiet: values.quiet === true,
+    })
+  );
+}
+
+function parseCheck(positionals: readonly string[], values: Values): Result<Command> {
+  const [, directory = ".", ...extra] = positionals;
+  if (extra.length > 0) return unknownCommand(positionals);
+  const refused = unaccepted("check", values);
+  if (refused !== null) return refused;
+  if (values.tlc !== true) {
+    return values.timeout === undefined
+      ? accept({ kind: "check", directory, tlc: null })
+      : refuse("--timeout は --tlc と一緒に使います");
+  }
+  const seconds = values.timeout ?? String(DEFAULT_TIMEOUT_SECONDS);
+  if (typeof seconds !== "string" || !/^[1-9]\d*$/.test(seconds)) {
+    return refuse("--timeout は 1 以上の整数（秒）にしてください");
+  }
+  return accept({ kind: "check", directory, tlc: { timeoutMs: Number(seconds) * 1000 } });
+}
+
+/** Both variables or neither: a URL with no hash, or a hash with no URL, would install something unchecked or nothing. */
+function parseInstallSource(env: NodeJS.ProcessEnv): Result<InstallSource | null> {
+  const url = env.EVERYPATH_TLA_URL ?? "";
+  const sha256 = env.EVERYPATH_TLA_SHA256 ?? "";
+  if (url === "" && sha256 === "") return accept(null);
+  if (sha256 === "") {
+    return refuse("EVERYPATH_TLA_URL を使うときは EVERYPATH_TLA_SHA256 も指定してください");
+  }
+  if (url === "") {
+    return refuse("EVERYPATH_TLA_SHA256 を使うときは EVERYPATH_TLA_URL も指定してください");
+  }
+  if (!/^[0-9a-f]{64}$/i.test(sha256)) {
+    return refuse("EVERYPATH_TLA_SHA256 は 64 桁の 16 進数にしてください");
+  }
+  return accept({ url, sha256 });
+}
+
+function parseTla(
+  positionals: readonly string[],
+  values: Values,
+  env: NodeJS.ProcessEnv,
+): Result<Command> {
+  const [, subcommand, ...rest] = positionals;
+  switch (subcommand) {
+    case undefined:
+      return refuse("tla には export か install を指定してください");
+    case "export":
+      if (rest.length > 1) return unknownCommand(positionals);
+      return (
+        unaccepted("tla export", values) ??
+        accept({ kind: "tla-export", directory: rest[0] ?? "." })
+      );
+    case "install": {
+      if (rest.length > 0) return unknownCommand(positionals);
+      const refused = unaccepted("tla install", values);
+      if (refused !== null) return refused;
+      const source = parseInstallSource(env);
+      return source.ok ? accept({ kind: "tla-install", source: source.value }) : source;
+    }
+    default:
+      return unknownCommand(positionals);
+  }
+}
+
+/** The command line and the install variables are a boundary: whatever was typed becomes a `Command` or a message. */
+function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Result<Command> {
   try {
     const { positionals, values } = parseArgs({
       args: [...args],
@@ -36,39 +164,30 @@ function parseCommand(args: readonly string[]): Parsed {
       options: {
         json: { type: "boolean" },
         quiet: { type: "boolean" },
+        tlc: { type: "boolean" },
+        timeout: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
-    const unknown = Object.keys(values).filter((key) => !OPTIONS.includes(key));
+    const unknown = Object.keys(values).filter((key) => !OPTIONS.has(key));
     if (unknown.length > 0) {
-      return {
-        ok: false,
-        message: `未知のオプションです: ${unknown.map((key) => `--${key}`).join(" ")}`,
-      };
+      return refuse(`未知のオプションです: ${unknown.map((key) => `--${key}`).join(" ")}`);
     }
-    if (values.help) return { ok: true, command: { kind: "help" } };
-    const [name, directory = ".", ...extra] = positionals;
-    if (name === undefined) return { ok: false, message: "コマンドがありません" };
-    if ((name !== "scan" && name !== "check") || extra.length > 0) {
-      return { ok: false, message: `未知のコマンドか引数です: ${positionals.join(" ")}` };
+    if (values.help) return accept({ kind: "help" });
+    switch (positionals[0]) {
+      case undefined:
+        return refuse("コマンドがありません");
+      case "scan":
+        return parseScan(positionals, values);
+      case "check":
+        return parseCheck(positionals, values);
+      case "tla":
+        return parseTla(positionals, values, env);
+      default:
+        return unknownCommand(positionals);
     }
-    if (name === "check") {
-      if (values.json || values.quiet) {
-        return { ok: false, message: "check は --json と --quiet を受け付けません" };
-      }
-      return { ok: true, command: { kind: "check", directory } };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "scan",
-        directory,
-        json: values.json === true,
-        quiet: values.quiet === true,
-      },
-    };
   } catch (error) {
-    return { ok: false, message: errorMessage(error) };
+    return refuse(errorMessage(error));
   }
 }
 
@@ -99,6 +218,19 @@ function formatPath({ steps }: Counterexample): string {
   );
 }
 
+/**
+ * One numbered line per step with the variables: `2. →(reset_done) Home（authed=FALSE, retries=0）`.
+ * A behavior that never ends says where it goes back to. Without variables there are no parentheses.
+ */
+function describeSteps({ steps, loopStart }: Counterexample): string[] {
+  const lines = steps.map(({ state, event, vars }, index) => {
+    const arrow = index === 0 ? "" : `→${event === null ? "" : `(${event})`} `;
+    const values = Object.entries(vars).map(([name, value]) => `${name}=${value}`);
+    return `  ${index + 1}. ${arrow}${state}${values.length === 0 ? "" : `（${values.join(", ")}）`}`;
+  });
+  return loopStart === null ? lines : [...lines, `  → ${loopStart + 1} に戻って繰り返す`];
+}
+
 function describeProperty({
   id,
   kind,
@@ -115,7 +247,9 @@ function describeProperty({
         : `${kind} の簡易検査はまだありません`;
     return [title, `  ${reason}`];
   }
-  return [title, ...counterexamples.map((example) => `  ${formatPath(example)}`)];
+  const describe = (example: Counterexample): string[] =>
+    checkedBy === "bfs" ? [`  ${formatPath(example)}`] : describeSteps(example);
+  return [title, ...counterexamples.flatMap(describe)];
 }
 
 function summarizeChecks({ properties, warnings }: Graph): string {
@@ -128,9 +262,35 @@ function summarizeChecks({ properties, warnings }: Graph): string {
   return `性質 ${properties.length} 件: ${counts.join("、")}${note}`;
 }
 
-function reportChecks(graph: Graph): string[] {
-  if (graph.properties.length === 0) return [`性質がありません（${PROPERTIES_FILE}）`];
-  return [...graph.properties.flatMap(describeProperty), summarizeChecks(graph)];
+/** `extra` is what only TLC can say, printed before the count. */
+function reportChecks(graph: Graph, extra: readonly string[]): string[] {
+  if (graph.properties.length === 0) return [`性質がありません（${PROPERTIES_FILE}）`, ...extra];
+  return [...graph.properties.flatMap(describeProperty), ...extra, summarizeChecks(graph)];
+}
+
+/** R-03: without Java or the jar the quick check still decides, and this says how to get TLC. */
+function describeMissing({ what, jar }: Extract<TlcCheck, { readonly kind: "missing" }>): string[] {
+  const reason =
+    what === "java"
+      ? "java を実行できません（PATH に java が無いか、動きません。Java 11 以降が要ります）"
+      : `${jar} に tla2tools.jar がありません`;
+  return [
+    `TLC を動かせません: ${reason}`,
+    "  jar は everypath tla install で入ります（EVERYPATH_TLA_JAR、既定 ~/.everypath/tla2tools.jar）",
+    "  簡易検査の結果だけで判定します",
+  ];
+}
+
+function describeChecked({
+  typeOk,
+  error,
+}: Extract<TlcCheck, { readonly kind: "checked" }>): string[] {
+  return [
+    ...(typeOk === null
+      ? []
+      : ["違反 TypeOK 変数が宣言した範囲を外れました", ...describeSteps(typeOk)]),
+    ...(error === null ? [] : [`エラー TLC: ${error}`]),
+  ];
 }
 
 async function isDirectory(path: string): Promise<boolean> {
@@ -142,23 +302,32 @@ async function isDirectory(path: string): Promise<boolean> {
 }
 
 async function main(args: readonly string[]): Promise<number> {
-  const parsed = parseCommand(args);
+  const parsed = parseCommand(args, process.env);
   if (!parsed.ok) {
     process.stderr.write(`${parsed.message}\n${USAGE}\n`);
     return USAGE_ERROR;
   }
-  const { command } = parsed;
+  const command = parsed.value;
   if (command.kind === "help") {
     process.stdout.write(`${USAGE}\n`);
     return 0;
   }
+
+  if (command.kind === "tla-install") return runInstall(command.source);
 
   const root = resolve(command.directory);
   if (!(await isDirectory(root))) {
     process.stderr.write(`ディレクトリが見つかりません: ${command.directory}\n`);
     return USAGE_ERROR;
   }
-  return command.kind === "scan" ? runScan(root, command) : runCheck(root);
+  switch (command.kind) {
+    case "scan":
+      return runScan(root, command);
+    case "check":
+      return runCheck(root, command.tlc);
+    case "tla-export":
+      return runExport(root);
+  }
 }
 
 async function runScan(
@@ -174,15 +343,46 @@ async function runScan(
   return 0;
 }
 
-/** A property the file defines but the check could not read fails the run too, so CI never passes it silently. */
-async function runCheck(root: string): Promise<number> {
-  const graph = await scan(root, { reason: "check" });
-  if (graph.warnings.length > 0) {
-    process.stderr.write(`${graph.warnings.map(describeWarning).join("\n")}\n`);
-  }
-  process.stdout.write(`${reportChecks(graph).join("\n")}\n`);
+/**
+ * A property the file defines but the check could not read fails the run too, so CI never passes it
+ * silently. So does any TLC error, which includes a property TLC could not decide, and a variable
+ * out of its range. With `--tlc` but no Java or jar the quick check alone decides the exit code.
+ */
+async function runCheck(root: string, tlc: { readonly timeoutMs: number } | null): Promise<number> {
+  const outcome = tlc === null ? null : await checkTlc(root, tlc);
+  const graph = outcome?.graph ?? (await scan(root, { reason: "check" }));
+  const stderr = graph.warnings.map(describeWarning);
+  const extra = outcome?.kind === "checked" ? describeChecked(outcome) : [];
+  if (outcome?.kind === "missing") stderr.push(...describeMissing(outcome));
+  if (stderr.length > 0) process.stderr.write(`${stderr.join("\n")}\n`);
+  process.stdout.write(`${reportChecks(graph, extra).join("\n")}\n`);
+
   const rejected = graph.warnings.some((warning) => warning.file === PROPERTIES_FILE);
-  return rejected || graph.properties.some((p) => p.result === "violated") ? 1 : 0;
+  const violated = graph.properties.some((p) => p.result === "violated");
+  const tlcFailed =
+    outcome?.kind === "checked" && (outcome.typeOk !== null || outcome.error !== null);
+  return rejected || violated || tlcFailed ? 1 : 0;
+}
+
+async function runExport(root: string): Promise<number> {
+  const exported = await exportTla(root);
+  if (!exported.ok) {
+    process.stderr.write(`${exported.reason}\n`);
+    return 1;
+  }
+  for (const { reason } of exported.rejected) process.stderr.write(`  警告 ${reason}\n`);
+  process.stdout.write(`Model.tla と Model.cfg を ${exported.directory}/ に書きました\n`);
+  return 0;
+}
+
+async function runInstall(source: InstallSource | null): Promise<number> {
+  const installed = await installTla(source);
+  if (!installed.ok) {
+    process.stderr.write(`${installed.reason}\n`);
+    return 1;
+  }
+  process.stdout.write(`tla2tools.jar を ${installed.path} に置きました\n`);
+  return 0;
 }
 
 try {
