@@ -128,6 +128,7 @@ function parseDefinition(
   if (!isRecord(raw)) return fail("定義が JSON オブジェクトではありません");
   if (id === null) return fail("id がありません。空でない文字列を書いてください");
   if (taken.has(id)) return fail("id が先の定義と重複しています");
+  if (raw.kind === undefined) return fail("kind がありません");
   if (!isKind(raw.kind)) {
     const kinds = Object.keys(BODY_PARSERS).join("、");
     return fail(`kind ${show(raw.kind)} は未知です（${kinds} のどれか）`);
