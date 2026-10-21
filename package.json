@@ -1,0 +1,38 @@
+{
+  "name": "everypath",
+  "version": "0.0.0",
+  "description": "Agent-declared statecharts, model-checked with TLA+, drawn as a review map",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "everypath": "dist/cli.js"
+  },
+  "exports": {
+    "./types": {
+      "types": "./dist/core/types.d.ts",
+      "default": "./dist/core/types.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "skill/",
+    "templates/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/cli.ts serve example",
+    "test": "tsx --test 'test/**/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "lint": "biome check .",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build && tsx scripts/verify-requirements.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
