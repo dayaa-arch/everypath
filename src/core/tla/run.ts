@@ -222,7 +222,10 @@ async function runJava(
         timedOut = true;
         child.kill("SIGKILL");
       }, budgetMs);
+      // An abort comes as `error` too, while TLC may still run in `directory`. Only a failed spawn (no
+      // pid) settles here; the rest waits for `close`, so the directories outlive every writer to them.
       child.on("error", () => {
+        if (child.pid !== undefined) return;
         clearTimeout(timer);
         resolve({ kind: "missing", what: "java", jar });
       });

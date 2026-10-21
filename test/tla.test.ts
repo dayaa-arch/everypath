@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { readdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { existsSync } from "node:fs";
+import { chmod, readdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { delimiter, join, relative } from "node:path";
 import { describe, it } from "node:test";
 import { PROPERTIES_FILE } from "../src/core/properties.js";
 import { analyze, scan } from "../src/core/scan.js";
 import { generateTla, type TlaNames } from "../src/core/tla/generate.js";
 import { parseTlcOutput } from "../src/core/tla/parse.js";
+import { runTlc } from "../src/core/tla/run.js";
 import type { Graph, PropertyResult } from "../src/core/types.js";
 import { makeRepo, readGraph, runCli, ts, writeFiles } from "./helpers/repo.js";
 import {
@@ -1002,5 +1004,46 @@ describe("tla: definitions the model leaves out", () => {
       !graph.warnings.some((w) => /TLA\+ にできません/.test(w.message)),
       JSON.stringify(graph.warnings),
     );
+  });
+});
+
+describe("tla: a run stopped from outside", () => {
+  it("waits for TLC to close before it removes TLC's directory, so nothing is left behind", async () => {
+    const root = await exampleRepo();
+    const tools = await makeRepo({ "tla2tools.jar": "not a jar" });
+    const cwdLog = join(tools, "cwd");
+    // The background job keeps TLC's output open and writes into its directory a second later.
+    const java = [
+      "#!/bin/sh",
+      '[ "$1" = "-version" ] && exit 0',
+      `echo "$PWD" > '${cwdLog}'`,
+      '( sleep 1; mkdir -p "$PWD"; touch "$PWD/late" ) &',
+      "exec sleep 60",
+      "",
+    ].join("\n");
+    await writeFiles(tools, { "bin/java": java });
+    await chmod(join(tools, "bin", "java"), 0o755);
+    const saved = { PATH: process.env.PATH, EVERYPATH_TLA_JAR: process.env.EVERYPATH_TLA_JAR };
+    process.env.PATH = `${join(tools, "bin")}${delimiter}${process.env.PATH ?? ""}`;
+    process.env.EVERYPATH_TLA_JAR = join(tools, "tla2tools.jar");
+    try {
+      const abort = new AbortController();
+      const run = runTlc(root, { signal: abort.signal });
+      while (!existsSync(cwdLog)) await new Promise((resolve) => setTimeout(resolve, 20));
+      const started = Date.now();
+      abort.abort(new Error("stopped"));
+
+      await assert.rejects(run, /stopped/);
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.max(0, 1_500 - (Date.now() - started))),
+      );
+
+      const directory = (await readFile(cwdLog, "utf8")).trim();
+      assert.equal(existsSync(directory), false, `${directory} is left behind`);
+    } finally {
+      process.env.PATH = saved.PATH;
+      if (saved.EVERYPATH_TLA_JAR === undefined) delete process.env.EVERYPATH_TLA_JAR;
+      else process.env.EVERYPATH_TLA_JAR = saved.EVERYPATH_TLA_JAR;
+    }
   });
 });
