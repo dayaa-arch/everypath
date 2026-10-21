@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { readdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { existsSync } from "node:fs";
+import { chmod, readdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { delimiter, join, relative } from "node:path";
 import { describe, it } from "node:test";
 import { PROPERTIES_FILE } from "../src/core/properties.js";
 import { analyze, scan } from "../src/core/scan.js";
 import { generateTla, type TlaNames } from "../src/core/tla/generate.js";
 import { parseTlcOutput } from "../src/core/tla/parse.js";
+import { runTlc } from "../src/core/tla/run.js";
 import type { Graph, PropertyResult } from "../src/core/types.js";
 import { makeRepo, readGraph, runCli, ts, writeFiles } from "./helpers/repo.js";
 import {
@@ -621,7 +623,10 @@ describe("tla: running TLC and merging its verdicts", () => {
     assert.equal(result.status, 1, result.stderr);
     assert.deepEqual(await java.cfgs(), EXPECTED_EXAMPLE_RUNS);
     const first = (await java.calls())[0] ?? "";
-    assert.ok(first.split(" ")[0]?.endsWith(join(".everypath", "tla")), first);
+    assert.ok(
+      !(first.split(" ")[0] ?? root).startsWith(root),
+      `TLC runs outside the repository: ${first}`,
+    );
     assert.ok(
       first.includes(
         `-XX:+UseParallelGC -jar ${java.jar} -workers auto -deadlock -config Model.cfg -metadir `,
@@ -772,7 +777,7 @@ describe("tla: running TLC and merging its verdicts", () => {
     );
   });
 
-  it("settles variable-free invariants as both and turns a rejected property into an error", async () => {
+  it("records variable-free invariants as both, keeps the quick check's verdict for them and stores nothing for a rejected property", async () => {
     const root = await exampleRepo();
     await writeFiles(root, {
       [PROPERTIES_FILE]: JSON.stringify({
@@ -800,16 +805,22 @@ describe("tla: running TLC and merging its verdicts", () => {
 
     assert.equal(result.status, 1, result.stderr);
     const graph = await readGraph(root);
-    const noDb = resultOf(graph, "no-db");
-    assert.deepEqual([noDb.checkedBy, noDb.result, noDb.statesExplored], ["both", "ok", 47]);
-    const typo = resultOf(graph, "typo");
-    assert.deepEqual([typo.checkedBy, typo.result, typo.statesExplored], ["tlc", "error", null]);
-    const warnings = graph.warnings.filter((w) => w.file === PROPERTIES_FILE);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0]?.message ?? "", /typo/);
-    assert.match(warnings[0]?.message ?? "", /retriez/);
-    assert.equal(resultOf(graph, "no-unauth-home").result, "violated");
     const stored = await readResult(root);
+    const recordedNoDb = stored.properties.find((p: PropertyResult) => p.id === "no-db");
+    assert.deepEqual(
+      [recordedNoDb?.checkedBy, recordedNoDb?.result, recordedNoDb?.statesExplored],
+      ["both", "ok", 47],
+    );
+    const noDb = resultOf(graph, "no-db");
+    assert.deepEqual([noDb.checkedBy, noDb.result], ["bfs", "ok"]);
+    const typo = resultOf(graph, "typo");
+    assert.deepEqual([typo.checkedBy, typo.result, typo.statesExplored], ["tlc", "pending", null]);
+    assert.ok(!stored.properties.some((p: PropertyResult) => p.id === "typo"));
+    const warnings = result.stderr.split("\n").filter((line) => line.includes(PROPERTIES_FILE));
+    assert.equal(warnings.length, 1, result.stderr);
+    assert.match(warnings[0] ?? "", /typo/);
+    assert.match(warnings[0] ?? "", /retriez/);
+    assert.equal(resultOf(graph, "no-unauth-home").result, "violated");
     assert.ok(!Object.values(stored.names.checks).includes("typo"));
   });
 
@@ -866,5 +877,173 @@ describe("tla: running TLC and merging its verdicts", () => {
       assert.equal(resultOf(graph, id).result, "error", id);
     }
     assert.match(result.stdout, /Parsing or semantic analysis failed/);
+  });
+});
+
+describe("tla: a stored verdict only fills what the quick check left pending", () => {
+  const noLock = { id: "no-lock", kind: "invariant", expr: "state != ロック" };
+  const allOk = async (): Promise<FakeJavaScript> => ({
+    rules: [],
+    otherwise: { output: await fixture("ok") },
+  });
+  const violatedAt = (graph: Graph, id: string): string[] =>
+    graph.nodes.filter((n) => n.violations.some((v) => v === id)).map((n) => n.id);
+
+  it("keeps a violation the quick check found when TLC could not decide it", async () => {
+    const root = await exampleRepo();
+    await addProperty(root, noLock);
+    const java = await fakeJava({
+      rules: [],
+      otherwise: { output: await fixture("parse-error"), exit: 150 },
+    });
+    assert.equal(runCli(["check", "--tlc", root], root, java.env).status, 1);
+
+    const plain = runCli(["check", root]);
+
+    assert.equal(plain.status, 1, plain.stdout);
+    const graph = await readGraph(root);
+    assert.deepEqual(
+      [resultOf(graph, "no-lock").result, resultOf(graph, "no-lock").checkedBy],
+      ["violated", "bfs"],
+    );
+    assert.ok(violatedAt(graph, "no-lock").includes("ロック"), "ロック carries the violation");
+  });
+
+  it("keeps the quick check's verdict when a rejected invariant becomes a never-reach of the same id", async () => {
+    const root = await exampleRepo();
+    await addProperty(root, { id: "typo", kind: "invariant", expr: "retriez <= 3" });
+    const java = await fakeJava(await allOk());
+    runCli(["check", "--tlc", root], root, java.env);
+    assert.ok(
+      !(await readResult(root)).properties.some((p: PropertyResult) => p.id === "typo"),
+      "no verdict is stored for a definition the model left out",
+    );
+    const path = join(root, PROPERTIES_FILE);
+    const file = JSON.parse(await readFile(path, "utf8"));
+    file.properties = file.properties.map((p: { id: string }) =>
+      p.id === "typo" ? { id: "typo", kind: "never-reach", target: ["ロック"] } : p,
+    );
+    await writeFile(path, JSON.stringify(file));
+
+    const plain = runCli(["check", root]);
+
+    assert.equal(plain.status, 1, plain.stdout);
+    const typo = resultOf(await readGraph(root), "typo");
+    assert.deepEqual([typo.kind, typo.result, typo.checkedBy], ["never-reach", "violated", "bfs"]);
+  });
+
+  it("ignores a stored verdict of another kind under the same id", async () => {
+    const root = await exampleRepo();
+    const java = await fakeJava(await exampleRun());
+    runCli(["check", "--tlc", root], root, java.env);
+    const path = join(root, PROPERTIES_FILE);
+    const file = JSON.parse(await readFile(path, "utf8"));
+    file.properties = file.properties.map((p: { id: string }) =>
+      p.id === "no-unauth-home"
+        ? { id: "no-unauth-home", kind: "leads-to", from: "state == Home", to: "state == ログイン" }
+        : p,
+    );
+    await writeFile(path, JSON.stringify(file));
+
+    const graph = await scan(root);
+
+    const rewritten = resultOf(graph, "no-unauth-home");
+    assert.deepEqual([rewritten.kind, rewritten.result], ["leads-to", "pending"]);
+    assert.deepEqual(violatedAt(graph, "no-unauth-home"), []);
+  });
+
+  it("cannot turn a violation the quick check found into ok through a forged result.json", async () => {
+    const root = await exampleRepo();
+    await addProperty(root, noLock);
+    const java = await fakeJava(await allOk());
+    runCli(["check", "--tlc", root], root, java.env);
+    const stored = await readResult(root);
+    const forged = stored.properties.map((p: PropertyResult) =>
+      p.id === "no-lock" || p.id === "no-unauth-home"
+        ? { ...p, result: "ok", counterexamples: [], checkedBy: "both" }
+        : p,
+    );
+    await writeFile(
+      join(root, ".everypath", "tla", "result.json"),
+      JSON.stringify({ ...stored, properties: forged }),
+    );
+
+    const plain = runCli(["check", root]);
+
+    assert.equal(plain.status, 1, plain.stdout);
+    const graph = await readGraph(root);
+    const lock = resultOf(graph, "no-lock");
+    assert.deepEqual([lock.result, lock.checkedBy], ["violated", "bfs"]);
+    const home = resultOf(graph, "no-unauth-home");
+    assert.deepEqual([home.result, home.checkedBy], ["ok", "tlc"]);
+  });
+});
+
+describe("tla: definitions the model leaves out", () => {
+  const rejectedWarning = /typo.*TLA\+ にできません|TLA\+ にできません.*retriez/;
+
+  it("are warned about by check --tlc and tla export only, so a plain check exits the same with or without result.json", async () => {
+    const root = await exampleRepo();
+    await addProperty(root, { id: "typo", kind: "invariant", expr: "retriez <= 3" });
+    const before = runCli(["check", root]);
+    const java = await fakeJava({ rules: [], otherwise: { output: await fixture("ok") } });
+
+    const checked = runCli(["check", "--tlc", root], root, java.env);
+    const exported = runCli(["tla", "export", root]);
+    const after = runCli(["check", root]);
+
+    assert.equal(checked.status, 1, checked.stdout);
+    assert.match(checked.stderr, rejectedWarning);
+    assert.match(exported.stderr, rejectedWarning);
+    assert.equal(before.status, 0, `${before.stdout}\n${before.stderr}`);
+    assert.equal(after.status, before.status, `${after.stdout}\n${after.stderr}`);
+    assert.doesNotMatch(after.stderr, rejectedWarning);
+    const scanned = runCli(["scan", "--json", "--quiet", root]);
+    const graph: Graph = JSON.parse(scanned.stdout);
+    assert.ok(
+      !graph.warnings.some((w) => /TLA\+ にできません/.test(w.message)),
+      JSON.stringify(graph.warnings),
+    );
+  });
+});
+
+describe("tla: a run stopped from outside", () => {
+  it("waits for TLC to close before it removes TLC's directory, so nothing is left behind", async () => {
+    const root = await exampleRepo();
+    const tools = await makeRepo({ "tla2tools.jar": "not a jar" });
+    const cwdLog = join(tools, "cwd");
+    // The background job keeps TLC's output open and writes into its directory a second later.
+    const java = [
+      "#!/bin/sh",
+      '[ "$1" = "-version" ] && exit 0',
+      `echo "$PWD" > '${cwdLog}'`,
+      '( sleep 1; mkdir -p "$PWD"; touch "$PWD/late" ) &',
+      "exec sleep 60",
+      "",
+    ].join("\n");
+    await writeFiles(tools, { "bin/java": java });
+    await chmod(join(tools, "bin", "java"), 0o755);
+    const saved = { PATH: process.env.PATH, EVERYPATH_TLA_JAR: process.env.EVERYPATH_TLA_JAR };
+    process.env.PATH = `${join(tools, "bin")}${delimiter}${process.env.PATH ?? ""}`;
+    process.env.EVERYPATH_TLA_JAR = join(tools, "tla2tools.jar");
+    try {
+      const abort = new AbortController();
+      const run = runTlc(root, { signal: abort.signal });
+      while (!existsSync(cwdLog)) await new Promise((resolve) => setTimeout(resolve, 20));
+      const started = Date.now();
+      abort.abort(new Error("stopped"));
+
+      await assert.rejects(run, /stopped/);
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.max(0, 1_500 - (Date.now() - started))),
+      );
+
+      const directory = (await readFile(cwdLog, "utf8")).trim();
+      assert.equal(existsSync(directory), false, `${directory} is left behind`);
+    } finally {
+      process.env.PATH = saved.PATH;
+      if (saved.EVERYPATH_TLA_JAR === undefined) delete process.env.EVERYPATH_TLA_JAR;
+      else process.env.EVERYPATH_TLA_JAR = saved.EVERYPATH_TLA_JAR;
+    }
   });
 });

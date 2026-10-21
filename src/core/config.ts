@@ -11,8 +11,11 @@ export type Config = {
   readonly includeTests: boolean;
   /** Where to look for findings before the default locations. */
   readonly findings: string | null;
-  readonly ignore: readonly RegExp[];
+  readonly ignore: readonly Glob[];
 };
+
+/** A compiled `ignore` pattern, tested against a root-relative `/` path. */
+export type Glob = { readonly test: (path: string) => boolean };
 
 export const DEFAULT_CONFIG: Config = {
   aliases: [],
@@ -21,21 +24,85 @@ export const DEFAULT_CONFIG: Config = {
   ignore: [],
 };
 
-const GLOB_TOKENS: ReadonlyMap<string, string> = new Map([
-  ["**/", "(?:.*/)?"],
-  ["**", ".*"],
-  ["*", "[^/]*"],
-  ["?", "[^/]"],
-]);
+/**
+ * `dirs` is `**` and a slash: no directory or any run of them. `globstar` is a bare `**`, any run of
+ * characters. `star` and `one` (`*`, `?`) stay inside one name. A repeated `dirs` is kept once.
+ */
+type GlobToken =
+  | { readonly kind: "char"; readonly char: string }
+  | { readonly kind: "one" }
+  | { readonly kind: "star" }
+  | { readonly kind: "globstar" }
+  | { readonly kind: "dirs" };
 
-/** `**` crosses directories, `*` and `?` stay inside one. The pattern is anchored at the root. */
-function globToRegExp(glob: string): RegExp {
+function tokenize(glob: string): GlobToken[] {
   const pattern = glob.replaceAll("\\", "/").replace(/^\.?\//, "");
-  const source = pattern.replace(
-    /\*\*\/|\*\*|\*|\?|[.+^${}()|[\]\\]/g,
-    (token) => GLOB_TOKENS.get(token) ?? `\\${token}`,
-  );
-  return new RegExp(`^${source}$`);
+  const tokens: GlobToken[] = [];
+  for (let at = 0; at < pattern.length; ) {
+    if (pattern.startsWith("**/", at)) {
+      if (tokens.at(-1)?.kind !== "dirs") tokens.push({ kind: "dirs" });
+      at += 3;
+    } else if (pattern.startsWith("**", at)) {
+      tokens.push({ kind: "globstar" });
+      at += 2;
+    } else {
+      const char = pattern.charAt(at);
+      tokens.push(
+        char === "*" ? { kind: "star" } : char === "?" ? { kind: "one" } : { kind: "char", char },
+      );
+      at += 1;
+    }
+  }
+  return tokens;
+}
+
+/**
+ * Whether the whole of `path` matches, anchored at the root. A table over (token, position) filled
+ * from the end, so the time is the pattern length times the path length for any pattern: a
+ * backtracking regex takes minutes on ten `dirs` in a row against a deep path.
+ */
+function matches(tokens: readonly GlobToken[], path: string): boolean {
+  const on = (table: Uint8Array, at: number): boolean => table[at] === 1;
+  const n = path.length;
+  /** `rest[p]`: the tokens after the current one match `path` from `p`. */
+  let rest = new Uint8Array(n + 1);
+  rest[n] = 1;
+  for (const token of tokens.toReversed()) {
+    const here = new Uint8Array(n + 1);
+    /** For `dirs`: a `/` at or after `p` closes the directories and the rest matches after it. */
+    const closes = new Uint8Array(n + 1);
+    for (let p = n; p >= 0; p--) {
+      const char = p < n ? path.charAt(p) : null;
+      const inName = char !== null && char !== "/";
+      let match: boolean;
+      switch (token.kind) {
+        case "char":
+          match = char === token.char && on(rest, p + 1);
+          break;
+        case "one":
+          match = inName && on(rest, p + 1);
+          break;
+        case "star":
+          match = on(rest, p) || (inName && on(here, p + 1));
+          break;
+        case "globstar":
+          match = on(rest, p) || (char !== null && on(here, p + 1));
+          break;
+        case "dirs":
+          closes[p] = (char === "/" && on(rest, p + 1)) || on(closes, p + 1) ? 1 : 0;
+          match = on(rest, p) || on(closes, p);
+          break;
+      }
+      here[p] = match ? 1 : 0;
+    }
+    rest = here;
+  }
+  return on(rest, 0);
+}
+
+function compileGlob(glob: string): Glob {
+  const tokens = tokenize(glob);
+  return { test: (path) => matches(tokens, path) };
 }
 
 function aliasesOf(raw: unknown): [string, string][] | null {
@@ -48,12 +115,12 @@ function aliasesOf(raw: unknown): [string, string][] | null {
   return pairs.sort(([a], [b]) => b.length - a.length);
 }
 
-function globsOf(raw: unknown): RegExp[] | null {
+function globsOf(raw: unknown): Glob[] | null {
   if (!Array.isArray(raw)) return null;
-  const globs: RegExp[] = [];
+  const globs: Glob[] = [];
   for (const item of asItems(raw)) {
     if (typeof item !== "string") return null;
-    globs.push(globToRegExp(item));
+    globs.push(compileGlob(item));
   }
   return globs;
 }

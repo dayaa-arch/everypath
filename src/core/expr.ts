@@ -49,6 +49,11 @@ export function parseEventName(input: string): ParseResult<EventName> {
   return run(input, (cur) => parseName(cur, "event"));
 }
 
+/** A variable name, as a counterexample step in `result.json` holds it. Same identifier rules. */
+export function parseVarName(input: string): ParseResult<VarName> {
+  return run(input, (cur) => parseName(cur, "var"));
+}
+
 /**
  * Turns a file or directory name into a state name: characters an identifier cannot hold become
  * `_`, a leading non-letter gets a `_` prefix, a keyword gets a `_` suffix. Total, unlike the parsers.

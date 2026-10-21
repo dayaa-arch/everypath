@@ -23,10 +23,11 @@ async function makeRoot({ packageJson = { name: "fixture" }, uiHtml }: Fixture):
   return root;
 }
 
-function verify(root: string) {
-  const result = spawnSync(process.execPath, ["--import", "tsx", script, root], {
+function verify(root: string, options: readonly string[] = []) {
+  const result = spawnSync(process.execPath, ["--import", "tsx", script, root, ...options], {
     cwd: repoRoot,
     encoding: "utf8",
+    timeout: 180_000,
   });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
@@ -104,5 +105,30 @@ describe("verify-requirements R-02", () => {
     const result = verify(root);
     assert.equal(result.status, 0);
     assert.match(result.stdout, /skip: dist\/ui\.html not built/);
+  });
+});
+
+describe("verify-requirements R-05", () => {
+  it("times ten saves against the real everypath serve and prints the slowest under 2,000 ms", () => {
+    const result = verify(repoRoot, ["--only", "R-05"]);
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const slowest = /^ok: R-05 .*max (\d+) ms/m.exec(result.stdout);
+    assert.ok(slowest, result.stdout);
+    assert.ok(Number(slowest[1]) < 2_000, result.stdout);
+  });
+
+  it("skips in a directory that has no src/cli.ts to serve", async () => {
+    const result = verify(await makeRoot({}), ["--only", "R-05"]);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /skip: R-05 needs src\/cli\.ts/);
+  });
+
+  it("refuses an id that is not in the table", async () => {
+    const result = verify(await makeRoot({}), ["--only", "R-99"]);
+
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /R-99/);
   });
 });

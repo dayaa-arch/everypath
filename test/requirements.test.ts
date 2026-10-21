@@ -1,11 +1,25 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, relative } from "node:path";
 import { describe, it } from "node:test";
+import { serveUntilExit } from "../scripts/serve-client.js";
 import type { FlowEdge } from "../src/core/types.js";
 import { flows, makeRepo, readGraph, runCli, ts } from "./helpers/repo.js";
+import {
+  javaEnv,
+  propertyOf,
+  readOutput,
+  readReview,
+  ready,
+  request,
+  reviewPath,
+  serveEnv,
+  serveRepo,
+  succeeded,
+  violationRun,
+} from "./helpers/server.js";
 import { exampleRepo, fakeJava, fixture } from "./helpers/tlc.js";
 
 /** sha1 of every file outside `.everypath/`, keyed by root-relative path. */
@@ -219,5 +233,123 @@ describe("R-01: check --tlc writes only under .everypath/", () => {
     assert.deepEqual(await snapshot(root), before);
     const tla = (await readdir(join(root, ".everypath", "tla"))).sort();
     assert.deepEqual(tla, ["Model.cfg", "Model.tla", "result.json"]);
+  });
+});
+
+/** Every file and directory outside `.everypath/`, root-relative and sorted. */
+async function listing(root: string): Promise<string[]> {
+  const entries = await readdir(root, { recursive: true });
+  return entries.filter((path) => path.split(/[\\/]/)[0] !== ".everypath").sort();
+}
+
+describe("R-01: serve writes only under .everypath/", () => {
+  it("leaves every other file and directory untouched through approve, layout, rescan and a TLC run", async () => {
+    const root = await exampleRepo();
+    const java = await fakeJava(await violationRun());
+    const hashes = await snapshot(root);
+    const entries = await listing(root);
+    const serve = await serveRepo(root, javaEnv(java));
+    const events = await ready(serve);
+    const since = events.received.length;
+
+    const steps = [
+      await request(serve, "POST", reviewPath("Home"), { body: { note: "確認済み" } }),
+      await request(serve, "PUT", "/layout.json", { body: { Home: { x: 40, y: 80 } } }),
+      await request(serve, "POST", "/rescan"),
+    ];
+    for (const step of steps) assert.ok(succeeded(step), `${step.status} ${step.text}`);
+    const started = await request(serve, "POST", "/check/tlc");
+    assert.equal(started.status, 202, started.text);
+    await events.tlc("done", { since });
+    await events.graph((graph) => propertyOf(graph, "no-unauth-home").result === "violated", {
+      since,
+    });
+
+    assert.ok((await readReview(root)).approvals.Home, "the approval was written");
+    assert.ok(await readOutput(root, "layout.json"), "the layout was written");
+    assert.match(await readOutput(root, "tla", "Model.tla"), /MODULE Model/);
+    assert.deepEqual(await snapshot(root), hashes);
+    assert.deepEqual(await listing(root), entries);
+  });
+});
+
+describe("R-01: a link under .everypath/ never carries a write outside the repository", () => {
+  const JAPANESE = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u;
+  const files = {
+    "src/a.ts": ts("@state A", "@state-initial", "@state-next B on:go"),
+    "src/b.ts": ts("@state B"),
+  };
+
+  async function outsideAndRepo(link: string, target: "directory" | "file") {
+    const outside = await makeRepo(target === "file" ? { "history.jsonl": "outside\n" } : {});
+    const root = await makeRepo(files);
+    await mkdir(join(root, ".everypath"), { recursive: true }).catch(() => {});
+    await symlink(target === "file" ? join(outside, "history.jsonl") : outside, join(root, link));
+    return { outside, root, before: await snapshot(outside) };
+  }
+
+  it("refuses scan when .everypath is a link to a directory outside", async () => {
+    const outside = await makeRepo({});
+    const root = await makeRepo(files);
+    await symlink(outside, join(root, ".everypath"));
+
+    const result = runCli(["scan", root]);
+
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, JAPANESE);
+    assert.deepEqual(await readdir(outside), []);
+  });
+
+  it("refuses serve when .everypath is a link to a directory outside", async () => {
+    const outside = await makeRepo({});
+    const root = await makeRepo(files);
+    await symlink(outside, join(root, ".everypath"));
+
+    const result = await serveUntilExit({ directory: root, env: await serveEnv() });
+
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, JAPANESE);
+    assert.deepEqual(await readdir(outside), []);
+  });
+
+  it("refuses check --tlc and tla export when .everypath/tla is a link outside", async () => {
+    const { outside, root, before } = await outsideAndRepo(".everypath/tla", "directory");
+    const java = await fakeJava({ rules: [], otherwise: { output: await fixture("ok") } });
+
+    const checked = runCli(["check", "--tlc", root], root, java.env);
+    const exported = runCli(["tla", "export", root]);
+
+    assert.equal(checked.status, 1, checked.stderr);
+    assert.match(checked.stderr, JAPANESE);
+    assert.equal(exported.status, 1, exported.stderr);
+    assert.deepEqual(await snapshot(outside), before);
+  });
+
+  it("sends a Japanese TLC error from serve when .everypath/tla links outside, and writes nothing there", async () => {
+    const outside = await makeRepo({});
+    const root = await exampleRepo();
+    await mkdir(join(root, ".everypath"), { recursive: true });
+    await symlink(outside, join(root, ".everypath", "tla"));
+    const java = await fakeJava(await violationRun());
+    const serve = await serveRepo(root, javaEnv(java));
+    const events = await ready(serve);
+    const since = events.received.length;
+
+    const started = await request(serve, "POST", "/check/tlc");
+    assert.equal(started.status, 202, started.text);
+    const failed = await events.tlc("error", { since });
+
+    assert.match(failed.message ?? "", JAPANESE);
+    assert.deepEqual(await readdir(outside), []);
+  });
+
+  it("never appends through a history.jsonl that links outside", async () => {
+    const { outside, root, before } = await outsideAndRepo(".everypath/history.jsonl", "file");
+
+    const result = runCli(["scan", root]);
+
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, JAPANESE);
+    assert.deepEqual(await snapshot(outside), before);
   });
 });

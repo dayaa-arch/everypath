@@ -81,6 +81,8 @@ export type Reply = {
   readonly exit?: number;
   /** Print `output`, then sleep as the one process, so a kill closes the pipes. */
   readonly hang?: boolean;
+  /** Wait (at most 30 s) until this file exists before answering, so a test can hold a run open. */
+  readonly until?: string;
 };
 
 /** The first rule whose `when` appears in Model.cfg answers; `otherwise` answers the rest. */
@@ -101,7 +103,11 @@ export type FakeJava = {
 
 function answer(reply: Reply, file: string): string {
   const exit = `exit ${reply.exit ?? 0}`;
-  return `cat '${file}'\n${reply.hang === true ? "exec sleep 60" : exit}`;
+  const gate =
+    reply.until === undefined
+      ? ""
+      : `n=0; while [ ! -e '${reply.until}' ] && [ $n -lt 600 ]; do sleep 0.05; n=$((n+1)); done\n`;
+  return `${gate}cat '${file}'\n${reply.hang === true ? "exec sleep 60" : exit}`;
 }
 
 /** A shell script named `java`: `-version` succeeds, anything else logs its cfg and replies. */

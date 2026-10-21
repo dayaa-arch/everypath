@@ -26,7 +26,7 @@ export type JsonFile =
   | { readonly kind: "invalid"; readonly reason: string }
   | { readonly kind: "ok"; readonly value: unknown };
 
-function isMissing(error: unknown): boolean {
+export function isMissing(error: unknown): boolean {
   return (
     error instanceof Error &&
     "code" in error &&

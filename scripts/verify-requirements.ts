@@ -1,8 +1,11 @@
-import { readFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { parseArgs } from "node:util";
+import { hasFlow, launchServe, openEvents } from "./serve-client.js";
 
 type CheckResult =
-  | { kind: "ok" }
+  | { kind: "ok"; detail?: string }
   | { kind: "skip"; reason: string }
   | { kind: "fail"; violations: readonly [string, ...string[]] };
 
@@ -74,18 +77,89 @@ async function checkUiHasNoNetworkReferences(root: string): Promise<CheckResult>
   );
 }
 
+const SAVES = 10;
+const DEADLINE_MS = 2_000;
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * R-05: a file added to a repository that `everypath serve` watches reaches an SSE client as a graph
+ * event with its node and edge within 2 s. Ten saves, each timed from the write to the matching event.
+ */
+async function checkSaveReachesViewer(root: string): Promise<CheckResult> {
+  const cli = join(root, "src", "cli.ts");
+  if (!(await exists(cli))) return { kind: "skip", reason: "R-05 needs src/cli.ts" };
+
+  const directory = await mkdtemp(join(tmpdir(), "everypath-r05-"));
+  const source = (name: string) => join(directory, "src", name);
+  const serving: { stop?: () => Promise<void>; close?: () => void } = {};
+  try {
+    await mkdir(join(directory, "src"));
+    await writeFile(source("home.ts"), "// @state Home\n// @state-initial\n");
+    const serve = await launchServe({ directory, cli });
+    serving.stop = serve.stop;
+    const events = await openEvents(serve.url);
+    serving.close = events.close;
+    await events.graph();
+
+    const elapsed: number[] = [];
+    for (let save = 1; save <= SAVES; save++) {
+      const id = `R05_${save}`;
+      const since = events.received.length;
+      const started = performance.now();
+      await writeFile(source(`r05-${save}.ts`), `// @state ${id}\n// @state-next Home\n`);
+      await events.graph((graph) => hasFlow(graph, id, "Home"), {
+        since,
+        timeoutMs: DEADLINE_MS * 5,
+      });
+      elapsed.push(performance.now() - started);
+    }
+    const slowest = Math.max(...elapsed);
+    if (slowest >= DEADLINE_MS) {
+      return fail([
+        `the slowest of ${SAVES} saves took ${Math.round(slowest)} ms (limit ${DEADLINE_MS} ms)`,
+      ]);
+    }
+    return {
+      kind: "ok",
+      detail: `max ${Math.round(slowest)} ms of ${SAVES} saves, limit ${DEADLINE_MS} ms`,
+    };
+  } catch (error) {
+    return fail([`could not measure: ${error instanceof Error ? error.message : String(error)}`]);
+  } finally {
+    serving.close?.();
+    await serving.stop?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 const checks: readonly Check[] = [
   { id: "R-02", name: "no runtime dependencies", run: checkNoDependencies },
   { id: "R-02", name: "ui.html is offline", run: checkUiHasNoNetworkReferences },
+  { id: "R-05", name: "a saved file reaches the viewer", run: checkSaveReachesViewer },
 ];
 
-async function main(root: string): Promise<number> {
+async function main(root: string, only: string | undefined): Promise<number> {
+  const selected = only === undefined ? checks : checks.filter((check) => check.id === only);
+  if (selected.length === 0) {
+    console.error(`no check has the id ${only}`);
+    return 2;
+  }
   let failed = false;
-  for (const check of checks) {
+  for (const check of selected) {
     const result = await check.run(root);
     switch (result.kind) {
       case "ok":
-        console.log(`ok: ${check.id} ${check.name}`);
+        console.log(
+          `ok: ${check.id} ${check.name}${result.detail === undefined ? "" : ` (${result.detail})`}`,
+        );
         break;
       case "skip":
         console.log(`skip: ${result.reason}`);
@@ -105,4 +179,8 @@ async function main(root: string): Promise<number> {
   return failed ? 1 : 0;
 }
 
-process.exitCode = await main(resolve(process.argv[2] ?? process.cwd()));
+const { positionals, values } = parseArgs({
+  allowPositionals: true,
+  options: { only: { type: "string" } },
+});
+process.exitCode = await main(resolve(positionals[0] ?? process.cwd()), values.only);

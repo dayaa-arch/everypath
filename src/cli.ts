@@ -1,30 +1,37 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { errorMessage } from "./core/json.js";
 import { PROPERTIES_FILE } from "./core/properties.js";
 import { scan } from "./core/scan.js";
+import { rejectionWarnings } from "./core/tla/result.js";
 import {
   checkTlc,
   exportTla,
   type InstallSource,
   installTla,
-  type TlcCheck,
+  type TlcOutcome,
 } from "./core/tla/run.js";
 import type { Counterexample, Graph, PropertyResult, ScanWarning } from "./core/types.js";
 import { serializeGraph } from "./core/workspace.js";
+import { startServer } from "./server/server.js";
 
 const USAGE = [
   "使い方: everypath scan [dir] [--json] [--quiet]",
   "        everypath check [dir] [--tlc [--timeout 秒]]",
   "        everypath tla export [dir]",
   "        everypath tla install",
+  "        everypath serve [dir] [--port 4747] [--open]",
 ].join("\n");
 const USAGE_ERROR = 2;
-const DEFAULT_TIMEOUT_SECONDS = 120;
+const DEFAULT_PORT = 4747;
+/** `dist/ui.html` of this package, from `src/cli.ts` and from the built `dist/cli.js` alike. */
+const UI_PATH = fileURLToPath(new URL("../dist/ui.html", import.meta.url));
 
-type Label = "scan" | "check" | "tla export" | "tla install";
+type Label = "scan" | "check" | "tla export" | "tla install" | "serve";
 
 /** The options each command takes; `--help` goes with every one. */
 const ACCEPTS: Readonly<Record<Label, readonly string[]>> = {
@@ -32,6 +39,7 @@ const ACCEPTS: Readonly<Record<Label, readonly string[]>> = {
   check: ["tlc", "timeout"],
   "tla export": [],
   "tla install": [],
+  serve: ["port", "open"],
 };
 const OPTIONS: ReadonlySet<string> = new Set(["help", ...Object.values(ACCEPTS).flat()]);
 
@@ -46,7 +54,15 @@ type Command =
   | {
       readonly kind: "check";
       readonly directory: string;
-      readonly tlc: { readonly timeoutMs: number } | null;
+      /** `timeoutMs` is absent without `--timeout`: the run's own default applies. */
+      readonly tlc: { readonly timeoutMs?: number } | null;
+    }
+  | {
+      readonly kind: "serve";
+      readonly directory: string;
+      /** 0 asks the system for a free port. */
+      readonly port: number;
+      readonly open: boolean;
     }
   | { readonly kind: "tla-export"; readonly directory: string }
   | { readonly kind: "tla-install"; readonly source: InstallSource | null };
@@ -103,11 +119,24 @@ function parseCheck(positionals: readonly string[], values: Values): Result<Comm
       ? accept({ kind: "check", directory, tlc: null })
       : refuse("--timeout は --tlc と一緒に使います");
   }
-  const seconds = values.timeout ?? String(DEFAULT_TIMEOUT_SECONDS);
+  const seconds = values.timeout;
+  if (seconds === undefined) return accept({ kind: "check", directory, tlc: {} });
   if (typeof seconds !== "string" || !/^[1-9]\d*$/.test(seconds)) {
     return refuse("--timeout は 1 以上の整数（秒）にしてください");
   }
   return accept({ kind: "check", directory, tlc: { timeoutMs: Number(seconds) * 1000 } });
+}
+
+function parseServe(positionals: readonly string[], values: Values): Result<Command> {
+  const [, directory = ".", ...extra] = positionals;
+  if (extra.length > 0) return unknownCommand(positionals);
+  const refused = unaccepted("serve", values);
+  if (refused !== null) return refused;
+  const port = values.port ?? String(DEFAULT_PORT);
+  if (typeof port !== "string" || !/^\d+$/.test(port) || Number(port) > 65_535) {
+    return refuse("--port は 0 から 65535 の整数にしてください");
+  }
+  return accept({ kind: "serve", directory, port: Number(port), open: values.open === true });
 }
 
 /** Both variables or neither: a URL with no hash, or a hash with no URL, would install something unchecked or nothing. */
@@ -166,6 +195,8 @@ function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Result<C
         quiet: { type: "boolean" },
         tlc: { type: "boolean" },
         timeout: { type: "string" },
+        port: { type: "string" },
+        open: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -183,6 +214,8 @@ function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Result<C
         return parseCheck(positionals, values);
       case "tla":
         return parseTla(positionals, values, env);
+      case "serve":
+        return parseServe(positionals, values);
       default:
         return unknownCommand(positionals);
     }
@@ -231,6 +264,8 @@ function describeSteps({ steps, loopStart }: Counterexample): string[] {
   return loopStart === null ? lines : [...lines, `  → ${loopStart + 1} に戻って繰り返す`];
 }
 
+const STALE = "古いモデルに対する結果";
+
 function describeProperty({
   id,
   kind,
@@ -238,6 +273,7 @@ function describeProperty({
   result,
   checkedBy,
   counterexamples,
+  staleModel,
 }: PropertyResult): string[] {
   const title = `${STATUS_WORDS[result]} ${id} [${kind}]${description === null ? "" : ` ${description}`}`;
   if (result === "pending") {
@@ -249,42 +285,48 @@ function describeProperty({
   }
   const describe = (example: Counterexample): string[] =>
     checkedBy === "bfs" ? [`  ${formatPath(example)}`] : describeSteps(example);
-  return [title, ...counterexamples.flatMap(describe)];
+  const stale = staleModel
+    ? [
+        `  ${STALE}です。TLC の実行後にモデルが変わったため、終了コードに数えません（everypath check --tlc で検査し直せます）`,
+      ]
+    : [];
+  return [title, ...stale, ...counterexamples.flatMap(describe)];
 }
 
-function summarizeChecks({ properties, warnings }: Graph): string {
+function summarizeChecks(
+  properties: Graph["properties"],
+  warnings: readonly ScanWarning[],
+): string {
   const counts = Object.entries(STATUS_WORDS).flatMap(([result, word]) => {
     const count = properties.filter((p) => p.result === result).length;
     return count > 0 ? [`${word} ${count}`] : [];
   });
   const rejected = warnings.filter((warning) => warning.file === PROPERTIES_FILE).length;
-  const note = rejected > 0 ? `（${PROPERTIES_FILE} の警告 ${rejected} 件）` : "";
+  const stale = properties.filter((p) => p.staleModel).length;
+  const notes = [
+    ...(rejected > 0 ? [`${PROPERTIES_FILE} の警告 ${rejected} 件`] : []),
+    ...(stale > 0 ? [`${STALE} ${stale} 件`] : []),
+  ];
+  const note = notes.length > 0 ? `（${notes.join("、")}）` : "";
   return `性質 ${properties.length} 件: ${counts.join("、")}${note}`;
 }
 
 /** `extra` is what only TLC can say, printed before the count. */
-function reportChecks(graph: Graph, extra: readonly string[]): string[] {
-  if (graph.properties.length === 0) return [`性質がありません（${PROPERTIES_FILE}）`, ...extra];
-  return [...graph.properties.flatMap(describeProperty), ...extra, summarizeChecks(graph)];
+function reportChecks(
+  { properties }: Graph,
+  warnings: readonly ScanWarning[],
+  extra: readonly string[],
+): string[] {
+  if (properties.length === 0) return [`性質がありません（${PROPERTIES_FILE}）`, ...extra];
+  return [...properties.flatMap(describeProperty), ...extra, summarizeChecks(properties, warnings)];
 }
 
-/** R-03: without Java or the jar the quick check still decides, and this says how to get TLC. */
-function describeMissing({ what, jar }: Extract<TlcCheck, { readonly kind: "missing" }>): string[] {
-  const reason =
-    what === "java"
-      ? "java を実行できません（PATH に java が無いか、動きません。Java 11 以降が要ります）"
-      : `${jar} に tla2tools.jar がありません`;
-  return [
-    `TLC を動かせません: ${reason}`,
-    "  jar は everypath tla install で入ります（EVERYPATH_TLA_JAR、既定 ~/.everypath/tla2tools.jar）",
-    "  簡易検査の結果だけで判定します",
-  ];
-}
-
-function describeChecked({
-  typeOk,
-  error,
-}: Extract<TlcCheck, { readonly kind: "checked" }>): string[] {
+/** What only TLC can say: a variable out of its range, and its error. `null` when TLC did not fail. */
+function tlcFailure(outcome: TlcOutcome | null): string[] | null {
+  if (outcome === null || outcome.kind === "missing") return null;
+  if (outcome.kind === "unmodeled") return [`エラー TLC: ${outcome.reason}`];
+  const { typeOk, error } = outcome.record;
+  if (typeOk === null && error === null) return null;
   return [
     ...(typeOk === null
       ? []
@@ -327,6 +369,8 @@ async function main(args: readonly string[]): Promise<number> {
       return runCheck(root, command.tlc);
     case "tla-export":
       return runExport(root);
+    case "serve":
+      return runServe(root, command);
   }
 }
 
@@ -345,23 +389,30 @@ async function runScan(
 
 /**
  * A property the file defines but the check could not read fails the run too, so CI never passes it
- * silently. So does any TLC error, which includes a property TLC could not decide, and a variable
- * out of its range. With `--tlc` but no Java or jar the quick check alone decides the exit code.
+ * silently. Under `--tlc` so does a definition the model left out, and any TLC error, which includes
+ * a property TLC could not decide, and a variable out of its range. With `--tlc` but no Java or jar
+ * the quick check alone decides the exit code. The scan reads TLC's record, so a plain check also
+ * counts the last run's violations, unless the model has changed since.
  */
-async function runCheck(root: string, tlc: { readonly timeoutMs: number } | null): Promise<number> {
+async function runCheck(
+  root: string,
+  tlc: { readonly timeoutMs?: number } | null,
+): Promise<number> {
   const outcome = tlc === null ? null : await checkTlc(root, tlc);
-  const graph = outcome?.graph ?? (await scan(root, { reason: "check" }));
-  const stderr = graph.warnings.map(describeWarning);
-  const extra = outcome?.kind === "checked" ? describeChecked(outcome) : [];
-  if (outcome?.kind === "missing") stderr.push(...describeMissing(outcome));
+  const graph = await scan(root, { reason: "check" });
+  const warnings = [
+    ...graph.warnings,
+    ...(outcome?.kind === "checked" ? rejectionWarnings(outcome) : []),
+  ];
+  const stderr = warnings.map(describeWarning);
+  const failure = tlcFailure(outcome);
+  if (outcome?.kind === "missing") stderr.push(...outcome.guide);
   if (stderr.length > 0) process.stderr.write(`${stderr.join("\n")}\n`);
-  process.stdout.write(`${reportChecks(graph, extra).join("\n")}\n`);
+  process.stdout.write(`${reportChecks(graph, warnings, failure ?? []).join("\n")}\n`);
 
-  const rejected = graph.warnings.some((warning) => warning.file === PROPERTIES_FILE);
-  const violated = graph.properties.some((p) => p.result === "violated");
-  const tlcFailed =
-    outcome?.kind === "checked" && (outcome.typeOk !== null || outcome.error !== null);
-  return rejected || violated || tlcFailed ? 1 : 0;
+  const rejected = warnings.some((warning) => warning.file === PROPERTIES_FILE);
+  const violated = graph.properties.some((p) => p.result === "violated" && !p.staleModel);
+  return rejected || violated || failure !== null ? 1 : 0;
 }
 
 async function runExport(root: string): Promise<number> {
@@ -373,6 +424,40 @@ async function runExport(root: string): Promise<number> {
   for (const { reason } of exported.rejected) process.stderr.write(`  警告 ${reason}\n`);
   process.stdout.write(`Model.tla と Model.cfg を ${exported.directory}/ に書きました\n`);
   return 0;
+}
+
+/** One line on stdout, the URL, then serves until SIGINT or SIGTERM. */
+async function runServe(
+  root: string,
+  { port, open }: Extract<Command, { readonly kind: "serve" }>,
+): Promise<number> {
+  const server = await startServer({ root, port, uiPath: UI_PATH });
+  process.stdout.write(`${server.url}\n`);
+  if (open) openBrowser(server.url);
+  await new Promise<void>((resolve) => {
+    const stop = (): void => {
+      process.off("SIGINT", stop);
+      process.off("SIGTERM", stop);
+      resolve();
+    };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+  });
+  await server.close();
+  return 0;
+}
+
+/** `--open`. A missing opener leaves the printed URL to click. */
+function openBrowser(url: string): void {
+  const [command, args] =
+    process.platform === "darwin"
+      ? ["open", [url]]
+      : process.platform === "win32"
+        ? ["cmd", ["/c", "start", "", url]]
+        : ["xdg-open", [url]];
+  spawn(command, args, { stdio: "ignore", detached: true })
+    .on("error", () => {})
+    .unref();
 }
 
 async function runInstall(source: InstallSource | null): Promise<number> {

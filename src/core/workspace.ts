@@ -1,16 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, posix, resolve } from "node:path";
 import { CONFIG_FILE, type Config, DEFAULT_CONFIG, parseConfig } from "./config.js";
 import { parseEventName, parseStateName } from "./expr.js";
 import { parseFindings, rootRelative } from "./findings.js";
-import { asItems, asText, errorMessage, isRecord, readJsonFile } from "./json.js";
+import { asItems, asText, errorMessage, isMissing, isRecord, readJsonFile } from "./json.js";
 import { NO_PROPERTIES, PROPERTIES_FILE, parseProperties } from "./properties.js";
+import { parseStoredVerdicts, type StoredVerdicts, type TlcRecord } from "./tla/result.js";
 import type {
+  Approval,
   EdgeRef,
   Finding,
   Graph,
   HistoryEntry,
+  Layout,
   PropertiesFile,
   ScanWarning,
   StateName,
@@ -18,6 +22,9 @@ import type {
 
 /** Where the scanner reads and writes outside the sources. Nothing else on disk is ever written (R-01). */
 export const OUTPUT_DIRECTORY = ".everypath";
+const TLA_DIRECTORY = `${OUTPUT_DIRECTORY}/tla`;
+const TLC_RESULT_FILE = `${TLA_DIRECTORY}/result.json`;
+const REVIEW_FILE = `${OUTPUT_DIRECTORY}/review.json`;
 
 const IGNORED_DIRECTORIES: ReadonlySet<string> = new Set(
   "node_modules .git dist build out .next __pycache__ venv .venv coverage target vendor .everypath".split(
@@ -33,6 +40,12 @@ const FINDINGS_FILES: readonly string[] = [
   "semgrep.json",
   "bandit.json",
 ];
+/** The files under `.everypath/` that a scan reads. Everything else there is output. */
+const OUTPUT_INPUTS: ReadonlySet<string> = new Set([
+  REVIEW_FILE,
+  TLC_RESULT_FILE,
+  ...FINDINGS_FILES.filter((file) => file.startsWith(`${OUTPUT_DIRECTORY}/`)),
+]);
 
 export type Source = { readonly path: string; readonly bytes: Buffer };
 
@@ -55,6 +68,8 @@ export type Workspace = {
   /** Approved hash by node id, from `review.json`. */
   readonly approvals: ReadonlyMap<string, string>;
   readonly previous: Previous | null;
+  /** TLC's last verdicts, from `result.json`. `null` before any TLC run. */
+  readonly tlc: StoredVerdicts | null;
   /** Inputs that could not be used. Each is a warning, never an error. */
   readonly warnings: readonly ScanWarning[];
 };
@@ -72,10 +87,11 @@ export async function readWorkspace(root: string): Promise<Workspace> {
   const properties = await readProperties(root);
   const walked = await walk(root, configured.config);
   const sources = await readSources(root, walked.paths);
-  const [findings, review, previous] = await Promise.all([
+  const [findings, review, previous, tlc] = await Promise.all([
     readFindings(root, configured.config),
     readApprovals(root),
     readPrevious(root),
+    readTlcResult(root),
   ]);
   return {
     root,
@@ -86,6 +102,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
     findingsSource: findings.source,
     approvals: review.approvals,
     previous,
+    tlc: tlc.stored,
     warnings: [
       ...configured.warnings,
       ...properties.warnings,
@@ -93,6 +110,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
       ...sources.warnings,
       ...findings.warnings,
       ...review.warnings,
+      ...tlc.warnings,
     ],
   };
 }
@@ -102,13 +120,144 @@ export async function writeWorkspace(
   graph: Graph,
   entry: HistoryEntry | null,
 ): Promise<void> {
-  const directory = join(root, OUTPUT_DIRECTORY);
-  await mkdir(directory, { recursive: true });
+  const directory = await outputDirectory(root, OUTPUT_DIRECTORY);
   // History goes first: a crash between the two writes repeats a line on the next scan instead of losing one.
-  if (entry !== null) {
-    await appendFile(join(directory, "history.jsonl"), `${JSON.stringify(entry)}\n`);
-  }
+  if (entry !== null) await appendHistory(directory, `${JSON.stringify(entry)}\n`);
   await replaceFile(join(directory, "graph.json"), serializeGraph(graph));
+}
+
+/**
+ * R-01 in a checkout that may be hostile: makes `directory` (`.everypath` or `.everypath/tla`) one
+ * name at a time if it is absent, and refuses when any of them is a link or not a directory, since a
+ * write through it would land outside the repository. Every writer here calls it first.
+ */
+async function outputDirectory(root: string, directory: string): Promise<string> {
+  let path = root;
+  let shown = "";
+  for (const name of directory.split("/")) {
+    path = join(path, name);
+    shown = shown === "" ? name : `${shown}/${name}`;
+    await mkdir(path).catch((error: unknown) => {
+      if (codeOf(error) !== "EEXIST") throw error;
+    });
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new Error(
+        `${shown} がリンクかディレクトリ以外のものなので、書き込みません。ディレクトリに置き換えてから実行し直してください`,
+      );
+    }
+  }
+  return path;
+}
+
+/** Appends one line to `history.jsonl` without following a link there, which would write outside. */
+async function appendHistory(directory: string, line: string): Promise<void> {
+  const flags = constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW;
+  const file = await open(join(directory, "history.jsonl"), flags, 0o666).catch(
+    (error: unknown) => {
+      const code = codeOf(error);
+      if (code !== "ELOOP" && code !== "EMLINK") throw error;
+      throw new Error(`${OUTPUT_DIRECTORY}/history.jsonl がリンクなので、書き込みません`);
+    },
+  );
+  try {
+    await file.appendFile(line);
+  } finally {
+    await file.close();
+  }
+}
+
+function codeOf(error: unknown): unknown {
+  return error instanceof Error && "code" in error ? error.code : undefined;
+}
+
+/**
+ * Sets one node's approval in `review.json`, or removes it with `null`, and keeps every other entry as
+ * it was. Keys are sorted, so the git diff of this record shows only the node that changed. A file that
+ * is there but does not read as a review file is never overwritten. A file left with no approval is
+ * removed: it says what a missing one says, so approving and revoking leave the repository as it was.
+ */
+export async function writeApproval(
+  root: string,
+  id: StateName,
+  approval: Approval | null,
+): Promise<void> {
+  const file = await readJsonFile(join(root, REVIEW_FILE));
+  if (file.kind === "invalid") {
+    throw new Error(`${REVIEW_FILE} を読めないので書き換えません: ${file.reason}`);
+  }
+  const before = file.kind === "missing" ? {} : isRecord(file.value) ? file.value.approvals : null;
+  if (!isRecord(before)) throw new Error(`${REVIEW_FILE} に approvals が無いので書き換えません`);
+  const entries = Object.entries(before).filter(([key]) => key !== id);
+  if (approval === null && entries.length === Object.keys(before).length) return;
+  const path = join(await outputDirectory(root, OUTPUT_DIRECTORY), "review.json");
+  if (approval !== null) entries.push([id, approval]);
+  if (entries.length === 0) return rm(path, { force: true });
+  entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const review = { version: 1, approvals: Object.fromEntries(entries) };
+  await replaceFile(path, `${JSON.stringify(review, null, 2)}\n`);
+}
+
+/** `.everypath/layout.json`, as the viewer sent it. */
+export async function writeLayout(root: string, layout: Layout): Promise<void> {
+  const directory = await outputDirectory(root, OUTPUT_DIRECTORY);
+  await replaceFile(join(directory, "layout.json"), `${JSON.stringify(layout, null, 2)}\n`);
+}
+
+/** An output file the server hands out as it is, or `null` before anything wrote it. */
+export async function readOutput(
+  root: string,
+  file: "layout.json" | "history.jsonl" | "tla/Model.tla",
+): Promise<string | null> {
+  try {
+    return await readFile(join(root, OUTPUT_DIRECTORY, file), "utf8");
+  } catch (error) {
+    if (isMissing(error)) return null;
+    throw error;
+  }
+}
+
+/**
+ * Whether a change at `path` (root-relative, `/`) can change what a scan reads: the server's watcher
+ * asks only this. Under `.everypath/` only the scan's inputs count, so `graph.json`, `history.jsonl`,
+ * the layout and every temporary file never start a scan. `review.json` and `tla/result.json` do,
+ * though the server writes them too: that rescan finds the graph it already sent and writes nothing.
+ * Elsewhere, outside the walk's ignored directories, a source file counts, and so does any JSON file
+ * (the config, the properties, every findings file wherever `findings` points) and any name without
+ * an extension, which may be a directory moved or removed with its files. `isDirectory` asks whether
+ * a poller should look inside.
+ */
+export function isScanInput(path: string, isDirectory = false): boolean {
+  if (path === OUTPUT_DIRECTORY || path.startsWith(`${OUTPUT_DIRECTORY}/`)) {
+    return isDirectory
+      ? [...OUTPUT_INPUTS].some((input) => input.startsWith(`${path}/`))
+      : OUTPUT_INPUTS.has(path);
+  }
+  if (path.split("/").some((name) => IGNORED_DIRECTORIES.has(name))) return false;
+  const extension = posix.extname(path);
+  return (
+    isDirectory || extension === "" || extension === ".json" || SOURCE_EXTENSIONS.has(extension)
+  );
+}
+
+/** Model.tla and Model.cfg in `.everypath/tla/`, for a person to open. `tla export` writes only these. */
+export async function writeTlaModel(
+  root: string,
+  { tla, cfg }: Pick<TlcRecord, "tla" | "cfg">,
+): Promise<void> {
+  const directory = await outputDirectory(root, TLA_DIRECTORY);
+  await replaceFile(join(directory, "Model.tla"), tla);
+  await replaceFile(join(directory, "Model.cfg"), cfg);
+}
+
+/**
+ * A finished TLC run into `.everypath/tla/`: the model it checked, then `result.json`. The record goes
+ * last because it is the scan input, so whoever sees it change finds the model beside it already.
+ * `writeTlaModel` has just made sure the directory is real.
+ */
+export async function commitTlc(root: string, record: TlcRecord): Promise<void> {
+  await writeTlaModel(root, record);
+  await replaceFile(join(root, TLC_RESULT_FILE), `${JSON.stringify(record, null, 2)}\n`);
 }
 
 /** Writes beside `path` and renames onto it, so a reader sees the old file or the new one, never half. */
@@ -159,6 +308,33 @@ function isIgnored(path: string, isDirectory: boolean, config: Config): boolean 
   );
 }
 
+/** Whether the source walk enters the directory at `path`, whose last name is `name`. */
+function walksInto(name: string, path: string, config: Config): boolean {
+  return !IGNORED_DIRECTORIES.has(name) && !isIgnored(path, true, config);
+}
+
+/**
+ * The directories a watcher must watch one by one to see every change `isScanInput` accepts,
+ * root-relative with `""` for the root: each one the source walk enters, by the same rule and the
+ * same `config.ignore`, and the ones under `.everypath/` that hold a scan input. Never follows a link.
+ */
+export async function watchedDirectories(root: string): Promise<string[]> {
+  const { config } = await readConfig(root);
+  const found: string[] = [];
+  async function visit(directory: string): Promise<void> {
+    found.push(directory);
+    const entries = await readdir(join(root, directory), { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const path = directory === "" ? entry.name : `${directory}/${entry.name}`;
+      const output = path === OUTPUT_DIRECTORY || path.startsWith(`${OUTPUT_DIRECTORY}/`);
+      const enters = output ? isScanInput(path, true) : walksInto(entry.name, path, config);
+      if (entry.isDirectory() && enters) await visit(path);
+    }
+  }
+  await visit("");
+  return found;
+}
+
 /** Source files under `root`, root-relative with `/`, sorted. Symlinks are never followed. */
 async function walk(root: string, config: Config) {
   const paths: string[] = [];
@@ -175,9 +351,7 @@ async function walk(root: string, config: Config) {
     for (const entry of entries) {
       const path = directory === "" ? entry.name : `${directory}/${entry.name}`;
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRECTORIES.has(entry.name) && !isIgnored(path, true, config)) {
-          await visit(path);
-        }
+        if (walksInto(entry.name, path, config)) await visit(path);
       } else if (
         entry.isFile() &&
         SOURCE_EXTENSIONS.has(posix.extname(entry.name)) &&
@@ -244,10 +418,10 @@ async function readFindings(root: string, config: Config) {
 }
 
 async function readApprovals(root: string) {
-  const path = `${OUTPUT_DIRECTORY}/review.json`;
-  const file = await readJsonFile(join(root, path));
+  const file = await readJsonFile(join(root, REVIEW_FILE));
   const approvals = new Map<string, string>();
-  if (file.kind === "invalid") return { approvals, warnings: [unreadable(path, file.reason)] };
+  if (file.kind === "invalid")
+    return { approvals, warnings: [unreadable(REVIEW_FILE, file.reason)] };
   if (file.kind === "ok" && isRecord(file.value) && isRecord(file.value.approvals)) {
     for (const [id, approval] of Object.entries(file.value.approvals)) {
       const hash = isRecord(approval) ? asText(approval.hash) : null;
@@ -255,6 +429,22 @@ async function readApprovals(root: string) {
     }
   }
   return { approvals, warnings: [] };
+}
+
+/** A missing file is no TLC run yet. A damaged one is a warning and counts as absent. */
+async function readTlcResult(root: string) {
+  const file = await readJsonFile(join(root, TLC_RESULT_FILE));
+  if (file.kind === "missing") return { stored: null, warnings: [] };
+  if (file.kind === "invalid") {
+    return { stored: null, warnings: [unreadable(TLC_RESULT_FILE, file.reason)] };
+  }
+  const stored = parseStoredVerdicts(file.value);
+  return stored === null
+    ? {
+        stored,
+        warnings: [fileWarning(TLC_RESULT_FILE, `${TLC_RESULT_FILE} の形が違うので使いません`)],
+      }
+    : { stored, warnings: [] };
 }
 
 /** A missing or damaged `graph.json` counts as absent: the scan then treats every node as new. */
