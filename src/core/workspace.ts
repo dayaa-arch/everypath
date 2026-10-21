@@ -5,7 +5,16 @@ import { CONFIG_FILE, type Config, DEFAULT_CONFIG, parseConfig } from "./config.
 import { parseEventName, parseStateName } from "./expr.js";
 import { parseFindings, rootRelative } from "./findings.js";
 import { asItems, asText, errorMessage, isRecord, readJsonFile } from "./json.js";
-import type { EdgeRef, Finding, Graph, HistoryEntry, ScanWarning, StateName } from "./types.js";
+import { NO_PROPERTIES, PROPERTIES_FILE, parseProperties } from "./properties.js";
+import type {
+  EdgeRef,
+  Finding,
+  Graph,
+  HistoryEntry,
+  PropertiesFile,
+  ScanWarning,
+  StateName,
+} from "./types.js";
 
 /** Where the scanner reads and writes outside the sources. Nothing else on disk is ever written (R-01). */
 export const OUTPUT_DIRECTORY = ".everypath";
@@ -38,6 +47,7 @@ export type Workspace = {
   /** Absolute. */
   readonly root: string;
   readonly config: Config;
+  readonly properties: PropertiesFile;
   /** Root-relative `/` paths, sorted. */
   readonly sources: readonly Source[];
   readonly findings: readonly Finding[];
@@ -59,6 +69,7 @@ function unreadable(file: string, reason: string): ScanWarning {
 
 export async function readWorkspace(root: string): Promise<Workspace> {
   const configured = await readConfig(root);
+  const properties = await readProperties(root);
   const walked = await walk(root, configured.config);
   const sources = await readSources(root, walked.paths);
   const [findings, review, previous] = await Promise.all([
@@ -69,6 +80,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
   return {
     root,
     config: configured.config,
+    properties: properties.file,
     sources: sources.sources,
     findings: findings.list,
     findingsSource: findings.source,
@@ -76,6 +88,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
     previous,
     warnings: [
       ...configured.warnings,
+      ...properties.warnings,
       ...walked.warnings,
       ...sources.warnings,
       ...findings.warnings,
@@ -121,6 +134,18 @@ async function readConfig(root: string) {
       return { config: DEFAULT_CONFIG, warnings: [unreadable(CONFIG_FILE, file.reason)] };
     case "ok":
       return parseConfig(file.value);
+  }
+}
+
+async function readProperties(root: string) {
+  const file = await readJsonFile(join(root, PROPERTIES_FILE));
+  switch (file.kind) {
+    case "missing":
+      return { file: NO_PROPERTIES, warnings: [] };
+    case "invalid":
+      return { file: NO_PROPERTIES, warnings: [unreadable(PROPERTIES_FILE, file.reason)] };
+    case "ok":
+      return parseProperties(file.value);
   }
 }
 

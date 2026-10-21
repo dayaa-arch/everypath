@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { describe, it } from "node:test";
 import type { FlowEdge } from "../src/core/types.js";
@@ -96,5 +97,28 @@ describe("R-04: out-of-grammar annotations never stop the scan", () => {
       graph.model.vars.map((v) => v.name),
       ["ok"],
     );
+  });
+});
+
+describe("R-03 and R-01: check runs without Java and writes only under .everypath/", () => {
+  it("exits 0 or 1 with an empty PATH and leaves every other file byte-identical", async () => {
+    const root = await makeRepo({
+      "src/a.ts": ts("@state A", "@state-initial", "@state-next B on:go"),
+      "src/b.ts": ts("@state B"),
+      "everypath.properties.json": JSON.stringify({
+        properties: [
+          { id: "nr", kind: "never-reach", target: ["B"] },
+          { id: "vars", kind: "invariant", expr: "x" },
+        ],
+      }),
+    });
+    const before = await snapshot(root);
+    const emptyPath = await mkdtemp(join(tmpdir(), "everypath-nojava-"));
+
+    const result = runCli(["check", root], root, { ...process.env, PATH: emptyPath });
+
+    assert.ok(result.status === 0 || result.status === 1, `${result.status}: ${result.stderr}`);
+    assert.deepEqual(await snapshot(root), before);
+    await rm(emptyPath, { recursive: true, force: true });
   });
 });

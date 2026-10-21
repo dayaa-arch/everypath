@@ -107,6 +107,9 @@ export type ModelVar =
 /** An event named by `on:` or `@state-event`. Minted only by `src/core/expr.ts`. */
 export type EventName = Brand<string, "EventName">;
 
+/** The `id` of a definition in `everypath.properties.json`. Minted only by `src/core/properties.ts`. */
+export type PropertyId = Brand<string, "PropertyId">;
+
 /** One annotation or input file the scanner could not use. `detail` is the parser's own warning, if any. */
 export type ScanWarning = {
   readonly file: string | null;
@@ -150,7 +153,8 @@ export type StateNode = {
   readonly spec: readonly string[];
   readonly risks: readonly Risk[];
   readonly findings: readonly Finding[];
-  readonly violations: readonly string[];
+  /** Ids of the violated properties whose counterexample passes through this node, in file order. */
+  readonly violations: readonly PropertyId[];
   readonly lastChangedAt: string;
 };
 
@@ -193,6 +197,55 @@ export type GraphStats = {
   readonly unreviewed: number;
 };
 
+/** `dep-only-via` waits for phase 2: its `from_group`, `target` and `via` are not read yet. */
+export type PropertyDef = {
+  readonly id: PropertyId;
+  readonly description: string | null;
+} & (
+  | { readonly kind: "invariant"; readonly expr: PropertyExpr }
+  | { readonly kind: "leads-to"; readonly from: PropertyExpr; readonly to: PropertyExpr }
+  | {
+      readonly kind: "never-reach";
+      readonly target: NonEmpty<StateName>;
+      readonly avoid: readonly StateName[];
+    }
+  | { readonly kind: "always-reach"; readonly target: NonEmpty<StateName> }
+  | { readonly kind: "no-dead-end"; readonly except: readonly StateName[] }
+  | { readonly kind: "dep-only-via" }
+);
+
+/** `everypath.properties.json` after validation. A `null` entry means "work it out from the graph". */
+export type PropertiesFile = {
+  readonly entry: NonEmpty<StateName> | null;
+  readonly properties: readonly PropertyDef[];
+};
+
+/** One state on a counterexample. `event` is what led here, `null` for the first state. */
+export type Step = {
+  readonly state: StateName;
+  readonly event: EventName | null;
+  /** Variable values at this state. The BFS lane has no variables and writes `{}`. */
+  readonly vars: Readonly<Record<VarName, string>>;
+};
+
+export type Counterexample = {
+  /** The `state` of each step. */
+  readonly path: NonEmpty<StateName>;
+  readonly steps: NonEmpty<Step>;
+};
+
+export type PropertyResult = {
+  readonly id: PropertyId;
+  readonly kind: PropertyDef["kind"];
+  readonly description: string | null;
+  readonly checkedBy: "bfs" | "tlc" | "both";
+  readonly result: "ok" | "violated" | "error" | "pending";
+  readonly counterexamples: readonly Counterexample[];
+  /** States the search reached. `null` while the result is pending. */
+  readonly statesExplored: number | null;
+  readonly checkedAt: string;
+};
+
 export type Graph = {
   readonly version: 1;
   readonly generatedAt: string;
@@ -202,6 +255,7 @@ export type Graph = {
   readonly nodes: readonly StateNode[];
   readonly edges: readonly Edge[];
   readonly model: GraphModel;
+  readonly properties: readonly PropertyResult[];
   readonly warnings: readonly ScanWarning[];
 };
 
