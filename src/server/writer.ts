@@ -19,7 +19,12 @@ export type Job =
     }
   | { readonly kind: "revoke"; readonly id: StateName }
   | { readonly kind: "layout"; readonly body: Layout }
-  | { readonly kind: "tlc-commit"; readonly run: TlcRecord };
+  | {
+      readonly kind: "tlc-commit";
+      readonly run: TlcRecord;
+      /** Called once the record is on disk, before the rescan that publishes its verdicts. */
+      readonly landed: () => void;
+    };
 
 /** `missing-node`: no node of that id in the last graph. `stale-hash`: the node changed since. */
 export type JobResult = "done" | "missing-node" | "stale-hash";
@@ -86,6 +91,7 @@ export async function openWriter(
         return "done";
       case "tlc-commit":
         await commitTlc(root, job.run);
+        job.landed();
         return rescan("tlc");
     }
   }

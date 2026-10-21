@@ -83,27 +83,31 @@ export async function startServer({
     throw error;
   });
 
+  /**
+   * A run ends with one `done` or `error`. A checked run's record lands through the writer first, so
+   * `done` means Model.tla and result.json are on disk, and the lane stays busy until then. The graph
+   * with the verdicts follows `done`. A failure after that is the rescan's, so it goes to stderr.
+   */
   function startTlc(writer: Writer): boolean {
     if (lane.kind === "running") return false;
     const abort = new AbortController();
+    let open = true;
+    const settle = (event: TlcEvent): void => {
+      open = false;
+      lane = { kind: "idle" };
+      if (!abort.signal.aborted) broadcast(event);
+    };
     broadcast({ type: "tlc", status: "running", states: null, message: null });
     const finished = runTlc(root, { signal: abort.signal })
-      .then(
-        async (outcome) => {
-          lane = { kind: "idle" };
-          broadcast(tlcEvent(outcome));
-          if (outcome.kind === "checked") {
-            await writer.submit({ kind: "tlc-commit", run: outcome.record });
-          }
-        },
-        (error: unknown) => {
-          lane = { kind: "idle" };
-          if (!abort.signal.aborted) {
-            broadcast({ type: "tlc", status: "error", states: null, message: errorMessage(error) });
-          }
-        },
-      )
-      .catch(report);
+      .then(async (outcome) => {
+        if (outcome.kind !== "checked") return settle(tlcEvent(outcome));
+        const landed = (): void => settle(tlcEvent(outcome));
+        await writer.submit({ kind: "tlc-commit", run: outcome.record, landed });
+      })
+      .catch((error: unknown) => {
+        if (!open) return report(error);
+        settle({ type: "tlc", status: "error", states: null, message: errorMessage(error) });
+      });
     lane = { kind: "running", abort, finished };
     return true;
   }

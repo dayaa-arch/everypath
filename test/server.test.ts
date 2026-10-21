@@ -441,6 +441,47 @@ describe("serve: POST /check/tlc", () => {
     await events.graph((g) => node(g, "Home").status.reviewed, { since });
   });
 
+  it("sends done only once the record is on disk, so Model.tla answers 200 at that moment", async () => {
+    const root = await exampleRepo();
+    const java = await fakeJava(await violationRun());
+    const serve = await serveRepo(root, javaEnv(java));
+    const events = await ready(serve);
+    const since = events.received.length;
+
+    const started = await request(serve, "POST", "/check/tlc");
+    assert.equal(started.status, 202, started.text);
+    const done = await events.tlc("done", { since });
+    const model = await request(serve, "GET", "/tla/Model.tla");
+    const verdicts = await events.graph(isTlcViolation, { since });
+
+    assert.equal(model.status, 200, model.text);
+    assert.ok(
+      events.received.indexOf(done) < events.received.indexOf(verdicts),
+      "done, then the graph",
+    );
+  });
+
+  it("sends error with the reason when the record cannot be written, then accepts a new run", async () => {
+    const root = await exampleRepo();
+    await writeFiles(root, { ".everypath/tla": "a file where the directory goes" });
+    const java = await fakeJava(await violationRun());
+    const serve = await serveRepo(root, javaEnv(java));
+    const events = await ready(serve);
+    const since = events.received.length;
+
+    const started = await request(serve, "POST", "/check/tlc");
+    assert.equal(started.status, 202, started.text);
+    const failed = await events.tlc("error", { since });
+
+    assert.ok((failed.message ?? "").length > 0, "the error says why");
+    assert.ok(
+      !events.received.slice(since).some((e) => e.type === "tlc" && e.status === "done"),
+      "no done for a run whose record was not written",
+    );
+    const again = await request(serve, "POST", "/check/tlc");
+    assert.equal(again.status, 202, again.text);
+  });
+
   const realJar = process.env.EVERYPATH_TLA_JAR ?? join(homedir(), ".everypath", "tla2tools.jar");
   const realTlc =
     existsSync(realJar) && spawnSync("java", ["-version"], { stdio: "ignore" }).status === 0
