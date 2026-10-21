@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { makeRepo, writeFiles } from "./helpers/repo.js";
+import { parseStateName } from "../src/core/expr.js";
+import type { StateName } from "../src/core/types.js";
+import { openWriter, type Published } from "../src/server/writer.js";
+import { makeRepo, ts, writeFiles } from "./helpers/repo.js";
 
 /**
  * A structural test: R-01 holds because writes to disk have two homes, and the server's writes go
@@ -28,9 +32,23 @@ const WRITE_FUNCTIONS: ReadonlySet<string> = new Set([
   "promises",
 ]);
 
-/** What `src/server/` must reach the disk through instead of calling directly. */
-const SERVER_FORBIDDEN: ReadonlySet<string> = new Set(["writeWorkspace", "replaceFile", "scan"]);
-const SERVER_FORBIDDEN_MODULE = /(?:^|\/)(?:workspace|scan)\.js$/;
+/** The one file in `src/server/` that may call a writer: every other one submits a job to it. */
+const SERVER_WRITER = "server/writer.ts";
+/** Writers outside workspace.ts, which run their own writes. workspace.ts's are read from its exports. */
+const OTHER_WRITERS = ["scan", "scanWithHistory", "rescanWithHistory", "checkTlc", "exportTla"];
+const WRITING_MODULE = /(?:^|\/)(?:workspace|scan|tla\/run)\.js$/;
+
+/** Every function workspace.ts exports whose name starts with write, commit or replace. */
+async function workspaceWriters(): Promise<string[]> {
+  const source = withoutComments(await readFile(join(SRC, "core", "workspace.ts"), "utf8"));
+  const exported = /^export\s+(?:async\s+)?function\s+((?:write|commit|replace)\w*)/gm;
+  return [...source.matchAll(exported)].map(([, name = ""]) => name);
+}
+
+const SERVER_FORBIDDEN: ReadonlySet<string> = new Set([
+  ...(await workspaceWriters()),
+  ...OTHER_WRITERS,
+]);
 
 type Import = {
   readonly module: string;
@@ -102,9 +120,9 @@ function fsWrites(file: string, imports: readonly Import[]): Finding[] {
 }
 
 function serverReaches(file: string, imports: readonly Import[]): Finding[] {
-  if (!file.startsWith("server/")) return [];
+  if (!file.startsWith("server/") || file === SERVER_WRITER) return [];
   return imports.flatMap(({ module, names, whole }) => [
-    ...(whole && SERVER_FORBIDDEN_MODULE.test(module)
+    ...(whole && WRITING_MODULE.test(module)
       ? [{ file, message: `imports the whole of ${module}, which includes the writers` }]
       : []),
     ...names
@@ -137,6 +155,19 @@ describe("single writer", () => {
 
     assert.deepEqual(violations, []);
     assert.ok(writers.includes("core/workspace.ts"), "the detector sees the real writer");
+  });
+});
+
+describe("single writer: the writers it knows", () => {
+  it("reads the writers of workspace.ts from its exports, and none of its readers", async () => {
+    const names = await workspaceWriters();
+
+    for (const writer of ["writeWorkspace", "writeApproval", "commitTlc", "replaceFile"]) {
+      assert.ok(names.includes(writer), `${writer} in ${names.join(", ")}`);
+    }
+    for (const reader of ["readWorkspace", "readOutput", "isScanInput", "serializeGraph"]) {
+      assert.ok(!names.includes(reader), reader);
+    }
   });
 });
 
@@ -173,19 +204,29 @@ describe("single writer: the check fails on a planted violation", () => {
     assert.equal(violations.length, 5, violations.join("\n"));
   });
 
-  it("flags src/server/ files that import writeWorkspace, replaceFile or scan", async () => {
+  it("lets only src/server/writer.ts import a writer of workspace.ts, scan or the TLC lane", async () => {
     const violations = await inspectTree({
       "server/a.ts": 'import { writeWorkspace } from "../core/workspace.js";\n',
-      "server/b.ts": 'import { analyze, scan } from "../core/scan.js";\n',
+      "server/b.ts": 'import { analyze, scan, scanWithHistory } from "../core/scan.js";\n',
       "server/c.ts": 'import { replaceFile as put } from "../core/workspace.js";\n',
       "server/d.ts": 'import * as workspace from "../core/workspace.js";\n',
+      "server/e.ts":
+        'import { commitTlc, readOutput, writeApproval } from "../core/workspace.js";\n',
+      "server/f.ts": 'import { checkTlc, exportTla, runTlc } from "../core/tla/run.js";\n',
+      "server/writer.ts":
+        'import { scanWithHistory } from "../core/scan.js";\nimport { commitTlc, writeWorkspace } from "../core/workspace.js";\n',
     });
 
     assert.deepEqual(violations, [
       "src/server/a.ts: imports writeWorkspace from ../core/workspace.js",
       "src/server/b.ts: imports scan from ../core/scan.js",
+      "src/server/b.ts: imports scanWithHistory from ../core/scan.js",
       "src/server/c.ts: imports replaceFile from ../core/workspace.js",
       "src/server/d.ts: imports the whole of ../core/workspace.js, which includes the writers",
+      "src/server/e.ts: imports commitTlc from ../core/workspace.js",
+      "src/server/e.ts: imports writeApproval from ../core/workspace.js",
+      "src/server/f.ts: imports checkTlc from ../core/tla/run.js",
+      "src/server/f.ts: imports exportTla from ../core/tla/run.js",
     ]);
   });
 
@@ -216,5 +257,63 @@ describe("single writer: the check fails on a planted violation", () => {
     assert.deepEqual((await inspect(tree)).violations, [
       "src/server/deep/er/x.ts: imports unlink from node:fs/promises",
     ]);
+  });
+});
+
+function stateName(name: string): StateName {
+  const parsed = parseStateName(name);
+  assert.ok(parsed.ok, name);
+  return parsed.value;
+}
+
+describe("single writer: the queue", () => {
+  it("runs jobs submitted together one at a time, in the order they came", async () => {
+    const root = await makeRepo({ "src/a.ts": ts("@state A"), "src/b.ts": ts("@state B") });
+    const reasons: string[] = [];
+    const writer = await openWriter(root, "tester", ({ reason }: Published) =>
+      reasons.push(reason),
+    );
+    const [a, b] = [stateName("A"), stateName("B")];
+
+    const results = await Promise.all([
+      writer.submit({ kind: "approve", id: a, note: "", hash: null }),
+      writer.submit({ kind: "revoke", id: a }),
+      writer.submit({ kind: "approve", id: b, note: "", hash: null }),
+    ]);
+    await writer.close();
+
+    assert.deepEqual(results, ["done", "done", "done"]);
+    assert.deepEqual(reasons, ["approve", "revoke", "approve"]);
+    const reviewed = writer.current().graph.nodes.filter((n) => n.status.reviewed);
+    assert.deepEqual(
+      reviewed.map((n) => n.id),
+      ["B"],
+    );
+  });
+
+  it("lets a rescan that is still waiting answer for the rescans submitted after it", async () => {
+    const root = await makeRepo({ "src/a.ts": ts("@state A") });
+    const reasons: string[] = [];
+    const writer = await openWriter(root, "tester", ({ reason }: Published) => {
+      reasons.push(reason);
+      // Seen only by a rescan that runs after this one.
+      writeFileSync(
+        join(root, "src", `late${reasons.length}.ts`),
+        ts(`@state Late${reasons.length}`),
+      );
+    });
+    writeFileSync(join(root, "src", "c.ts"), ts("@state C"));
+
+    const results = await Promise.all(
+      ["first", "second", "third"].map((reason) => writer.submit({ kind: "rescan", reason })),
+    );
+    await writer.close();
+
+    assert.deepEqual(results, ["done", "done", "done"]);
+    assert.deepEqual(reasons, ["first"]);
+    assert.deepEqual(
+      writer.current().graph.nodes.map((n) => n.id),
+      ["A", "C"],
+    );
   });
 });
