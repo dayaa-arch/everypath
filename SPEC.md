@@ -485,7 +485,7 @@ semgrep 形式（`results[].path, extra.message, extra.severity, start.line, che
 | `dep-only-via` | `from_group` から `target` への dep 経路が、必ず `via` のいずれかを通ること | 通らない経路 |
 | `invariant`（変数を含まないもの） | `state in {…}` 形式なら到達可能集合で判定 | 到達経路 |
 
-1 秒以内に終わること。結果は `graph.json.properties[]` に `checkedBy: "bfs"` で書く。TLC の結果が後から来たら `both` に更新し、TLC を優先する。
+1 秒以内に終わること。結果は `graph.json.properties[]` に `checkedBy: "bfs"` で書く。TLC の結果は、簡易検査が判定できず保留にした性質だけを埋める。簡易検査が `ok` か `violated` を出した性質は、簡易検査の結果を残す（`docs/specs/server.md` の決定。保存された TLC の結果で、今のグラフ上の違反を消さないため）。
 
 ---
 
