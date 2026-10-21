@@ -4,6 +4,7 @@ import { type Notes, readNotes } from "./annotations.js";
 import { sanitizeStateName } from "./expr.js";
 import { type ImportContext, resolveImports } from "./imports.js";
 import { resolveNext, type VarTable } from "./model.js";
+import { checkProperties } from "./properties.js";
 import type {
   DepEdge,
   Edge,
@@ -95,13 +96,27 @@ function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Gra
   const model = collectModel(members);
   const flows = collectFlows(members, new Map(model.vars.map((decl) => [decl.name, decl])));
   const edges = [...collectDeps(members), ...flows.edges].sort(compareEdges);
-  const nodes = collectNodes(members, flows.edges, {
+  const built = collectNodes(members, flows.edges, {
     tested: testedFiles(facts),
     findings: groupBy([...workspace.findings].sort(compareFindings), (finding) => finding.file),
     approvals: workspace.approvals,
     previous: workspace.previous,
     at,
   });
+  const graphModel = {
+    initial: model.initial,
+    vars: model.vars,
+    events: [...new Set([...model.events, ...flows.events])].sort(compareText),
+  };
+  const checked = checkProperties(
+    { nodes: built, edges, model: graphModel },
+    workspace.properties,
+    at,
+  );
+  const nodes = built.map((node) => ({
+    ...node,
+    violations: checked.violations.get(node.id) ?? [],
+  }));
   const real = nodes.filter((node) => !node.status.planned);
 
   return {
@@ -121,16 +136,14 @@ function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Gra
     },
     nodes,
     edges,
-    model: {
-      initial: model.initial,
-      vars: model.vars,
-      events: [...new Set([...model.events, ...flows.events])].sort(compareText),
-    },
+    model: graphModel,
+    properties: checked.properties,
     warnings: [
       ...workspace.warnings,
       ...facts.flatMap((file) => file.warnings),
       ...model.warnings,
       ...flows.warnings,
+      ...checked.warnings,
     ].sort(compareWarnings),
   };
 }

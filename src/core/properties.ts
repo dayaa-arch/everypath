@@ -2,13 +2,21 @@ import { parseProperty, parseStateName } from "./expr.js";
 import { asItems, isRecord } from "./json.js";
 import type { Problem } from "./model.js";
 import type {
+  Counterexample,
+  EventName,
+  FlowEdge,
+  Graph,
   NonEmpty,
+  PropExpr,
   PropertiesFile,
   PropertyDef,
   PropertyExpr,
   PropertyId,
+  PropertyResult,
   ScanWarning,
   StateName,
+  StatePred,
+  Step,
 } from "./types.js";
 
 export const PROPERTIES_FILE = "everypath.properties.json";
@@ -177,4 +185,331 @@ export function parseProperties(raw: unknown): {
     );
   }
   return { file: { entry, properties }, warnings };
+}
+
+/** The flow edges of the graph, indexed once per check. Dep edges play no part. */
+type Flow = {
+  /** Every node, planned ones included. */
+  readonly states: ReadonlySet<StateName>;
+  /** The nodes with code behind them, in id order. */
+  readonly real: readonly StateName[];
+  /** In `graph.edges` order, so a search takes the same path on every run. */
+  readonly outgoing: ReadonlyMap<StateName, readonly FlowEdge[]>;
+  readonly incoming: ReadonlyMap<StateName, readonly StateName[]>;
+};
+
+const NONE: readonly never[] = [];
+const NO_STATES: ReadonlySet<StateName> = new Set();
+
+function append<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const list = map.get(key);
+  if (list === undefined) map.set(key, [value]);
+  else list.push(value);
+}
+
+function flowOf({ nodes, edges }: Pick<Graph, "nodes" | "edges">): Flow {
+  const outgoing = new Map<StateName, FlowEdge[]>();
+  const incoming = new Map<StateName, StateName[]>();
+  for (const edge of edges) {
+    if (edge.type !== "flow") continue;
+    append(outgoing, edge.from, edge);
+    append(incoming, edge.to, edge.from);
+  }
+  return {
+    states: new Set(nodes.map((node) => node.id)),
+    real: nodes.filter((node) => !node.status.planned).map((node) => node.id),
+    outgoing,
+    incoming,
+  };
+}
+
+function isDeadEnd(flow: Flow, state: StateName): boolean {
+  return (flow.outgoing.get(state) ?? NONE).length === 0;
+}
+
+/** `entry`, else the model's initial state, else the states nothing else leads to. */
+function entryOf(
+  { model }: Pick<Graph, "model">,
+  { entry }: PropertiesFile,
+  flow: Flow,
+): readonly StateName[] {
+  if (entry !== null) return entry.filter((state) => flow.states.has(state));
+  if (model.initial !== null) return [model.initial];
+  return flow.real.filter(
+    (state) => !(flow.incoming.get(state) ?? NONE).some((from) => from !== state),
+  );
+}
+
+/** How a state was first reached. `null` for a start. */
+type Arrival = { readonly from: StateName; readonly event: EventName | null } | null;
+type Reached = ReadonlyMap<StateName, Arrival>;
+
+/**
+ * Breadth first from all `starts` at once, so the first state that satisfies `isGoal` is a shortest
+ * path away from the nearest start, and the order of `starts` and of the edges breaks ties.
+ */
+function search(
+  starts: readonly StateName[],
+  outgoing: Flow["outgoing"],
+  isGoal: (state: StateName) => boolean,
+  blocked: ReadonlySet<StateName> = NO_STATES,
+): { readonly goal: StateName | null; readonly reached: Reached } {
+  const reached = new Map<StateName, Arrival>();
+  const queue: StateName[] = [];
+  const enter = (state: StateName, arrival: Arrival): void => {
+    if (blocked.has(state) || reached.has(state)) return;
+    reached.set(state, arrival);
+    queue.push(state);
+  };
+  for (const start of starts) enter(start, null);
+  // An array iterator also visits what is pushed while it runs, which makes `queue` a FIFO.
+  for (const state of queue) {
+    if (isGoal(state)) return { goal: state, reached };
+    for (const edge of outgoing.get(state) ?? NONE) {
+      enter(edge.to, { from: state, event: edge.event });
+    }
+  }
+  return { goal: null, reached };
+}
+
+function stepAt(state: StateName, reached: Reached): Step {
+  return { state, event: reached.get(state)?.event ?? null, vars: {} };
+}
+
+function counterexampleOf(steps: NonEmpty<Step>): Counterexample {
+  const [first, ...rest] = steps;
+  return { path: [first.state, ...rest.map((step) => step.state)], steps };
+}
+
+/** The path from the start that reached `goal`, ending at `goal`. */
+function pathTo(goal: StateName, reached: Reached): Counterexample {
+  const steps: [Step, ...Step[]] = [stepAt(goal, reached)];
+  for (let arrival = reached.get(goal); arrival; arrival = reached.get(arrival.from)) {
+    steps.unshift(stepAt(arrival.from, reached));
+  }
+  return counterexampleOf(steps);
+}
+
+function holds(expr: StatePred, state: StateName): boolean {
+  switch (expr.kind) {
+    case "state-in":
+      return expr.states.includes(state);
+    case "not":
+      return !holds(expr.operand, state);
+    case "and":
+      return expr.operands.every((operand) => holds(operand, state));
+    case "or":
+      return expr.operands.some((operand) => holds(operand, state));
+    case "implies":
+      return !holds(expr.antecedent, state) || holds(expr.consequent, state);
+  }
+}
+
+/** What a check says about one property. */
+type Verdict = Pick<PropertyResult, "checkedBy" | "result" | "counterexamples" | "statesExplored">;
+
+type Context = { readonly flow: Flow; readonly entry: readonly StateName[] };
+
+function pending(checkedBy: Verdict["checkedBy"]): Verdict {
+  return { checkedBy, result: "pending", counterexamples: [], statesExplored: null };
+}
+
+function settled(counterexamples: readonly Counterexample[], statesExplored: number): Verdict {
+  const result = counterexamples.length > 0 ? "violated" : "ok";
+  return { checkedBy: "bfs", result, counterexamples, statesExplored };
+}
+
+/** One counterexample at most: the shortest path to the first goal state, if there is one. */
+function settledBySearch({ goal, reached }: ReturnType<typeof search>): Verdict {
+  return settled(goal === null ? [] : [pathTo(goal, reached)], reached.size);
+}
+
+/** Whether the judgment searches outward from the entry states. */
+function needsEntry(def: PropertyDef): boolean {
+  return def.kind === "never-reach" || (def.kind === "invariant" && !def.expr.mentionsVars);
+}
+
+function invariant(expr: StatePred, { flow, entry }: Context): Verdict {
+  return settledBySearch(search(entry, flow.outgoing, (state) => !holds(expr, state)));
+}
+
+function neverReach(
+  target: NonEmpty<StateName>,
+  avoid: readonly StateName[],
+  { flow, entry }: Context,
+): Verdict {
+  return settledBySearch(
+    search(entry, flow.outgoing, (state) => target.includes(state), new Set(avoid)),
+  );
+}
+
+/** Every state that has a path to one of `targets`, found by walking the edges backwards. */
+function reaching(
+  targets: readonly StateName[],
+  incoming: Flow["incoming"],
+): ReadonlySet<StateName> {
+  const seen = new Set(targets);
+  // A set iterator also visits what is added while it runs.
+  for (const state of seen) {
+    for (const from of incoming.get(state) ?? NONE) seen.add(from);
+  }
+  return seen;
+}
+
+/** One counterexample per stuck state: its way to the nearest dead end, or the state alone. */
+function alwaysReach(target: NonEmpty<StateName>, { flow }: Context): Verdict {
+  const canReach = reaching(target, flow.incoming);
+  const counterexamples = flow.real
+    .filter((state) => !canReach.has(state))
+    .map((state) => {
+      const { goal, reached } = search([state], flow.outgoing, (next) => isDeadEnd(flow, next));
+      return pathTo(goal ?? state, reached);
+    });
+  return settled(counterexamples, flow.real.length);
+}
+
+function noDeadEnd(except: readonly StateName[], { flow }: Context): Verdict {
+  const counterexamples = flow.real
+    .filter((state) => !except.includes(state) && isDeadEnd(flow, state))
+    .map((state) => counterexampleOf([{ state, event: null, vars: {} }]));
+  return settled(counterexamples, flow.real.length);
+}
+
+/** One function per `kind`; the switch is exhaustive, so a new kind fails to compile until it is judged. */
+function judge(def: PropertyDef, context: Context): Verdict {
+  switch (def.kind) {
+    case "invariant":
+      return def.expr.mentionsVars ? pending("tlc") : invariant(def.expr.expr, context);
+    case "leads-to":
+      return pending("tlc");
+    case "never-reach":
+      return neverReach(def.target, def.avoid, context);
+    case "always-reach":
+      return alwaysReach(def.target, context);
+    case "no-dead-end":
+      return noDeadEnd(def.except, context);
+    case "dep-only-via":
+      return pending("bfs");
+  }
+}
+
+function statesIn(expr: PropExpr): StateName[] {
+  switch (expr.kind) {
+    case "cmp":
+      return [];
+    case "state-in":
+      return [...expr.states];
+    case "not":
+      return statesIn(expr.operand);
+    case "and":
+    case "or":
+      return expr.operands.flatMap(statesIn);
+    case "implies":
+      return [...statesIn(expr.antecedent), ...statesIn(expr.consequent)];
+  }
+}
+
+/** The states a definition names, by the field that names them. */
+function references(def: PropertyDef): readonly (readonly [string, readonly StateName[]])[] {
+  switch (def.kind) {
+    case "invariant":
+      return [["expr", statesIn(def.expr.expr)]];
+    case "leads-to":
+      return [
+        ["from", statesIn(def.from.expr)],
+        ["to", statesIn(def.to.expr)],
+      ];
+    case "never-reach":
+      return [
+        ["target", def.target],
+        ["avoid", def.avoid],
+      ];
+    case "always-reach":
+      return [["target", def.target]];
+    case "no-dead-end":
+      return [["except", def.except]];
+    case "dep-only-via":
+      return [];
+  }
+}
+
+/** A name that is no node is a typo more often than a deliberate choice, but the property is still judged. */
+function unknownStateWarnings(def: PropertyDef, flow: Flow): ScanWarning[] {
+  const reported = new Set<StateName>();
+  const warnings: ScanWarning[] = [];
+  for (const [field, names] of references(def)) {
+    for (const name of names) {
+      if (flow.states.has(name) || reported.has(name)) continue;
+      reported.add(name);
+      warnings.push(warn(`性質 ${def.id} の ${field} にある ${name} は、どの状態にもありません`));
+    }
+  }
+  return warnings;
+}
+
+function entryWarnings(
+  { entry, properties }: PropertiesFile,
+  resolved: readonly StateName[],
+  flow: Flow,
+): ScanWarning[] {
+  const unknown = new Set((entry ?? NONE).filter((name) => !flow.states.has(name)));
+  const warnings = [...unknown].map((name) =>
+    warn(`${PROPERTIES_FILE} の entry にある ${name} は、どの状態にもありません。入口に使いません`),
+  );
+  const needing = properties.filter(needsEntry);
+  if (resolved.length === 0 && needing.length > 0) {
+    const ids = needing.map((def) => def.id).join("、");
+    warnings.push(
+      warn(
+        `入口にする状態がありません（entry も @state-initial も入エッジの無い状態も無い）。${ids} は何も探索せずに判定しました`,
+      ),
+    );
+  }
+  return warnings;
+}
+
+/** The properties whose counterexample passes through each state, in file order. */
+function violationsOf(results: readonly PropertyResult[]): Map<StateName, PropertyId[]> {
+  const violations = new Map<StateName, PropertyId[]>();
+  for (const { id, counterexamples } of results) {
+    for (const state of new Set(counterexamples.flatMap((example) => example.path))) {
+      append(violations, state, id);
+    }
+  }
+  return violations;
+}
+
+/**
+ * The quick lane of SPEC §9: every property is judged on the flow edges alone, guards taken as always
+ * true. `graph.nodes` is in id order, as `scan` builds it. A property that needs a variable or a
+ * time-ordered argument stays `pending` for TLC.
+ */
+export function checkProperties(
+  graph: Pick<Graph, "nodes" | "edges" | "model">,
+  file: PropertiesFile,
+  checkedAt: string,
+): {
+  properties: PropertyResult[];
+  violations: ReadonlyMap<StateName, readonly PropertyId[]>;
+  warnings: ScanWarning[];
+} {
+  const flow = flowOf(graph);
+  const entry = entryOf(graph, file, flow);
+  const properties = file.properties.map(
+    (def): PropertyResult => ({
+      id: def.id,
+      kind: def.kind,
+      description: def.description,
+      ...judge(def, { flow, entry }),
+      checkedAt,
+    }),
+  );
+  return {
+    properties,
+    violations: violationsOf(properties),
+    warnings: [
+      ...entryWarnings(file, entry, flow),
+      ...file.properties.flatMap((def) => unknownStateWarnings(def, flow)),
+    ],
+  };
 }

@@ -255,6 +255,7 @@ export type Graph = {
   readonly nodes: readonly StateNode[];
   readonly edges: readonly Edge[];
   readonly model: GraphModel;
+  readonly properties: readonly PropertyResult[];
   readonly warnings: readonly ScanWarning[];
 };
 
