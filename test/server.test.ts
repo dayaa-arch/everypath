@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { get } from "node:http";
+import { get, request as httpRequest } from "node:http";
 import { createServer, type Server } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -716,6 +716,82 @@ describe("serve: what triggers a rescan", () => {
       await events.graph(seen, { since });
     });
   }
+});
+
+/** A body sent in chunks with no Content-Length, so the server can only count what arrives. */
+function chunkedRequest(
+  serve: { readonly url: string },
+  method: "POST" | "PUT",
+  path: string,
+  body: string,
+): Promise<number> {
+  const target = new URL(serve.url);
+  return new Promise((resolve, reject) => {
+    const outgoing = httpRequest(
+      {
+        hostname: target.hostname,
+        port: target.port,
+        method,
+        path,
+        headers: { "content-type": "application/json" },
+      },
+      (response) => {
+        response.resume();
+        resolve(response.statusCode ?? 0);
+      },
+    );
+    outgoing.on("error", reject);
+    for (let at = 0; at < body.length; at += 64 * 1024)
+      outgoing.write(body.slice(at, at + 64 * 1024));
+    outgoing.end();
+  });
+}
+
+describe("serve: request bodies", () => {
+  const MiB = 1024 * 1024;
+
+  it("answers 413 to a body over 1 MiB, with or without Content-Length, and records nothing", async () => {
+    const root = await makeRepo(small);
+    const serve = await serveRepo(root);
+    const json = { "content-type": "application/json" };
+    const note = JSON.stringify({ note: "x".repeat(2 * MiB) });
+    const layout = JSON.stringify({ Home: { x: 1, y: 2, pad: "x".repeat(2 * MiB) } });
+
+    assert.equal((await rawRequest(serve, "POST", reviewPath("Home"), json, note)).status, 413);
+    assert.equal((await rawRequest(serve, "PUT", "/layout.json", json, layout)).status, 413);
+    assert.equal(await chunkedRequest(serve, "POST", reviewPath("Home"), note), 413);
+
+    assert.deepEqual((await readReview(root)).approvals, {});
+    await assert.rejects(readOutput(root, "layout.json"), { code: "ENOENT" });
+    assert.equal((await request(serve, "GET", "/graph.json")).status, 200);
+  });
+
+  it("answers 400 to a layout with a number that is not finite or a key that is no node", async () => {
+    const root = await makeRepo(small);
+    const serve = await serveRepo(root);
+
+    for (const raw of ['{"Home": {"x": 1e999, "y": 0}}', '{"Nope": {"x": 1, "y": 2}}']) {
+      const reply = await request(serve, "PUT", "/layout.json", { raw });
+      assert.equal(reply.status, 400, `${raw} -> ${reply.status} ${reply.text}`);
+    }
+    await assert.rejects(readOutput(root, "layout.json"), { code: "ENOENT" });
+  });
+
+  it("answers 400 to a note over 2,000 characters and accepts one of 2,000", async () => {
+    const root = await makeRepo(small);
+    const serve = await serveRepo(root);
+
+    const long = await request(serve, "POST", reviewPath("Home"), {
+      body: { note: "あ".repeat(2_001) },
+    });
+    assert.equal(long.status, 400, long.text);
+    assert.deepEqual((await readReview(root)).approvals, {});
+
+    const fits = await request(serve, "POST", reviewPath("Home"), {
+      body: { note: "😀".repeat(2_000) },
+    });
+    assert.ok(succeeded(fits), `${fits.status} ${fits.text}`);
+  });
 });
 
 describe("serve: guards on state-changing requests", () => {

@@ -153,11 +153,17 @@ export async function startServer({
       if (method === "DELETE") {
         return answer(response, await writer.submit({ kind: "revoke", id }));
       }
-      const body = parseApproval(await readJson(request));
-      if (body === null) {
-        return send(response, 400, '本文は {"note": 文字列, "hash"?: 文字列} にしてください');
+      const body = await readJson(request);
+      if (body.kind === "too-large") return send(response, 413, TOO_LARGE);
+      const approval = parseApproval(body.value);
+      if (approval === null) {
+        return send(
+          response,
+          400,
+          `本文は {"note": ${NOTE_LIMIT} 文字までの文字列, "hash"?: 文字列} にしてください`,
+        );
       }
-      return answer(response, await writer.submit({ kind: "approve", id, ...body }));
+      return answer(response, await writer.submit({ kind: "approve", id, ...approval }));
     }
     switch (`${method} ${path}`) {
       case "GET /":
@@ -178,11 +184,18 @@ export async function startServer({
       case "GET /layout.json":
         return send(response, 200, (await readOutput(root, "layout.json")) ?? "{}\n", JSON_TYPE);
       case "PUT /layout.json": {
-        const body = parseLayout(await readJson(request));
-        if (body === null) {
-          return send(response, 400, '本文は {ノード名: {"x": 数, "y": 数}} にしてください');
+        const body = await readJson(request);
+        if (body.kind === "too-large") return send(response, 413, TOO_LARGE);
+        const nodes = new Set<string>(writer.current().graph.nodes.map((node) => node.id));
+        const layout = parseLayout(body.value, nodes);
+        if (layout === null) {
+          return send(
+            response,
+            400,
+            '本文は {今の図にあるノード名: {"x": 有限の数, "y": 有限の数}} にしてください',
+          );
         }
-        return answer(response, await writer.submit({ kind: "layout", body }));
+        return answer(response, await writer.submit({ kind: "layout", body: layout }));
       }
       case "POST /check/tlc":
         return startTlc(writer)
@@ -322,15 +335,42 @@ function nodeId(segment: string): StateName | null {
   }
 }
 
-/** The body as JSON, or `undefined` when it is not JSON, which every parser below refuses. */
-async function readJson(request: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) chunks.push(chunk);
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    return undefined;
+const BODY_LIMIT = 1024 * 1024;
+const TOO_LARGE = "本文は 1 MiB までにしてください";
+/** In characters, so a note in Japanese gets as many as one in English. */
+const NOTE_LIMIT = 2_000;
+
+/**
+ * The body as JSON (`undefined` when it is not JSON, which every parser below refuses), or
+ * `too-large` past 1 MiB: from there the rest is read and dropped, never kept.
+ */
+function readJson(
+  request: IncomingMessage,
+): Promise<{ readonly kind: "json"; readonly value: unknown } | { readonly kind: "too-large" }> {
+  if (Number(request.headers["content-length"] ?? 0) > BODY_LIMIT) {
+    return Promise.resolve({ kind: "too-large" });
   }
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const take = (chunk: Buffer): void => {
+      size += chunk.length;
+      if (size <= BODY_LIMIT) {
+        chunks.push(chunk);
+        return;
+      }
+      request.off("data", take).off("end", finish);
+      resolve({ kind: "too-large" });
+    };
+    const finish = (): void => {
+      try {
+        resolve({ kind: "json", value: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+      } catch {
+        resolve({ kind: "json", value: undefined });
+      }
+    };
+    request.on("data", take).on("end", finish).on("error", reject);
+  });
 }
 
 function parseApproval(value: unknown): { note: string; hash: string | null } | null {
@@ -338,20 +378,25 @@ function parseApproval(value: unknown): { note: string; hash: string | null } | 
   const note = asText(value.note);
   const hash = value.hash === undefined ? null : asText(value.hash);
   if (note === null || (value.hash !== undefined && hash === null)) return null;
+  if ([...note].length > NOTE_LIMIT) return null;
   return { note, hash };
 }
 
-/** Exactly `x` and `y` per node, so `GET /layout.json` gives back what was put. */
-function parseLayout(value: unknown): Layout | null {
+/**
+ * Exactly `x` and `y` per node, both finite (`1e999` parses as Infinity), so `GET /layout.json`
+ * gives back what was put. Every key is a node of the current graph.
+ */
+function parseLayout(value: unknown, nodes: ReadonlySet<string>): Layout | null {
   if (!isRecord(value)) return null;
-  const nodes: [string, { x: number; y: number }][] = [];
+  const points: [string, { x: number; y: number }][] = [];
   for (const [id, point] of Object.entries(value)) {
-    if (!isRecord(point) || Object.keys(point).length !== 2) return null;
+    if (!nodes.has(id) || !isRecord(point) || Object.keys(point).length !== 2) return null;
     const { x, y } = point;
     if (typeof x !== "number" || typeof y !== "number") return null;
-    nodes.push([id, { x, y }]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    points.push([id, { x, y }]);
   }
-  return Object.fromEntries(nodes);
+  return Object.fromEntries(points);
 }
 
 const ANSWERS: Readonly<Record<JobResult, readonly [number, string]>> = {
