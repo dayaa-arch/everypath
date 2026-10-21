@@ -3,11 +3,12 @@ import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { errorMessage } from "./core/json.js";
+import { PROPERTIES_FILE } from "./core/properties.js";
 import { scan } from "./core/scan.js";
-import type { Graph, ScanWarning } from "./core/types.js";
+import type { Counterexample, Graph, PropertyResult, ScanWarning } from "./core/types.js";
 import { serializeGraph } from "./core/workspace.js";
 
-const USAGE = "使い方: everypath scan [dir] [--json] [--quiet]";
+const USAGE = "使い方: everypath scan [dir] [--json] [--quiet]\n        everypath check [dir]";
 const USAGE_ERROR = 2;
 const OPTIONS: readonly string[] = ["json", "quiet", "help"];
 
@@ -18,7 +19,8 @@ type Command =
       readonly directory: string;
       readonly json: boolean;
       readonly quiet: boolean;
-    };
+    }
+  | { readonly kind: "check"; readonly directory: string };
 
 type Parsed =
   | { readonly ok: true; readonly command: Command }
@@ -47,8 +49,14 @@ function parseCommand(args: readonly string[]): Parsed {
     if (values.help) return { ok: true, command: { kind: "help" } };
     const [name, directory = ".", ...extra] = positionals;
     if (name === undefined) return { ok: false, message: "コマンドがありません" };
-    if (name !== "scan" || extra.length > 0) {
+    if ((name !== "scan" && name !== "check") || extra.length > 0) {
       return { ok: false, message: `未知のコマンドか引数です: ${positionals.join(" ")}` };
+    }
+    if (name === "check") {
+      if (values.json || values.quiet) {
+        return { ok: false, message: "check は --json と --quiet を受け付けません" };
+      }
+      return { ok: true, command: { kind: "check", directory } };
     }
     return {
       ok: true,
@@ -73,6 +81,56 @@ function summarize(graph: Graph): string {
   const flows = graph.edges.filter((edge) => edge.type === "flow").length;
   const counts = `状態 ${graph.nodes.length}、遷移 ${flows}、依存 ${graph.edges.length - flows}、警告 ${graph.warnings.length}`;
   return `スキャン完了: ${counts}（.everypath/graph.json に書きました）`;
+}
+
+const STATUS_WORDS: Readonly<Record<PropertyResult["result"], string>> = {
+  violated: "違反",
+  ok: "成立",
+  pending: "保留",
+  error: "エラー",
+};
+
+/** `ログイン →(forgot) パスワードリセット`. An edge with no event is a bare arrow. */
+function formatPath({ steps }: Counterexample): string {
+  const [first, ...rest] = steps;
+  return rest.reduce<string>(
+    (text, { event, state }) => `${text} →${event === null ? "" : `(${event})`} ${state}`,
+    first.state,
+  );
+}
+
+function describeProperty({
+  id,
+  kind,
+  description,
+  result,
+  checkedBy,
+  counterexamples,
+}: PropertyResult): string[] {
+  const title = `${STATUS_WORDS[result]} ${id} [${kind}]${description === null ? "" : ` ${description}`}`;
+  if (result === "pending") {
+    const reason =
+      checkedBy === "tlc"
+        ? "TLC の検査待ちです（everypath check --tlc）"
+        : `${kind} の簡易検査はまだありません`;
+    return [title, `  ${reason}`];
+  }
+  return [title, ...counterexamples.map((example) => `  ${formatPath(example)}`)];
+}
+
+function summarizeChecks({ properties, warnings }: Graph): string {
+  const counts = Object.entries(STATUS_WORDS).flatMap(([result, word]) => {
+    const count = properties.filter((p) => p.result === result).length;
+    return count > 0 ? [`${word} ${count}`] : [];
+  });
+  const rejected = warnings.filter((warning) => warning.file === PROPERTIES_FILE).length;
+  const note = rejected > 0 ? `（${PROPERTIES_FILE} の警告 ${rejected} 件）` : "";
+  return `性質 ${properties.length} 件: ${counts.join("、")}${note}`;
+}
+
+function reportChecks(graph: Graph): string[] {
+  if (graph.properties.length === 0) return [`性質がありません（${PROPERTIES_FILE}）`];
+  return [...graph.properties.flatMap(describeProperty), summarizeChecks(graph)];
 }
 
 async function isDirectory(path: string): Promise<boolean> {
@@ -100,13 +158,31 @@ async function main(args: readonly string[]): Promise<number> {
     process.stderr.write(`ディレクトリが見つかりません: ${command.directory}\n`);
     return USAGE_ERROR;
   }
+  return command.kind === "scan" ? runScan(root, command) : runCheck(root);
+}
+
+async function runScan(
+  root: string,
+  { json, quiet }: Extract<Command, { readonly kind: "scan" }>,
+): Promise<number> {
   const graph = await scan(root);
-  if (command.json) process.stdout.write(serializeGraph(graph));
-  if (!command.quiet) {
+  if (json) process.stdout.write(serializeGraph(graph));
+  if (!quiet) {
     const lines = [summarize(graph), ...graph.warnings.map(describeWarning)];
     process.stderr.write(`${lines.join("\n")}\n`);
   }
   return 0;
+}
+
+/** A property the file defines but the check could not read fails the run too, so CI never passes it silently. */
+async function runCheck(root: string): Promise<number> {
+  const graph = await scan(root, { reason: "check" });
+  if (graph.warnings.length > 0) {
+    process.stderr.write(`${graph.warnings.map(describeWarning).join("\n")}\n`);
+  }
+  process.stdout.write(`${reportChecks(graph).join("\n")}\n`);
+  const rejected = graph.warnings.some((warning) => warning.file === PROPERTIES_FILE);
+  return rejected || graph.properties.some((p) => p.result === "violated") ? 1 : 0;
 }
 
 try {
