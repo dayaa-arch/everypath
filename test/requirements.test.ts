@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { delimiter, join, relative } from "node:path";
 import { describe, it } from "node:test";
 import type { FlowEdge } from "../src/core/types.js";
 import { flows, makeRepo, readGraph, runCli, ts } from "./helpers/repo.js";
@@ -169,6 +169,26 @@ describe("R-03: check --tlc without Java or the jar decides by the quick check",
       EVERYPATH_TLA_JAR: join(jarDirectory, "tla2tools.jar"),
     }));
     await rm(emptyPath, { recursive: true, force: true });
+  });
+
+  it("says so first when java is missing and no state can start the model", async () => {
+    const emptyPath = await mkdtemp(join(tmpdir(), "everypath-nojava-"));
+    await expectInstallGuidance(withoutEntry, (jarDirectory) => ({
+      ...process.env,
+      PATH: emptyPath,
+      EVERYPATH_TLA_JAR: join(jarDirectory, "tla2tools.jar"),
+    }));
+    await rm(emptyPath, { recursive: true, force: true });
+  });
+
+  it("treats a java that cannot run, like the macOS stub with no JDK, as missing", async () => {
+    const stub = await makeRepo({ "bin/java": "#!/bin/sh\nexit 1\n" });
+    await chmod(join(stub, "bin", "java"), 0o755);
+    await expectInstallGuidance(withProperties, (jarDirectory) => ({
+      ...process.env,
+      PATH: `${join(stub, "bin")}${delimiter}${process.env.PATH ?? ""}`,
+      EVERYPATH_TLA_JAR: join(jarDirectory, "tla2tools.jar"),
+    }));
   });
 
   it("says how to install when the jar is missing", async () => {

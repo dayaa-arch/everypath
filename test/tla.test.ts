@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { PROPERTIES_FILE } from "../src/core/properties.js";
@@ -598,6 +598,13 @@ async function checkExample(script: FakeJavaScript, args: readonly string[] = []
   return { root, java, result };
 }
 
+async function addProperty(root: string, definition: unknown): Promise<void> {
+  const path = join(root, PROPERTIES_FILE);
+  const file = JSON.parse(await readFile(path, "utf8"));
+  file.properties.push(definition);
+  await writeFile(path, JSON.stringify(file));
+}
+
 const readResult = async (root: string) =>
   JSON.parse(await readFile(join(root, ".everypath", "tla", "result.json"), "utf8"));
 
@@ -795,33 +802,43 @@ describe("tla: running TLC and merging its verdicts", () => {
     assert.ok(!Object.values(stored.names.checks).includes("typo"));
   });
 
-  it("turns the properties still open into errors when the time budget runs out", async () => {
+  it("makes the properties still open errors, without running them, when the time budget runs out", async () => {
     const progress =
       "Progress(9) at 2026-10-21 23:01:25: 113 states generated, 47 distinct states found, 0 states left on queue.\n";
+    const root = await exampleRepo();
+    await addProperty(root, {
+      id: "after-timeout",
+      kind: "leads-to",
+      from: "state == Home",
+      to: "state == ログアウト",
+    });
+    const java = await fakeJava({
+      rules: [
+        {
+          when: "INVARIANT P1_no_unauth_home",
+          reply: { output: forExample(await fixture("violation")), exit: 12 },
+        },
+        { when: "PROPERTY P3_logout_eventually_login", reply: { output: progress, hang: true } },
+      ],
+      otherwise: { output: await fixture("ok") },
+    });
     const started = Date.now();
-    const { root, result } = await checkExample(
-      {
-        rules: [
-          {
-            when: "INVARIANT P1_no_unauth_home",
-            reply: { output: forExample(await fixture("violation")), exit: 12 },
-          },
-          { when: "PROPERTY P3_logout_eventually_login", reply: { output: progress, hang: true } },
-        ],
-        otherwise: { output: await fixture("ok") },
-      },
-      ["--timeout", "2"],
-    );
+
+    const result = runCli(["check", "--tlc", "--timeout", "2", root], root, java.env);
 
     assert.ok(Date.now() - started < 30_000, "the sleeping java was not waited for");
     assert.equal(result.status, 1);
     assert.match(result.stdout, /タイムアウト/);
+    assert.equal((await java.cfgs()).length, 3);
     const graph = await readGraph(root);
-    const timedOut = resultOf(graph, "logout-eventually-login");
-    assert.deepEqual(
-      [timedOut.result, timedOut.statesExplored, timedOut.counterexamples],
-      ["error", 47, []],
-    );
+    for (const id of ["logout-eventually-login", "after-timeout"]) {
+      const open = resultOf(graph, id);
+      assert.deepEqual(
+        [open.result, open.statesExplored, open.counterexamples],
+        ["error", 47, []],
+        id,
+      );
+    }
     assert.equal(resultOf(graph, "no-unauth-home").result, "violated");
     assert.equal(resultOf(graph, "lock-after-3").result, "ok");
   });

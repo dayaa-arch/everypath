@@ -316,8 +316,8 @@ async function runScan(
 
 /**
  * A property the file defines but the check could not read fails the run too, so CI never passes it
- * silently. So does a TLC error, a variable out of its range, and a property TLC could not decide.
- * With `--tlc` but no Java or jar the quick check alone decides the exit code.
+ * silently. So does any TLC error, which includes a property TLC could not decide, and a variable
+ * out of its range. With `--tlc` but no Java or jar the quick check alone decides the exit code.
  */
 async function runCheck(root: string, tlc: { readonly timeoutMs: number } | null): Promise<number> {
   const outcome = tlc === null ? null : await checkTlc(root, tlc);
@@ -329,10 +329,10 @@ async function runCheck(root: string, tlc: { readonly timeoutMs: number } | null
   process.stdout.write(`${reportChecks(graph, extra).join("\n")}\n`);
 
   const rejected = graph.warnings.some((warning) => warning.file === PROPERTIES_FILE);
-  const unsound = graph.properties.some((p) => p.result === "violated" || p.result === "error");
+  const violated = graph.properties.some((p) => p.result === "violated");
   const tlcFailed =
     outcome?.kind === "checked" && (outcome.typeOk !== null || outcome.error !== null);
-  return rejected || unsound || tlcFailed ? 1 : 0;
+  return rejected || violated || tlcFailed ? 1 : 0;
 }
 
 async function runExport(root: string): Promise<number> {
