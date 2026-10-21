@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   parseAssignments,
+  parseEventName,
   parseGuard,
   parseProperty,
   parseStateName,
   parseVarDecl,
+  sanitizeStateName,
 } from "../src/core/expr.js";
 import type { ParseResult } from "../src/core/types.js";
 
@@ -415,6 +417,39 @@ describe("arbitrary input never throws and rejections point inside the input (co
       for (const { input } of accepted) {
         for (let end = 0; end <= input.length; end++) assertWellFormed(parse, input.slice(0, end));
       }
+    });
+  }
+});
+
+describe("event names", () => {
+  acceptCases("parseEventName", parseEventName, [
+    { input: "login_ok", expected: "login_ok" },
+    { input: "  ログイン成功 ", expected: "ログイン成功" },
+  ]);
+  rejectCases("parseEventName", parseEventName, [
+    { name: "empty input", input: "", column: 1 },
+    { name: "two words", input: "login ok", column: 7 },
+    { name: "keyword", input: "TRUE", column: 1 },
+  ]);
+});
+
+describe("sanitizeStateName", () => {
+  const cases: readonly (readonly [string, string])[] = [
+    ["login-form", "login_form"],
+    ["2fa", "_2fa"],
+    ["state", "state_"],
+    ["BOOLEAN", "BOOLEAN_"],
+    ["src/a/utils", "src_a_utils"],
+    ["a.test", "a_test"],
+    ["ログイン", "ログイン"],
+    ["", "_"],
+    ["\u0301x", "_\u0301x"],
+  ];
+  for (const [raw, expected] of cases) {
+    it(`turns ${JSON.stringify(raw)} into ${JSON.stringify(expected)}`, () => {
+      const name = sanitizeStateName(raw);
+      assert.equal(name, expected.normalize("NFC"));
+      accepts(parseStateName, name, name);
     });
   }
 });

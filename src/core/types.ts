@@ -103,3 +103,136 @@ export type ModelVar =
       readonly members: NonEmpty<MemberName>;
       readonly init: MemberName;
     };
+
+/** An event named by `on:` or `@state-event`. Minted only by `src/core/expr.ts`. */
+export type EventName = Brand<string, "EventName">;
+
+/** One annotation or input file the scanner could not use. `detail` is the parser's own warning, if any. */
+export type ScanWarning = {
+  readonly file: string | null;
+  readonly line: number | null;
+  readonly message: string;
+  readonly detail: ParseWarning | null;
+};
+
+export type NodeStatus = {
+  readonly tested: boolean;
+  readonly vuln: boolean;
+  readonly wip: boolean;
+  readonly planned: boolean;
+  readonly requireProof: boolean;
+  readonly proof: "none" | "pending" | "passed" | "failed";
+  readonly reviewed: boolean;
+  readonly changedSinceReview: boolean;
+};
+
+export type Finding = {
+  readonly file: string;
+  readonly line: number | null;
+  readonly severity: "high" | "medium" | "low";
+  readonly rule: string;
+  readonly message: string;
+};
+
+/** A `@state-risk` the agent declared about itself. Kept apart from scanner findings. */
+export type Risk = { readonly file: string; readonly message: string };
+
+export type StateNode = {
+  readonly id: StateName;
+  readonly group: string | null;
+  readonly desc: string | null;
+  /** Root-relative, `/`-separated, sorted. Empty for a planned node. */
+  readonly files: readonly string[];
+  readonly lines: number;
+  /** sha1 of the node's file contents concatenated in `files` order. Approvals match against it. */
+  readonly hash: string;
+  readonly status: NodeStatus;
+  readonly spec: readonly string[];
+  readonly risks: readonly Risk[];
+  readonly findings: readonly Finding[];
+  readonly violations: readonly string[];
+  readonly lastChangedAt: string;
+};
+
+export type FlowEdge = {
+  readonly type: "flow";
+  readonly from: StateName;
+  readonly to: StateName;
+  readonly event: EventName | null;
+  readonly guard: GuardExpr | null;
+  readonly set: readonly Assignment[];
+  /** Everything after `@state-next`, as written. Two declarations with the same text are one edge. */
+  readonly text: string;
+  readonly via: readonly string[];
+};
+
+export type DepEdge = {
+  readonly type: "dep";
+  readonly from: StateName;
+  readonly to: StateName;
+  readonly via: readonly string[];
+};
+
+export type Edge = FlowEdge | DepEdge;
+
+export type GraphModel = {
+  readonly initial: StateName | null;
+  readonly vars: readonly ModelVar[];
+  readonly events: readonly EventName[];
+};
+
+/** `tested`, `untested` and `unreviewed` count real nodes only: a planned node has no code to test or review. */
+export type GraphStats = {
+  readonly nodes: number;
+  readonly edges: number;
+  readonly tested: number;
+  readonly untested: number;
+  readonly vuln: number;
+  readonly wip: number;
+  readonly planned: number;
+  readonly unreviewed: number;
+};
+
+export type Graph = {
+  readonly version: 1;
+  readonly generatedAt: string;
+  readonly root: string;
+  readonly findingsSource: string | null;
+  readonly stats: GraphStats;
+  readonly nodes: readonly StateNode[];
+  readonly edges: readonly Edge[];
+  readonly model: GraphModel;
+  readonly warnings: readonly ScanWarning[];
+};
+
+export type Approval = {
+  readonly hash: string;
+  readonly at: string;
+  readonly by: string;
+  readonly note: string;
+};
+
+/** `.everypath/review.json`. Written by the viewer, read by the scanner. */
+export type ReviewFile = {
+  readonly version: 1;
+  readonly approvals: Readonly<Record<string, Approval>>;
+};
+
+/** An edge as `history.jsonl` identifies it. A dep has no event. */
+export type EdgeRef = {
+  readonly type: Edge["type"];
+  readonly from: StateName;
+  readonly to: StateName;
+  readonly event: EventName | null;
+};
+
+/** One line of `.everypath/history.jsonl`. */
+export type HistoryEntry = {
+  readonly at: string;
+  readonly reason: string;
+  readonly added: readonly StateName[];
+  readonly removed: readonly StateName[];
+  readonly updated: readonly StateName[];
+  readonly addedEdges: readonly EdgeRef[];
+  readonly removedEdges: readonly EdgeRef[];
+};

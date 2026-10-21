@@ -1,5 +1,6 @@
 import type {
   Assignment,
+  EventName,
   GuardExpr,
   MemberName,
   ModelVar,
@@ -41,6 +42,22 @@ export function parseProperty(input: string): ParseResult<PropertyExpr> {
 /** A state name from `@state`, `@state-next` or a file name. Same identifier rules as expressions. */
 export function parseStateName(input: string): ParseResult<StateName> {
   return run(input, (cur) => parseName(cur, "state"));
+}
+
+/** An event name from `on:` or `@state-event`. Same identifier rules as state names. */
+export function parseEventName(input: string): ParseResult<EventName> {
+  return run(input, (cur) => parseName(cur, "event"));
+}
+
+/**
+ * Turns a file or directory name into a state name: characters an identifier cannot hold become
+ * `_`, a leading non-letter gets a `_` prefix, a keyword gets a `_` suffix. Total, unlike the parsers.
+ */
+export function sanitizeStateName(raw: string): StateName {
+  const replaced = raw.normalize("NFC").replace(/[^\p{L}\p{M}\p{Nd}_]/gu, "_");
+  const headed = /^[\p{L}_]/u.test(replaced) ? replaced : `_${replaced}`;
+  // The replacement and prefix above leave exactly the shape `parseName` accepts.
+  return (KEYWORDS.includes(headed) ? `${headed}_` : headed) as StateName;
 }
 
 const MAX_NESTING = 64;
@@ -313,12 +330,14 @@ function parseNatural(cur: Cursor): ParseResult<number> {
   return ok(value);
 }
 
-type Brands = { var: VarName; state: StateName; member: MemberName };
+type Brands = { var: VarName; state: StateName; member: MemberName; event: EventName };
 
-const ROLE_LABEL = { var: "変数名", state: "状態名", member: "メンバー名" } satisfies Record<
-  keyof Brands,
-  string
->;
+const ROLE_LABEL = {
+  var: "変数名",
+  state: "状態名",
+  member: "メンバー名",
+  event: "イベント名",
+} satisfies Record<keyof Brands, string>;
 
 function parseName<Role extends keyof Brands>(cur: Cursor, role: Role): ParseResult<Brands[Role]> {
   const token = peek(cur);
