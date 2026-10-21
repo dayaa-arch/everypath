@@ -42,12 +42,15 @@ export type StoredVerdicts = {
   readonly byId: ReadonlyMap<string, StoredVerdict>;
 };
 
+/** `kind` is what the definition was when TLC checked it: a verdict holds only for the same kind. */
 type StoredVerdict = Pick<
   PropertyResult,
-  "checkedBy" | "result" | "counterexamples" | "statesExplored" | "checkedAt"
+  "kind" | "result" | "counterexamples" | "statesExplored" | "checkedAt"
 >;
 
 const RESULTS = ["ok", "violated", "error", "pending"] as const;
+/** The kinds TLC checks. */
+const TLC_KINDS = ["invariant", "leads-to"] as const;
 
 function parseStep(raw: unknown): Step | null {
   if (!isRecord(raw) || !isRecord(raw.vars)) return null;
@@ -93,11 +96,11 @@ function parseCounterexample(raw: unknown): Counterexample | null {
 function parseVerdict(raw: unknown): (StoredVerdict & { readonly id: string }) | null {
   if (!isRecord(raw)) return null;
   const id = asText(raw.id);
+  const kind = TLC_KINDS.find((known) => known === raw.kind);
   const result = RESULTS.find((known) => known === raw.result);
   const checkedAt = asText(raw.checkedAt);
   const statesExplored = raw.statesExplored === null ? null : asInteger(raw.statesExplored);
-  const checkedBy = raw.checkedBy === "tlc" || raw.checkedBy === "both" ? raw.checkedBy : null;
-  if (id === null || result === undefined || checkedAt === null || checkedBy === null) return null;
+  if (id === null || kind === undefined || result === undefined || checkedAt === null) return null;
   if (raw.statesExplored !== null && statesExplored === null) return null;
   const counterexamples: Counterexample[] = [];
   for (const item of asItems(raw.counterexamples)) {
@@ -105,7 +108,7 @@ function parseVerdict(raw: unknown): (StoredVerdict & { readonly id: string }) |
     if (example === null) return null;
     counterexamples.push(example);
   }
-  return { id, checkedBy, result, counterexamples, statesExplored, checkedAt };
+  return { id, kind, result, counterexamples, statesExplored, checkedAt };
 }
 
 /** `result.json` to what a scan needs, or `null` when any part of it does not read as a record. */
@@ -133,12 +136,17 @@ export function rejectionWarnings({ rejected }: Pick<TlaModel, "rejected">): Sca
   }));
 }
 
+/** A result the quick check left for TLC: the only results a stored verdict may fill. */
+function awaitsTlc({ checkedBy, result }: PropertyResult): boolean {
+  return checkedBy === "tlc" && result === "pending";
+}
+
 /**
- * Lays TLC's stored verdicts over the quick lane's, by property id, on every scan, so they outlive
- * rescans. When the current model has the key TLC checked, a stored verdict replaces the quick one.
- * Otherwise it only fills a result the quick lane left `pending`, marked `staleModel`: a verdict about
- * an older model never hides one the quick lane reached on this model. While a record exists, the
- * definitions the current model leaves out are warned about, as `check --tlc` does.
+ * Lays TLC's stored verdicts over the quick lane's on every scan, so they outlive rescans. A verdict
+ * fills only a result the quick check left to TLC, and only for a definition of the same id and kind:
+ * an `ok` or `violated` the quick check reached is never replaced, whatever `result.json` says. When
+ * the current model has a key other than the one TLC checked, the verdict is marked `staleModel`.
+ * `checkedBy` stays the quick lane's.
  */
 export function withTlcResults(
   graph: Pick<Graph, "nodes" | "edges" | "model">,
@@ -151,9 +159,8 @@ export function withTlcResults(
   const fresh = generated.ok && modelKey(generated.model) === stored.key;
   const properties = quick.map((result): PropertyResult => {
     const verdict = stored.byId.get(result.id);
-    if (verdict === undefined) return result;
-    if (fresh) return { ...result, ...verdict };
-    return result.result === "pending" ? { ...result, ...verdict, staleModel: true } : result;
+    if (verdict === undefined || verdict.kind !== result.kind || !awaitsTlc(result)) return result;
+    return fresh ? { ...result, ...verdict } : { ...result, ...verdict, staleModel: true };
   });
   return { properties, warnings: generated.ok ? rejectionWarnings(generated.model) : [] };
 }

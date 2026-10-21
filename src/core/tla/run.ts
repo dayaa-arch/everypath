@@ -328,25 +328,26 @@ async function verify(
   return { kind: "done", verdicts, states, error };
 }
 
-/** Each check's verdict under its property id. A rejected definition never ran, so it is an error. */
+/**
+ * Each check's verdict under its property id. A definition the model left out never ran, so it gets
+ * none: a stored verdict would outlive the definition it was about.
+ */
 function decisions(
   verdicts: ReadonlyMap<string, Verdict>,
-  { names, rejected }: Pick<TlaModel, "names" | "rejected">,
+  { names }: Pick<TlaModel, "names">,
 ): Map<string, Verdict> {
   const decided = new Map<string, Verdict>();
   for (const [check, id] of Object.entries(names.checks)) {
     const verdict = verdicts.get(check);
     if (check !== TYPE_OK && verdict !== undefined) decided.set(id, verdict);
   }
-  for (const { id } of rejected) decided.set(id, undecided(null));
   return decided;
 }
 
 /**
- * The record's results: each property TLC decided, in file order, as the graph will show it.
- * `checkedBy` follows from what the quick check did: a variable-free invariant it settled is `both`,
- * one it left to TLC is `tlc`. Tested as `=== "tlc"` because `analyzed` may already carry an earlier
- * record's verdicts, where a settled one reads `both`, never `bfs`.
+ * The record's results: each property TLC decided, in file order. `checkedBy` follows from what the
+ * quick check did, which `analyzed` still says because an earlier record never changes `checkedBy`:
+ * a variable-free invariant it settled is `both`, one it left to TLC is `tlc`.
  */
 function recorded(
   analyzed: readonly PropertyResult[],
