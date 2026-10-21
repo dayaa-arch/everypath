@@ -158,6 +158,13 @@ export async function startServer({
         return subscribe(writer, request, response);
       case "POST /rescan":
         return answer(response, await writer.submit({ kind: "rescan", reason: "rescan" }));
+      case "GET /history.json":
+        return send(
+          response,
+          200,
+          recentHistory(await readOutput(root, "history.jsonl")),
+          JSON_TYPE,
+        );
       case "GET /layout.json":
         return send(response, 200, (await readOutput(root, "layout.json")) ?? "{}\n", JSON_TYPE);
       case "PUT /layout.json": {
@@ -202,6 +209,19 @@ export async function startServer({
 }
 
 const JSON_TYPE = "application/json; charset=utf-8";
+const HISTORY_LIMIT = 200;
+
+/** The last lines of `history.jsonl` as a JSON array, oldest first. A damaged line is left out. */
+function recentHistory(jsonl: string | null): string {
+  const entries: unknown[] = [];
+  for (const line of (jsonl ?? "").split("\n").slice(-HISTORY_LIMIT - 1)) {
+    if (line.trim() === "") continue;
+    try {
+      entries.push(JSON.parse(line));
+    } catch {}
+  }
+  return `${JSON.stringify(entries.slice(-HISTORY_LIMIT))}\n`;
+}
 const LOCAL_HOST = /^(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
 
 function eventFrame(event: ServerEvent): string {

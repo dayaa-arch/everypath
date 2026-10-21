@@ -168,7 +168,7 @@ export async function writeLayout(root: string, layout: Layout): Promise<void> {
 /** An output file the server hands out as it is, or `null` before anything wrote it. */
 export async function readOutput(
   root: string,
-  file: "layout.json" | "tla/Model.tla",
+  file: "layout.json" | "history.jsonl" | "tla/Model.tla",
 ): Promise<string | null> {
   try {
     return await readFile(join(root, OUTPUT_DIRECTORY, file), "utf8");

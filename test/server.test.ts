@@ -152,6 +152,47 @@ describe("serve: /events", () => {
       "the diff names the new edge",
     );
   });
+
+  it("lists the diffs oldest first on GET /history.json, ending with the latest", async () => {
+    const root = await makeRepo(small);
+    const serve = await serveRepo(root);
+    const events = await ready(serve);
+    const since = events.received.length;
+
+    await writeFiles(root, { "src/settings.ts": SETTINGS_SOURCE });
+    await events.graph((graph) => hasNode(graph, "設定"), { since });
+
+    const reply = await request(serve, "GET", "/history.json");
+    assert.equal(reply.status, 200);
+    const history = reply.json();
+    assert.ok(Array.isArray(history), "an array");
+    assert.ok(history.length >= 2 && history.length <= 200, `length ${history.length}`);
+    const latest: unknown = history.at(-1);
+    assert.ok(typeof latest === "object" && latest !== null && "added" in latest);
+    assert.deepEqual(latest.added, ["設定"]);
+  });
+
+  it("answers GET /history.json with at most the latest 200 diffs", async () => {
+    const root = await makeRepo(small);
+    const lines = Array.from({ length: 250 }, (_, i) =>
+      JSON.stringify({
+        at: `t${i}`,
+        reason: "seed",
+        added: [],
+        removed: [],
+        updated: [],
+        addedEdges: [],
+        removedEdges: [],
+      }),
+    );
+    await writeFiles(root, { ".everypath/history.jsonl": `${lines.join("\n")}\n` });
+    const serve = await serveRepo(root);
+
+    const history = (await request(serve, "GET", "/history.json")).json();
+    assert.ok(Array.isArray(history));
+    assert.equal(history.length, 200);
+    assert.deepEqual(history[0], JSON.parse(lines[51] ?? ""));
+  });
 });
 
 describe("serve: review", () => {
