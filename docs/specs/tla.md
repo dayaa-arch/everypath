@@ -60,7 +60,7 @@ Prototype で確かめたこと（手書きの example モデルを TLC 2.19 で
 ## 非目標
 - サーバーとビューア（`/check/tlc`、ステップ再生）、`never-reach` の TLC 検査、`dep-only-via`
 - `everypath.config.json` の `tla.jar`。環境変数と既定の場所だけを読む
-- `scan` での `result.json` の再利用。次の `scan` は TLC の結果を `pending` に戻す
+- ~~`scan` での `result.json` の再利用~~。`docs/specs/server.md` で取り消した。`scan` は `result.json` を入力として読み、モデルのキーが違えば `staleModel: true` を付けて残す
 
 ## 検証方法
 `test/tla.test.ts`（生成、パース、偽の `java` での実行と合流）、`test/fixtures/tlc-output-*.txt`、`test/cli.test.ts`、`test/requirements.test.ts` を実装より先に作る。完了条件 10 は手で実行する。

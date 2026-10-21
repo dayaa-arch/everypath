@@ -21,12 +21,26 @@
 type ServerEvent =
   | { type: "graph"; graph: Graph; diff: HistoryEntry | null; reason: string }
   | { type: "tlc"; status: "running" | "done" | "error"; states: number | null; message: string | null };
-// 書き込みはすべてこの列を 1 件ずつ通る。同時に 2 件は走らない
-type Job = { kind: "rescan"; reason: string } | { kind: "approve"; id: StateName; note: string }
-  | { kind: "revoke"; id: StateName } | { kind: "layout"; body: Layout } | { kind: "tlc-merge"; /* TLC の結果 */ };
-type TlcLane = { kind: "idle" } | { kind: "running"; startedAt: string };
+// 書き込みはすべてこの列を 1 件ずつ通る。待っている rescan は後から来た rescan を吸収する
+type Job = { kind: "rescan"; reason: string } | { kind: "approve"; id: StateName; note: string; hash: string | null }
+  | { kind: "revoke"; id: StateName } | { kind: "layout"; body: Layout } | { kind: "tlc-commit"; run: TlcRecord };
+type TlcLane = { kind: "idle" } | { kind: "running"; startedAt: string; abort: AbortController };
+// .everypath/tla/result.json。scan の入力。key は生成した Model.tla からコメント行を除いた sha1
+type TlcRecord = { version: 1; checkedAt: string; key: string; tla: string; cfg: string;
+  names: TlaNames; properties: PropertyResult[]; states: number | null; error: string | null };
+declare function startServer(o: { root: string; port: number; uiPath?: string; env?: NodeJS.ProcessEnv }):
+  Promise<{ url: string; close(): Promise<void> }>; // close は監視、SSE、TLC の子プロセスを止める
 ```
-表し方: 書き込みは判別可能なユニオンの `Job` を 1 本の列で直列に処理する。TLC の実行は列の外で走らせ、終わったら結果の取り込みだけを `Job` として列に入れる。理由: 説明役の調査で、コアはロックを持たず、`history.jsonl` の二重書きと古い解析での上書きが起きると分かったため。TLC の結果を再スキャンに残す仕組み（条件 7）の置き場所と、モデルの同一性の判定方法は architect で決める。
+表し方: 書き込みは判別可能なユニオンの `Job` を 1 本の列で直列に処理する。`graph.json` を書くのは、新しい `analyze` に続く `writeWorkspace` だけにする。TLC は一時ディレクトリで走らせ、結果は `TlcRecord` として返す。`.everypath/tla/` の 3 ファイルを書くのは、列の中の `tlc-commit` ジョブだけで、書いたあとに再スキャンする。`analyze` は `result.json` を読み、今のモデルのキーと比べて結果を重ねる。キーが同じなら結果をそのまま使う。違えば `staleModel: true` を付け、簡易検査が `pending` にした枠だけを埋める。理由: 説明役の調査で、コアはロックを持たず、`history.jsonl` の二重書きと古い解析での上書きが起きると分かったため。古い解析の `Graph` を渡す経路が無いので、上書きは構造上起きない。
+
+設計は architect の 2 案（最小変更、構造の作り直し）から合成した。最小変更案を土台にした。コア側の試作で既存の 263 件が無変更で通ったためである。作り直し案からは 5 点を接ぎ木した。TLC を一時ディレクトリで走らせること、`.everypath/tla/` を列の中だけで書くこと、コメントを除いたキー、古い結果は `pending` の枠だけを埋めること、書き込み元を固定する構造テスト（`test/single-writer.test.ts`）である。作り直し案の入力表と、ダイジェストによる重複の抑止は取らなかった。余分な再スキャンを減らすだけで、正しさは変えないためである。
+
+決めたこと。
+- 古い（`staleModel: true`）違反は `nodes[].violations` に入れず、`everypath check` の終了コードにも数えない。表示はして「古いモデルに対する結果」と添える。モデルが変わった後の違反を直させると、もう無いバグを追わせるため。
+- `everypath scan` と `check` も `result.json` を読む。CLI とサーバーで同じグラフになる（条件 2）。`docs/specs/tla.md` の非目標を取り消した。
+- 承認の本文には任意で `hash` を付けられ、今のノードの hash と違えば 409 を返す。画面に出ていない版を承認しないため。
+- 監視の判定は `workspace.ts` の `isScanInput` 1 つにする。`.everypath/` の中では `review.json`、`findings.json`、`tla/result.json` だけを入力とする。250 ms の窓は最初のイベントで開き、`recursive` が使えなければ 1.5 秒のポーリングに替える。
+- 状態を変える要求は `Content-Type: application/json` と、`Host` が `localhost` か `127.0.0.1` であることを求める。`review.json` は git で管理する記録なので、他のページから書かせないため。
 
 ## 非目標
 - ビューアの画面（`dist/ui.html` の中身）。`GET /` は配るだけ
@@ -34,4 +48,4 @@ type TlcLane = { kind: "idle" } | { kind: "running"; startedAt: string };
 - TLC の途中経過（状態数の逐次配信）。`checkTlc` は終了後にまとめて返すため、`running` と終了時の状態数だけを送る
 
 ## 検証方法
-`test/server.test.ts`（一時ディレクトリに作ったリポジトリへ実際に HTTP と SSE で接続する）、`test/requirements.test.ts`、`scripts/verify-requirements.ts`（R-05 の行を足す）。作る。
+`test/server.test.ts`（一時ディレクトリに作ったリポジトリに `everypath serve` を子プロセスで起動し、実際に HTTP と SSE で接続する）、`test/single-writer.test.ts`、`test/requirements.test.ts`、`scripts/verify-requirements.ts`（R-05 の行を足す）。作る。
