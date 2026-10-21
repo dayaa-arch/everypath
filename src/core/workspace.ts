@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, posix, resolve } from "node:path";
 import { CONFIG_FILE, type Config, DEFAULT_CONFIG, parseConfig } from "./config.js";
 import { parseEventName, parseStateName } from "./expr.js";
@@ -119,13 +120,55 @@ export async function writeWorkspace(
   graph: Graph,
   entry: HistoryEntry | null,
 ): Promise<void> {
-  const directory = join(root, OUTPUT_DIRECTORY);
-  await mkdir(directory, { recursive: true });
+  const directory = await outputDirectory(root, OUTPUT_DIRECTORY);
   // History goes first: a crash between the two writes repeats a line on the next scan instead of losing one.
-  if (entry !== null) {
-    await appendFile(join(directory, "history.jsonl"), `${JSON.stringify(entry)}\n`);
-  }
+  if (entry !== null) await appendHistory(directory, `${JSON.stringify(entry)}\n`);
   await replaceFile(join(directory, "graph.json"), serializeGraph(graph));
+}
+
+/**
+ * R-01 in a checkout that may be hostile: makes `directory` (`.everypath` or `.everypath/tla`) one
+ * name at a time if it is absent, and refuses when any of them is a link or not a directory, since a
+ * write through it would land outside the repository. Every writer here calls it first.
+ */
+async function outputDirectory(root: string, directory: string): Promise<string> {
+  let path = root;
+  let shown = "";
+  for (const name of directory.split("/")) {
+    path = join(path, name);
+    shown = shown === "" ? name : `${shown}/${name}`;
+    await mkdir(path).catch((error: unknown) => {
+      if (codeOf(error) !== "EEXIST") throw error;
+    });
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new Error(
+        `${shown} がリンクかディレクトリ以外のものなので、書き込みません。ディレクトリに置き換えてから実行し直してください`,
+      );
+    }
+  }
+  return path;
+}
+
+/** Appends one line to `history.jsonl` without following a link there, which would write outside. */
+async function appendHistory(directory: string, line: string): Promise<void> {
+  const flags = constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW;
+  const file = await open(join(directory, "history.jsonl"), flags, 0o666).catch(
+    (error: unknown) => {
+      const code = codeOf(error);
+      if (code !== "ELOOP" && code !== "EMLINK") throw error;
+      throw new Error(`${OUTPUT_DIRECTORY}/history.jsonl がリンクなので、書き込みません`);
+    },
+  );
+  try {
+    await file.appendFile(line);
+  } finally {
+    await file.close();
+  }
+}
+
+function codeOf(error: unknown): unknown {
+  return error instanceof Error && "code" in error ? error.code : undefined;
 }
 
 /**
@@ -139,8 +182,7 @@ export async function writeApproval(
   id: StateName,
   approval: Approval | null,
 ): Promise<void> {
-  const path = join(root, REVIEW_FILE);
-  const file = await readJsonFile(path);
+  const file = await readJsonFile(join(root, REVIEW_FILE));
   if (file.kind === "invalid") {
     throw new Error(`${REVIEW_FILE} を読めないので書き換えません: ${file.reason}`);
   }
@@ -148,21 +190,18 @@ export async function writeApproval(
   if (!isRecord(before)) throw new Error(`${REVIEW_FILE} に approvals が無いので書き換えません`);
   const entries = Object.entries(before).filter(([key]) => key !== id);
   if (approval === null && entries.length === Object.keys(before).length) return;
+  const path = join(await outputDirectory(root, OUTPUT_DIRECTORY), "review.json");
   if (approval !== null) entries.push([id, approval]);
   if (entries.length === 0) return rm(path, { force: true });
   entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   const review = { version: 1, approvals: Object.fromEntries(entries) };
-  await mkdir(join(root, OUTPUT_DIRECTORY), { recursive: true });
   await replaceFile(path, `${JSON.stringify(review, null, 2)}\n`);
 }
 
 /** `.everypath/layout.json`, as the viewer sent it. */
 export async function writeLayout(root: string, layout: Layout): Promise<void> {
-  await mkdir(join(root, OUTPUT_DIRECTORY), { recursive: true });
-  await replaceFile(
-    join(root, OUTPUT_DIRECTORY, "layout.json"),
-    `${JSON.stringify(layout, null, 2)}\n`,
-  );
+  const directory = await outputDirectory(root, OUTPUT_DIRECTORY);
+  await replaceFile(join(directory, "layout.json"), `${JSON.stringify(layout, null, 2)}\n`);
 }
 
 /** An output file the server hands out as it is, or `null` before anything wrote it. */
@@ -206,8 +245,7 @@ export async function writeTlaModel(
   root: string,
   { tla, cfg }: Pick<TlcRecord, "tla" | "cfg">,
 ): Promise<void> {
-  const directory = join(root, TLA_DIRECTORY);
-  await mkdir(directory, { recursive: true });
+  const directory = await outputDirectory(root, TLA_DIRECTORY);
   await replaceFile(join(directory, "Model.tla"), tla);
   await replaceFile(join(directory, "Model.cfg"), cfg);
 }
@@ -215,6 +253,7 @@ export async function writeTlaModel(
 /**
  * A finished TLC run into `.everypath/tla/`: the model it checked, then `result.json`. The record goes
  * last because it is the scan input, so whoever sees it change finds the model beside it already.
+ * `writeTlaModel` has just made sure the directory is real.
  */
 export async function commitTlc(root: string, record: TlcRecord): Promise<void> {
   await writeTlaModel(root, record);
