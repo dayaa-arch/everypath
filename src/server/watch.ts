@@ -1,6 +1,7 @@
-import { type FSWatcher, watch } from "node:fs";
+import { watch } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { join, sep } from "node:path";
+import { errorMessage } from "../core/json.js";
 import { isScanInput } from "../core/workspace.js";
 
 /** SPEC §11: the changes inside one window become one rescan. */
@@ -10,16 +11,45 @@ const POLL_MS = 1_500;
 
 export type Watcher = { close(): void };
 
+/** What `fs.watch` returns, as far as the watcher uses it. */
+type Handle = { close(): void; on(event: "error", listener: (error: unknown) => void): unknown };
+
+/** One `fs.watch` call. A test passes one that fails, which a real watcher does only under load. */
+export type OpenWatch = (
+  directory: string,
+  recursive: boolean,
+  listener: (filename: string | null) => void,
+) => Handle;
+
+export type WatchOptions = {
+  readonly open?: OpenWatch;
+  /** Where a watcher failure is said. Standard error by default. */
+  readonly warn?: (message: string) => void;
+};
+
+const openFsWatch: OpenWatch = (directory, recursive, listener) =>
+  watch(directory, { recursive }, (_event, filename) => listener(filename));
+
+const toStderr = (message: string): void => {
+  process.stderr.write(`${message}\n`);
+};
+
 /**
  * Calls `onChange` after a change to anything a scan reads (`isScanInput`). The first change opens a
  * 250 ms window and every change inside it joins the same call: a window, not a debounce, so a file
  * rewritten every 100 ms still reaches the viewer. Where `fs.watch` cannot watch a tree, or fails later
- * (Linux running out of inotify watches), a 1.5 s poll of sizes and mtimes takes over for good.
+ * (Linux running out of inotify watches), it says so and a 1.5 s poll of sizes and mtimes takes over
+ * for good, starting with one call for whatever changed before the poll took its first reading.
  */
-export function watchRepository(root: string, onChange: () => void): Watcher {
-  let watcher: FSWatcher | null = null;
+export function watchRepository(
+  root: string,
+  onChange: () => void,
+  { open = openFsWatch, warn = toStderr }: WatchOptions = {},
+): Watcher {
+  let watcher: Handle | null = null;
   let window: NodeJS.Timeout | null = null;
   let poll: NodeJS.Timeout | null = null;
+  let polling = false;
   let stopped = false;
 
   const pollFrom = (before: ReadonlyMap<string, string>): void => {
@@ -30,24 +60,34 @@ export function watchRepository(root: string, onChange: () => void): Watcher {
       pollFrom(after);
     }, POLL_MS);
   };
-  const fallBack = async (): Promise<void> => {
+  /** Once only: a watcher can fail more than once, and two poll loops would report every change twice. */
+  const fallBack = async (error: unknown): Promise<void> => {
+    if (polling || stopped) return;
+    polling = true;
     watcher?.close();
     watcher = null;
-    const first = await stamps(root);
-    if (!stopped) pollFrom(first);
+    if (window !== null) clearTimeout(window);
+    window = null;
+    warn(
+      `ファイルの監視が止まりました（${errorMessage(error)}）。${POLL_MS / 1000} 秒ごとの確認に切り替えます`,
+    );
+    const baseline = await stamps(root);
+    if (stopped) return;
+    onChange();
+    pollFrom(baseline);
   };
 
   try {
-    watcher = watch(root, { recursive: true }, (_event, filename) => {
+    watcher = open(root, true, (filename) => {
       if (filename !== null && !isScanInput(filename.split(sep).join("/"))) return;
       window ??= setTimeout(() => {
         window = null;
         onChange();
       }, WINDOW_MS);
     });
-    watcher.on("error", () => void fallBack());
-  } catch {
-    void fallBack();
+    watcher.on("error", (error) => void fallBack(error));
+  } catch (error) {
+    void fallBack(error);
   }
 
   return {
