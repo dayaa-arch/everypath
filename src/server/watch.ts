@@ -2,7 +2,7 @@ import { watch } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { errorMessage } from "../core/json.js";
-import { isScanInput } from "../core/workspace.js";
+import { isScanInput, watchedDirectories } from "../core/workspace.js";
 
 /** SPEC §11: the changes inside one window become one rescan. */
 const WINDOW_MS = 250;
@@ -22,6 +22,8 @@ export type OpenWatch = (
 ) => Handle;
 
 export type WatchOptions = {
+  /** `process.platform` by default. */
+  readonly platform?: NodeJS.Platform;
   readonly open?: OpenWatch;
   /** Where a watcher failure is said. Standard error by default. */
   readonly warn?: (message: string) => void;
@@ -37,63 +39,103 @@ const toStderr = (message: string): void => {
 /**
  * Calls `onChange` after a change to anything a scan reads (`isScanInput`). The first change opens a
  * 250 ms window and every change inside it joins the same call: a window, not a debounce, so a file
- * rewritten every 100 ms still reaches the viewer. Where `fs.watch` cannot watch a tree, or fails later
- * (Linux running out of inotify watches), it says so and a 1.5 s poll of sizes and mtimes takes over
- * for good, starting with one call for whatever changed before the poll took its first reading.
+ * rewritten every 100 ms still reaches the viewer.
+ *
+ * macOS and Windows watch the tree with one recursive watcher. Linux watches each directory the scan
+ * walks (`watchedDirectories`) on its own: a recursive watch there takes an inotify watch for every
+ * directory under the root, `node_modules` included, and runs out. Each window on Linux first watches
+ * the directories that appeared and drops the ones that went, then calls `onChange`.
+ *
+ * When a watcher fails, it says so and a 1.5 s poll of sizes and mtimes takes over for good, starting
+ * with one call for whatever changed before the poll took its first reading.
  */
 export function watchRepository(
   root: string,
   onChange: () => void,
-  { open = openFsWatch, warn = toStderr }: WatchOptions = {},
+  { platform = process.platform, open = openFsWatch, warn = toStderr }: WatchOptions = {},
 ): Watcher {
-  let watcher: Handle | null = null;
+  const recursive = platform !== "linux";
+  /** By root-relative directory, `""` for the root. */
+  const watchers = new Map<string, Handle>();
+  let mode: "watch" | "poll" | "stopped" = "watch";
   let window: NodeJS.Timeout | null = null;
   let poll: NodeJS.Timeout | null = null;
-  let polling = false;
-  let stopped = false;
+  /** Linux: the directory syncs, one after another, so a slow one never undoes a later one. */
+  let synced: Promise<void> = Promise.resolve();
 
+  const closeWatchers = (): void => {
+    for (const handle of watchers.values()) handle.close();
+    watchers.clear();
+  };
   const pollFrom = (before: ReadonlyMap<string, string>): void => {
     poll = setTimeout(async () => {
       const after = await stamps(root);
-      if (stopped) return;
+      if (mode !== "poll") return;
       if (differs(before, after)) onChange();
       pollFrom(after);
     }, POLL_MS);
   };
   /** Once only: a watcher can fail more than once, and two poll loops would report every change twice. */
   const fallBack = async (error: unknown): Promise<void> => {
-    if (polling || stopped) return;
-    polling = true;
-    watcher?.close();
-    watcher = null;
+    if (mode !== "watch") return;
+    mode = "poll";
+    closeWatchers();
     if (window !== null) clearTimeout(window);
     window = null;
     warn(
       `ファイルの監視が止まりました（${errorMessage(error)}）。${POLL_MS / 1000} 秒ごとの確認に切り替えます`,
     );
     const baseline = await stamps(root);
-    if (stopped) return;
+    if (mode !== "poll") return;
     onChange();
     pollFrom(baseline);
   };
 
-  try {
-    watcher = open(root, true, (filename) => {
-      if (filename !== null && !isScanInput(filename.split(sep).join("/"))) return;
-      window ??= setTimeout(() => {
-        window = null;
-        onChange();
-      }, WINDOW_MS);
-    });
-    watcher.on("error", (error) => void fallBack(error));
-  } catch (error) {
-    void fallBack(error);
-  }
+  const windowEnds = async (): Promise<void> => {
+    window = null;
+    if (!recursive) {
+      synced = synced.then(sync);
+      await synced;
+    }
+    if (mode === "watch") onChange();
+  };
+  const changed = (directory: string, filename: string | null): void => {
+    if (filename !== null) {
+      const name = filename.split(sep).join("/");
+      if (!isScanInput(directory === "" ? name : `${directory}/${name}`)) return;
+    }
+    window ??= setTimeout(() => void windowEnds(), WINDOW_MS);
+  };
+  const add = (directory: string): void => {
+    try {
+      const handle = open(join(root, directory), recursive, (filename) =>
+        changed(directory, filename),
+      );
+      handle.on("error", (error) => void fallBack(error));
+      watchers.set(directory, handle);
+    } catch (error) {
+      void fallBack(error);
+    }
+  };
+  const sync = async (): Promise<void> => {
+    const wanted = new Set(await watchedDirectories(root));
+    for (const [directory, handle] of watchers) {
+      if (wanted.has(directory)) continue;
+      handle.close();
+      watchers.delete(directory);
+    }
+    for (const directory of wanted) {
+      if (mode === "watch" && !watchers.has(directory)) add(directory);
+    }
+  };
+
+  if (recursive) add("");
+  else synced = sync();
 
   return {
     close() {
-      stopped = true;
-      watcher?.close();
+      mode = "stopped";
+      closeWatchers();
       if (window !== null) clearTimeout(window);
       if (poll !== null) clearTimeout(poll);
     },

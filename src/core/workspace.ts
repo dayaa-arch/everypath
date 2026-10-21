@@ -269,6 +269,33 @@ function isIgnored(path: string, isDirectory: boolean, config: Config): boolean 
   );
 }
 
+/** Whether the source walk enters the directory at `path`, whose last name is `name`. */
+function walksInto(name: string, path: string, config: Config): boolean {
+  return !IGNORED_DIRECTORIES.has(name) && !isIgnored(path, true, config);
+}
+
+/**
+ * The directories a watcher must watch one by one to see every change `isScanInput` accepts,
+ * root-relative with `""` for the root: each one the source walk enters, by the same rule and the
+ * same `config.ignore`, and the ones under `.everypath/` that hold a scan input. Never follows a link.
+ */
+export async function watchedDirectories(root: string): Promise<string[]> {
+  const { config } = await readConfig(root);
+  const found: string[] = [];
+  async function visit(directory: string): Promise<void> {
+    found.push(directory);
+    const entries = await readdir(join(root, directory), { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const path = directory === "" ? entry.name : `${directory}/${entry.name}`;
+      const output = path === OUTPUT_DIRECTORY || path.startsWith(`${OUTPUT_DIRECTORY}/`);
+      const enters = output ? isScanInput(path, true) : walksInto(entry.name, path, config);
+      if (entry.isDirectory() && enters) await visit(path);
+    }
+  }
+  await visit("");
+  return found;
+}
+
 /** Source files under `root`, root-relative with `/`, sorted. Symlinks are never followed. */
 async function walk(root: string, config: Config) {
   const paths: string[] = [];
@@ -285,9 +312,7 @@ async function walk(root: string, config: Config) {
     for (const entry of entries) {
       const path = directory === "" ? entry.name : `${directory}/${entry.name}`;
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRECTORIES.has(entry.name) && !isIgnored(path, true, config)) {
-          await visit(path);
-        }
+        if (walksInto(entry.name, path, config)) await visit(path);
       } else if (
         entry.isFile() &&
         SOURCE_EXTENSIONS.has(posix.extname(entry.name)) &&
