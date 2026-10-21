@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { describe, it } from "node:test";
+import type { FlowEdge } from "../src/core/types.js";
 import { flows, makeRepo, readGraph, runCli, ts } from "./helpers/repo.js";
 
 /** sha1 of every file outside `.everypath/`, keyed by root-relative path. */
@@ -80,7 +81,7 @@ describe("R-04: out-of-grammar annotations never stop the scan", () => {
       assert.equal(warning.file, "src/r04.ts");
       assert.ok(warning.line !== null && warning.line >= 3, `line ${warning.line}`);
     }
-    const byTarget = new Map(flows(graph).map((e) => [e.to, e]));
+    const byTarget = new Map<string, FlowEdge>(flows(graph).map((e) => [e.to, e]));
     for (const target of ["T1", "T2", "T3", "T4", "T5", "T6"]) {
       const edge = byTarget.get(target);
       assert.ok(edge, `${target} edge exists`);

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { parseStateName } from "../src/core/expr.js";
 import { scan } from "../src/core/scan.js";
-import type { HistoryEntry } from "../src/core/types.js";
+import type { FlowEdge, HistoryEntry, ModelVar } from "../src/core/types.js";
 import { depPairs, flows, ids, makeRepo, node, readGraph, ts, writeFiles } from "./helpers/repo.js";
 
 const T1 = new Date("2026-10-21T00:00:00.000Z");
@@ -175,7 +175,7 @@ describe("scan: annotation extraction", () => {
     const graph = await scan(root, { now: T1 });
 
     assert.deepEqual(graph.warnings, []);
-    const byTarget = new Map(flows(graph).map((e) => [e.to, e]));
+    const byTarget = new Map<string, FlowEdge>(flows(graph).map((e) => [e.to, e]));
     assert.equal(flows(graph).length, 5);
     for (const e of flows(graph)) assert.equal(e.from, "ログイン");
     const home = byTarget.get("Home");
@@ -378,7 +378,7 @@ describe("scan: model", () => {
 
     assert.equal(graph.model.initial, "A");
     assert.deepEqual([...graph.model.events].sort(), ["go", "tick", "tock"]);
-    const vars = new Map(graph.model.vars.map((v) => [v.name, v]));
+    const vars = new Map<string, ModelVar>(graph.model.vars.map((v) => [v.name, v]));
     assert.equal(vars.size, 3);
     assert.deepEqual(vars.get("n"), { kind: "range", name: "n", min: 0, max: 3, init: 0 });
     assert.deepEqual(vars.get("mode"), {
