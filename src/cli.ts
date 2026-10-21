@@ -10,7 +10,7 @@ import {
   exportTla,
   type InstallSource,
   installTla,
-  type TlcCheck,
+  type TlcOutcome,
 } from "./core/tla/run.js";
 import type { Counterexample, Graph, PropertyResult, ScanWarning } from "./core/types.js";
 import { serializeGraph } from "./core/workspace.js";
@@ -22,7 +22,6 @@ const USAGE = [
   "        everypath tla install",
 ].join("\n");
 const USAGE_ERROR = 2;
-const DEFAULT_TIMEOUT_SECONDS = 120;
 
 type Label = "scan" | "check" | "tla export" | "tla install";
 
@@ -46,7 +45,8 @@ type Command =
   | {
       readonly kind: "check";
       readonly directory: string;
-      readonly tlc: { readonly timeoutMs: number } | null;
+      /** `timeoutMs` is absent without `--timeout`: the run's own default applies. */
+      readonly tlc: { readonly timeoutMs?: number } | null;
     }
   | { readonly kind: "tla-export"; readonly directory: string }
   | { readonly kind: "tla-install"; readonly source: InstallSource | null };
@@ -103,7 +103,8 @@ function parseCheck(positionals: readonly string[], values: Values): Result<Comm
       ? accept({ kind: "check", directory, tlc: null })
       : refuse("--timeout は --tlc と一緒に使います");
   }
-  const seconds = values.timeout ?? String(DEFAULT_TIMEOUT_SECONDS);
+  const seconds = values.timeout;
+  if (seconds === undefined) return accept({ kind: "check", directory, tlc: {} });
   if (typeof seconds !== "string" || !/^[1-9]\d*$/.test(seconds)) {
     return refuse("--timeout は 1 以上の整数（秒）にしてください");
   }
@@ -231,6 +232,8 @@ function describeSteps({ steps, loopStart }: Counterexample): string[] {
   return loopStart === null ? lines : [...lines, `  → ${loopStart + 1} に戻って繰り返す`];
 }
 
+const STALE = "古いモデルに対する結果";
+
 function describeProperty({
   id,
   kind,
@@ -238,6 +241,7 @@ function describeProperty({
   result,
   checkedBy,
   counterexamples,
+  staleModel,
 }: PropertyResult): string[] {
   const title = `${STATUS_WORDS[result]} ${id} [${kind}]${description === null ? "" : ` ${description}`}`;
   if (result === "pending") {
@@ -249,7 +253,12 @@ function describeProperty({
   }
   const describe = (example: Counterexample): string[] =>
     checkedBy === "bfs" ? [`  ${formatPath(example)}`] : describeSteps(example);
-  return [title, ...counterexamples.flatMap(describe)];
+  const stale = staleModel
+    ? [
+        `  ${STALE}です。TLC の実行後にモデルが変わったため、終了コードに数えません（everypath check --tlc で検査し直せます）`,
+      ]
+    : [];
+  return [title, ...stale, ...counterexamples.flatMap(describe)];
 }
 
 function summarizeChecks({ properties, warnings }: Graph): string {
@@ -258,7 +267,12 @@ function summarizeChecks({ properties, warnings }: Graph): string {
     return count > 0 ? [`${word} ${count}`] : [];
   });
   const rejected = warnings.filter((warning) => warning.file === PROPERTIES_FILE).length;
-  const note = rejected > 0 ? `（${PROPERTIES_FILE} の警告 ${rejected} 件）` : "";
+  const stale = properties.filter((p) => p.staleModel).length;
+  const notes = [
+    ...(rejected > 0 ? [`${PROPERTIES_FILE} の警告 ${rejected} 件`] : []),
+    ...(stale > 0 ? [`${STALE} ${stale} 件`] : []),
+  ];
+  const note = notes.length > 0 ? `（${notes.join("、")}）` : "";
   return `性質 ${properties.length} 件: ${counts.join("、")}${note}`;
 }
 
@@ -268,23 +282,12 @@ function reportChecks(graph: Graph, extra: readonly string[]): string[] {
   return [...graph.properties.flatMap(describeProperty), ...extra, summarizeChecks(graph)];
 }
 
-/** R-03: without Java or the jar the quick check still decides, and this says how to get TLC. */
-function describeMissing({ what, jar }: Extract<TlcCheck, { readonly kind: "missing" }>): string[] {
-  const reason =
-    what === "java"
-      ? "java を実行できません（PATH に java が無いか、動きません。Java 11 以降が要ります）"
-      : `${jar} に tla2tools.jar がありません`;
-  return [
-    `TLC を動かせません: ${reason}`,
-    "  jar は everypath tla install で入ります（EVERYPATH_TLA_JAR、既定 ~/.everypath/tla2tools.jar）",
-    "  簡易検査の結果だけで判定します",
-  ];
-}
-
-function describeChecked({
-  typeOk,
-  error,
-}: Extract<TlcCheck, { readonly kind: "checked" }>): string[] {
+/** What only TLC can say: a variable out of its range, and its error. `null` when TLC did not fail. */
+function tlcFailure(outcome: TlcOutcome | null): string[] | null {
+  if (outcome === null || outcome.kind === "missing") return null;
+  if (outcome.kind === "unmodeled") return [`エラー TLC: ${outcome.reason}`];
+  const { typeOk, error } = outcome.record;
+  if (typeOk === null && error === null) return null;
   return [
     ...(typeOk === null
       ? []
@@ -347,21 +350,24 @@ async function runScan(
  * A property the file defines but the check could not read fails the run too, so CI never passes it
  * silently. So does any TLC error, which includes a property TLC could not decide, and a variable
  * out of its range. With `--tlc` but no Java or jar the quick check alone decides the exit code.
+ * The scan reads TLC's record, so a plain check also counts the last run's violations, unless the
+ * model has changed since.
  */
-async function runCheck(root: string, tlc: { readonly timeoutMs: number } | null): Promise<number> {
+async function runCheck(
+  root: string,
+  tlc: { readonly timeoutMs?: number } | null,
+): Promise<number> {
   const outcome = tlc === null ? null : await checkTlc(root, tlc);
-  const graph = outcome?.graph ?? (await scan(root, { reason: "check" }));
+  const graph = await scan(root, { reason: "check" });
   const stderr = graph.warnings.map(describeWarning);
-  const extra = outcome?.kind === "checked" ? describeChecked(outcome) : [];
-  if (outcome?.kind === "missing") stderr.push(...describeMissing(outcome));
+  const failure = tlcFailure(outcome);
+  if (outcome?.kind === "missing") stderr.push(...outcome.guide);
   if (stderr.length > 0) process.stderr.write(`${stderr.join("\n")}\n`);
-  process.stdout.write(`${reportChecks(graph, extra).join("\n")}\n`);
+  process.stdout.write(`${reportChecks(graph, failure ?? []).join("\n")}\n`);
 
   const rejected = graph.warnings.some((warning) => warning.file === PROPERTIES_FILE);
-  const violated = graph.properties.some((p) => p.result === "violated");
-  const tlcFailed =
-    outcome?.kind === "checked" && (outcome.typeOk !== null || outcome.error !== null);
-  return rejected || violated || tlcFailed ? 1 : 0;
+  const violated = graph.properties.some((p) => p.result === "violated" && !p.staleModel);
+  return rejected || violated || failure !== null ? 1 : 0;
 }
 
 async function runExport(root: string): Promise<number> {

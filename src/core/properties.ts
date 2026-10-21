@@ -472,10 +472,14 @@ function entryWarnings(
   return warnings;
 }
 
-/** The properties whose counterexample passes through each state, in file order. */
+/**
+ * The properties whose counterexample passes through each state, in file order. A `staleModel` one is
+ * left out: its trace runs through a model that is gone, so it would mark a bug that may not exist.
+ */
 export function violationsOf(results: readonly PropertyResult[]): Map<StateName, PropertyId[]> {
   const violations = new Map<StateName, PropertyId[]>();
-  for (const { id, counterexamples } of results) {
+  for (const { id, counterexamples, staleModel } of results) {
+    if (staleModel) continue;
     for (const state of new Set(counterexamples.flatMap((example) => example.path))) {
       append(violations, state, id);
     }

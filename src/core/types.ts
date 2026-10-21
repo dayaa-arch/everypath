@@ -249,6 +249,12 @@ export type PropertyResult = {
   /** States the search reached. `null` while the result is pending. */
   readonly statesExplored: number | null;
   readonly checkedAt: string;
+  /**
+   * Only on a TLC verdict about a model that has changed since the run: the states, transitions,
+   * variables or properties TLC checked are no longer the ones this graph describes. Such a verdict
+   * marks no node and fails no check.
+   */
+  readonly staleModel?: true;
 };
 
 export type Graph = {

@@ -4,7 +4,8 @@ import { type Notes, readNotes } from "./annotations.js";
 import { sanitizeStateName } from "./expr.js";
 import { type ImportContext, resolveImports } from "./imports.js";
 import { resolveNext, type VarTable } from "./model.js";
-import { checkProperties } from "./properties.js";
+import { checkProperties, violationsOf } from "./properties.js";
+import { withTlcResults } from "./tla/result.js";
 import type {
   DepEdge,
   Edge,
@@ -56,7 +57,8 @@ type Member = { readonly file: FileFacts; readonly id: StateName };
 /**
  * SPEC §8. Reads the repository and folds it into the graph without writing anything. The TLA+ lane
  * starts here because `graph.json` holds property results but not the definitions they came from.
- * `history` is the line a scan would append; it does not depend on property results.
+ * `history` is the line a scan would append; it does not depend on property results. TLC's last
+ * verdicts (`result.json`) are an input like any other, so every graph carries them.
  */
 export async function analyze(
   root: string,
@@ -129,15 +131,11 @@ function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Gra
     vars: model.vars,
     events: [...new Set([...model.events, ...flows.events])].sort(compareText),
   };
-  const checked = checkProperties(
-    { nodes: built, edges, model: graphModel },
-    workspace.properties,
-    at,
-  );
-  const nodes = built.map((node) => ({
-    ...node,
-    violations: checked.violations.get(node.id) ?? [],
-  }));
+  const shape = { nodes: built, edges, model: graphModel };
+  const checked = checkProperties(shape, workspace.properties, at);
+  const settled = withTlcResults(shape, workspace.properties, checked.properties, workspace.tlc);
+  const violations = violationsOf(settled.properties);
+  const nodes = built.map((node) => ({ ...node, violations: violations.get(node.id) ?? [] }));
   const real = nodes.filter((node) => !node.status.planned);
 
   return {
@@ -158,13 +156,14 @@ function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Gra
     nodes,
     edges,
     model: graphModel,
-    properties: checked.properties,
+    properties: settled.properties,
     warnings: [
       ...workspace.warnings,
       ...facts.flatMap((file) => file.warnings),
       ...model.warnings,
       ...flows.warnings,
       ...checked.warnings,
+      ...settled.warnings,
     ].sort(compareWarnings),
   };
 }

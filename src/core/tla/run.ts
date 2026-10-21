@@ -1,15 +1,15 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { errorMessage } from "../json.js";
-import { PROPERTIES_FILE, violationsOf } from "../properties.js";
 import { analyze } from "../scan.js";
-import type { Counterexample, Graph, PropertyResult, ScanWarning } from "../types.js";
-import { OUTPUT_DIRECTORY, replaceFile, writeWorkspace } from "../workspace.js";
-import { generateTla, type TlaModel, type TlaNames, TYPE_OK } from "./generate.js";
+import type { Counterexample, PropertyResult } from "../types.js";
+import { commitTlc, OUTPUT_DIRECTORY, replaceFile, writeTlaModel } from "../workspace.js";
+import { generateTla, modelKey, type TlaModel, TYPE_OK } from "./generate.js";
 import { parseTlcOutput, type TlcReport } from "./parse.js";
+import type { TlcRecord } from "./result.js";
 
 export type InstallSource = { readonly url: string; readonly sha256: string };
 
@@ -19,6 +19,8 @@ const RELEASE: InstallSource = {
   sha256: "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
 };
 const DOWNLOAD_TIMEOUT_MS = 60_000;
+/** `check --tlc` without `--timeout`, and every run the server starts. */
+const DEFAULT_TIMEOUT_MS = 120_000;
 
 type TlcRun =
   | { readonly kind: "missing"; readonly what: "java" | "jar"; readonly jar: string }
@@ -27,32 +29,13 @@ type TlcRun =
 
 type Missing = Extract<TlcRun, { readonly kind: "missing" }>;
 
-/** `.everypath/tla/result.json`: what TLC decided, and the table that reads its identifiers. */
-type ResultFile = {
-  readonly version: 1;
-  readonly checkedAt: string;
-  readonly names: TlaNames;
-  readonly properties: PropertyResult[];
-  readonly typeOk: Counterexample | null;
-  readonly error: string | null;
-};
-
-/** What `check --tlc` leaves for the CLI. `graph` is what was written to graph.json. */
-export type TlcCheck =
-  | {
-      readonly kind: "missing";
-      readonly what: "java" | "jar";
-      readonly jar: string;
-      readonly graph: Graph;
-    }
-  | {
-      readonly kind: "checked";
-      readonly graph: Graph;
-      /** The variables left their declared ranges. */
-      readonly typeOk: Counterexample | null;
-      /** The first TLC error, timeout or generation failure. Any non-null value fails the check. */
-      readonly error: string | null;
-    };
+/** How a TLC run ended. Only `checked` has verdicts, and nothing is written until they are committed. */
+export type TlcOutcome =
+  /** R-03: the Japanese lines that say what is missing and how to install it. */
+  | { readonly kind: "missing"; readonly guide: readonly string[] }
+  /** No model could be generated, so TLC never ran. */
+  | { readonly kind: "unmodeled"; readonly reason: string }
+  | { readonly kind: "checked"; readonly record: TlcRecord };
 
 /**
  * `$EVERYPATH_TLA_JAR`, else `~/.everypath/tla2tools.jar`. Where both `check --tlc` and `tla install`
@@ -64,53 +47,71 @@ function jarPath(): string {
 }
 
 /**
- * `everypath check --tlc`. Analyzes without writing, generates the model, runs TLC until every
- * invariant and leads-to has a verdict or the budget is spent, merges, and writes `result.json`
- * and then `graph.json`. Without Java or the jar it writes the quick check's graph and says so (R-03).
+ * Analyzes without writing, generates the model and runs TLC in a directory of its own until every
+ * invariant and leads-to has a verdict or the budget is spent. It writes nothing in the repository:
+ * a run can take minutes, and only the caller knows when its record may land (`commitTlc`). `signal`
+ * kills TLC and rejects with the abort reason.
  */
-export async function checkTlc(
+export async function runTlc(
   root: string,
-  { timeoutMs }: { readonly timeoutMs: number },
-): Promise<TlcCheck> {
+  {
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    signal,
+  }: { readonly timeoutMs?: number; readonly signal?: AbortSignal } = {},
+): Promise<TlcOutcome> {
   const at = new Date();
-  const { graph, properties, history } = await analyze(root, { now: at, reason: "check" });
+  const { graph, properties } = await analyze(root, { now: at });
   const jar = jarPath();
-  const unavailable = async (absent: Missing): Promise<TlcCheck> => {
-    await writeWorkspace(graph.root, graph, history);
-    return { ...absent, graph };
-  };
-
   const absent = await missingTool(jar);
-  if (absent !== null) return unavailable(absent);
+  if (absent !== null) return { kind: "missing", guide: installGuide(absent) };
 
   const generated = generateTla(graph, properties);
-  if (!generated.ok) {
-    const stuck = graph.properties.filter((p) => p.checkedBy === "tlc" && p.result === "pending");
-    const merged = merge(graph, new Map(stuck.map((p) => [p.id, undecided(null)])), [], at);
-    await writeWorkspace(graph.root, merged, history);
-    return { kind: "checked", graph: merged, typeOk: null, error: generated.reason };
-  }
-
+  if (!generated.ok) return { kind: "unmodeled", reason: generated.reason };
   const { model } = generated;
-  const directory = join(graph.root, OUTPUT_DIRECTORY, "tla");
-  await writeModel(directory, model);
-  const outcome = await verify(directory, jar, model, timeoutMs);
-  await writeModel(directory, model);
-  if (outcome.kind === "missing") return unavailable(outcome);
+  const directory = await mkdtemp(join(tmpdir(), "everypath-tla-"));
+  try {
+    await writeFile(join(directory, "Model.tla"), model.tla);
+    const outcome = await verify(directory, jar, model, timeoutMs, signal);
+    if (outcome.kind === "missing") return { kind: "missing", guide: installGuide(outcome) };
+    const record: TlcRecord = {
+      version: 1,
+      checkedAt: at.toISOString(),
+      key: modelKey(model),
+      tla: model.tla,
+      cfg: everyCheck(model),
+      names: model.names,
+      properties: recorded(graph.properties, decisions(outcome.verdicts, model), at),
+      typeOk: outcome.verdicts.get(TYPE_OK)?.counterexamples[0] ?? null,
+      states: outcome.states,
+      error: outcome.error,
+    };
+    return { kind: "checked", record };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
-  const merged = merge(graph, decisions(outcome.verdicts, model), rejectionWarnings(model), at);
-  const typeOk = outcome.verdicts.get(TYPE_OK)?.counterexamples[0] ?? null;
-  const stored: ResultFile = {
-    version: 1,
-    checkedAt: at.toISOString(),
-    names: model.names,
-    properties: merged.properties.filter((p) => p.checkedBy !== "bfs"),
-    typeOk,
-    error: outcome.error,
-  };
-  await replaceFile(join(directory, "result.json"), `${JSON.stringify(stored, null, 2)}\n`);
-  await writeWorkspace(graph.root, merged, history);
-  return { kind: "checked", graph: merged, typeOk, error: outcome.error };
+/** `everypath check --tlc`: the run, then its record, in sequence. The CLI scans after it. */
+export async function checkTlc(
+  root: string,
+  options: { readonly timeoutMs?: number },
+): Promise<TlcOutcome> {
+  const outcome = await runTlc(root, options);
+  if (outcome.kind === "checked") await commitTlc(root, outcome.record);
+  return outcome;
+}
+
+/** R-03: without Java or the jar the quick check still decides, and this says how to get TLC. */
+function installGuide({ what, jar }: Missing): string[] {
+  const reason =
+    what === "java"
+      ? "java を実行できません（PATH に java が無いか、動きません。Java 11 以降が要ります）"
+      : `${jar} に tla2tools.jar がありません`;
+  return [
+    `TLC を動かせません: ${reason}`,
+    "  jar は everypath tla install で入ります（EVERYPATH_TLA_JAR、既定 ~/.everypath/tla2tools.jar）",
+    "  簡易検査の結果だけで判定します",
+  ];
 }
 
 /** `everypath tla export`. Model.tla and Model.cfg only: no graph.json, no TLC. */
@@ -125,7 +126,7 @@ export async function exportTla(root: string): Promise<
   const { graph, properties } = await analyze(root);
   const generated = generateTla(graph, properties);
   if (!generated.ok) return { ok: false, reason: generated.reason };
-  await writeModel(join(graph.root, OUTPUT_DIRECTORY, "tla"), generated.model);
+  await writeTlaModel(graph.root, { tla: generated.model.tla, cfg: everyCheck(generated.model) });
   return { ok: true, directory: `${OUTPUT_DIRECTORY}/tla`, rejected: generated.model.rejected };
 }
 
@@ -165,14 +166,9 @@ export async function installTla(
   return { ok: true, path };
 }
 
-/** Model.tla and a Model.cfg over every check: what `tla export` writes and `check --tlc` leaves behind. */
-async function writeModel(directory: string, model: TlaModel): Promise<void> {
-  await mkdir(directory, { recursive: true });
-  await replaceFile(join(directory, "Model.tla"), model.tla);
-  await replaceFile(
-    join(directory, "Model.cfg"),
-    model.cfg([...model.invariants, ...model.temporal]),
-  );
+/** The Model.cfg a person opens: every check at once. */
+function everyCheck(model: TlaModel): string {
+  return model.cfg([...model.invariants, ...model.temporal]);
 }
 
 /** The jar is a file and `java -version` succeeds. A macOS stub with no JDK behind it exits non-zero. */
@@ -192,10 +188,15 @@ async function missingTool(jar: string): Promise<Missing | null> {
 
 /**
  * `java -XX:+UseParallelGC -jar <jar> -workers auto -deadlock -config Model.cfg -metadir <tmp> Model.tla`
- * in `directory`, stdout and stderr interleaved. Killed after `budgetMs`. `-deadlock` keeps a state
+ * in `directory`, stdout and stderr interleaved. Killed after `budgetMs` or by `signal`. `-deadlock` keeps a state
  * with no exit (ロック) from counting as an error. TLC writes nothing outside the metadir.
  */
-async function runTlc(directory: string, jar: string, budgetMs: number): Promise<TlcRun> {
+async function runJava(
+  directory: string,
+  jar: string,
+  budgetMs: number,
+  signal: AbortSignal | undefined,
+): Promise<TlcRun> {
   const metadir = await mkdtemp(join(tmpdir(), "everypath-tlc-"));
   try {
     return await new Promise<TlcRun>((resolve) => {
@@ -203,7 +204,7 @@ async function runTlc(directory: string, jar: string, budgetMs: number): Promise
       const child = spawn(
         "java",
         [...args, "-config", "Model.cfg", "-metadir", metadir, "Model.tla"],
-        { cwd: directory, stdio: ["ignore", "pipe", "pipe"] },
+        { cwd: directory, stdio: ["ignore", "pipe", "pipe"], signal, killSignal: "SIGKILL" },
       );
       let output = "";
       let timedOut = false;
@@ -262,6 +263,8 @@ type Verified =
       readonly kind: "done";
       /** By check name, `TypeOK` included. */
       readonly verdicts: ReadonlyMap<string, Verdict>;
+      /** The last count TLC printed: every run explores the same reachable states. */
+      readonly states: number | null;
       readonly error: string | null;
     };
 
@@ -276,6 +279,7 @@ async function verify(
   jar: string,
   model: TlaModel,
   timeoutMs: number,
+  signal: AbortSignal | undefined,
 ): Promise<Verified> {
   const deadline = Date.now() + timeoutMs;
   const verdicts = new Map<string, Verdict>();
@@ -290,8 +294,10 @@ async function verify(
     const timeout = `タイムアウトしました（${timeoutMs / 1000} 秒）`;
     const left = deadline - Date.now();
     if (left <= 0) return fail(timeout);
-    await replaceFile(join(directory, "Model.cfg"), model.cfg(checks));
-    const run = await runTlc(directory, jar, left);
+    signal?.throwIfAborted();
+    await writeFile(join(directory, "Model.cfg"), model.cfg(checks));
+    const run = await runJava(directory, jar, left, signal);
+    signal?.throwIfAborted();
     if (run.kind === "missing") return run;
     const report = parseTlcOutput(run.output, model.names);
     states = report.distinctStates ?? states;
@@ -319,7 +325,7 @@ async function verify(
       }
     }
   }
-  return { kind: "done", verdicts, error };
+  return { kind: "done", verdicts, states, error };
 }
 
 /** Each check's verdict under its property id. A rejected definition never ran, so it is an error. */
@@ -337,37 +343,21 @@ function decisions(
 }
 
 /**
- * Replaces the results TLC decided by id and keeps file order. `checkedBy` follows from what the quick
- * check already did: a variable-free invariant it settled becomes `both`, one it left pending is `tlc`.
- * `warnings` go after the scan's own, one per rejected definition: a properties-file warning already
- * fails the check.
+ * The record's results: each property TLC decided, in file order, as the graph will show it.
+ * `checkedBy` follows from what the quick check did: a variable-free invariant it settled is `both`,
+ * one it left to TLC is `tlc`. Tested as `=== "tlc"` because `analyzed` may already carry an earlier
+ * record's verdicts, where a settled one reads `both`, never `bfs`.
  */
-function merge(
-  graph: Graph,
+function recorded(
+  analyzed: readonly PropertyResult[],
   decided: ReadonlyMap<string, Verdict>,
-  warnings: readonly ScanWarning[],
   at: Date,
-): Graph {
-  const properties = graph.properties.map((result): PropertyResult => {
+): PropertyResult[] {
+  return analyzed.flatMap((result): PropertyResult[] => {
     const verdict = decided.get(result.id);
-    if (verdict === undefined) return result;
-    const checkedBy = result.checkedBy === "bfs" ? "both" : "tlc";
-    return { ...result, ...verdict, checkedBy, checkedAt: at.toISOString() };
+    if (verdict === undefined) return [];
+    const { id, kind, description } = result;
+    const checkedBy = result.checkedBy === "tlc" ? "tlc" : "both";
+    return [{ id, kind, description, ...verdict, checkedBy, checkedAt: at.toISOString() }];
   });
-  const violations = violationsOf(properties);
-  return {
-    ...graph,
-    properties,
-    nodes: graph.nodes.map((node) => ({ ...node, violations: violations.get(node.id) ?? [] })),
-    warnings: [...graph.warnings, ...warnings],
-  };
-}
-
-function rejectionWarnings({ rejected }: Pick<TlaModel, "rejected">): ScanWarning[] {
-  return rejected.map(({ reason }) => ({
-    file: PROPERTIES_FILE,
-    line: null,
-    message: reason,
-    detail: null,
-  }));
 }

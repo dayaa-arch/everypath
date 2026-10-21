@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { checkComparison, type VarTable } from "../model.js";
 import { entryOf } from "../properties.js";
 import type {
@@ -216,9 +217,11 @@ function initialOf(decl: ModelVar, naming: Naming): string {
   }
 }
 
+const COMMENT = "\\* ";
+
 /** A `\*` comment holds one line: display names and annotation text are free text. */
 function comment(text: string): string {
-  return `\\* ${text.replace(/\r\n|\r|\n/g, " ")}`;
+  return `${COMMENT}${text.replace(/\r\n|\r|\n/g, " ")}`;
 }
 
 function setOf(items: readonly string[]): string {
@@ -327,6 +330,16 @@ function render(
     ...accepted.map((def) => [definition(def, nameOf(naming.checks, def.id), naming)]),
   ];
   return `${blocks.map((block) => block.join("\n")).join("\n\n")}\n====\n`;
+}
+
+/**
+ * What a TLC verdict depends on, so equal keys mean the stored verdicts still hold: the lines of
+ * Model.tla that TLC reads (comments are left out, so an edited description or a moved declaration
+ * keeps the key) and the names table, through which a stored counterexample names states and variables.
+ */
+export function modelKey({ tla, names }: Pick<TlaModel, "tla" | "names">): string {
+  const read = tla.split("\n").filter((line) => !line.startsWith(COMMENT));
+  return createHash("sha1").update(read.join("\n")).update(JSON.stringify(names)).digest("hex");
 }
 
 /**

@@ -6,6 +6,7 @@ import { parseEventName, parseStateName } from "./expr.js";
 import { parseFindings, rootRelative } from "./findings.js";
 import { asItems, asText, errorMessage, isRecord, readJsonFile } from "./json.js";
 import { NO_PROPERTIES, PROPERTIES_FILE, parseProperties } from "./properties.js";
+import { parseStoredVerdicts, type StoredVerdicts, type TlcRecord } from "./tla/result.js";
 import type {
   EdgeRef,
   Finding,
@@ -18,6 +19,8 @@ import type {
 
 /** Where the scanner reads and writes outside the sources. Nothing else on disk is ever written (R-01). */
 export const OUTPUT_DIRECTORY = ".everypath";
+const TLA_DIRECTORY = `${OUTPUT_DIRECTORY}/tla`;
+const TLC_RESULT_FILE = `${TLA_DIRECTORY}/result.json`;
 
 const IGNORED_DIRECTORIES: ReadonlySet<string> = new Set(
   "node_modules .git dist build out .next __pycache__ venv .venv coverage target vendor .everypath".split(
@@ -55,6 +58,8 @@ export type Workspace = {
   /** Approved hash by node id, from `review.json`. */
   readonly approvals: ReadonlyMap<string, string>;
   readonly previous: Previous | null;
+  /** TLC's last verdicts, from `result.json`. `null` before any TLC run. */
+  readonly tlc: StoredVerdicts | null;
   /** Inputs that could not be used. Each is a warning, never an error. */
   readonly warnings: readonly ScanWarning[];
 };
@@ -72,10 +77,11 @@ export async function readWorkspace(root: string): Promise<Workspace> {
   const properties = await readProperties(root);
   const walked = await walk(root, configured.config);
   const sources = await readSources(root, walked.paths);
-  const [findings, review, previous] = await Promise.all([
+  const [findings, review, previous, tlc] = await Promise.all([
     readFindings(root, configured.config),
     readApprovals(root),
     readPrevious(root),
+    readTlcResult(root),
   ]);
   return {
     root,
@@ -86,6 +92,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
     findingsSource: findings.source,
     approvals: review.approvals,
     previous,
+    tlc: tlc.stored,
     warnings: [
       ...configured.warnings,
       ...properties.warnings,
@@ -93,6 +100,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
       ...sources.warnings,
       ...findings.warnings,
       ...review.warnings,
+      ...tlc.warnings,
     ],
   };
 }
@@ -109,6 +117,26 @@ export async function writeWorkspace(
     await appendFile(join(directory, "history.jsonl"), `${JSON.stringify(entry)}\n`);
   }
   await replaceFile(join(directory, "graph.json"), serializeGraph(graph));
+}
+
+/** Model.tla and Model.cfg in `.everypath/tla/`, for a person to open. `tla export` writes only these. */
+export async function writeTlaModel(
+  root: string,
+  { tla, cfg }: Pick<TlcRecord, "tla" | "cfg">,
+): Promise<void> {
+  const directory = join(root, TLA_DIRECTORY);
+  await mkdir(directory, { recursive: true });
+  await replaceFile(join(directory, "Model.tla"), tla);
+  await replaceFile(join(directory, "Model.cfg"), cfg);
+}
+
+/**
+ * A finished TLC run into `.everypath/tla/`: the model it checked, then `result.json`. The record goes
+ * last because it is the scan input, so whoever sees it change finds the model beside it already.
+ */
+export async function commitTlc(root: string, record: TlcRecord): Promise<void> {
+  await writeTlaModel(root, record);
+  await replaceFile(join(root, TLC_RESULT_FILE), `${JSON.stringify(record, null, 2)}\n`);
 }
 
 /** Writes beside `path` and renames onto it, so a reader sees the old file or the new one, never half. */
@@ -255,6 +283,22 @@ async function readApprovals(root: string) {
     }
   }
   return { approvals, warnings: [] };
+}
+
+/** A missing file is no TLC run yet. A damaged one is a warning and counts as absent. */
+async function readTlcResult(root: string) {
+  const file = await readJsonFile(join(root, TLC_RESULT_FILE));
+  if (file.kind === "missing") return { stored: null, warnings: [] };
+  if (file.kind === "invalid") {
+    return { stored: null, warnings: [unreadable(TLC_RESULT_FILE, file.reason)] };
+  }
+  const stored = parseStoredVerdicts(file.value);
+  return stored === null
+    ? {
+        stored,
+        warnings: [fileWarning(TLC_RESULT_FILE, `${TLC_RESULT_FILE} の形が違うので使いません`)],
+      }
+    : { stored, warnings: [] };
 }
 
 /** A missing or damaged `graph.json` counts as absent: the scan then treats every node as new. */
