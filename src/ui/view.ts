@@ -162,10 +162,7 @@ export function violated(graph: Graph): readonly PropertyResult[] {
   return graph.properties.filter(isLiveViolation);
 }
 
-/**
- * Nodes whose tone is not settled, in `TONES` order, then id. The header's "未レビュー N" is its
- * length and its "脆弱性 N" its danger rows, so the counts can never disagree with the colors.
- */
+/** Nodes whose tone is not settled, in `TONES` order, then id. The header's "未レビュー N" is its length. */
 export function reviewQueue(
   graph: Graph,
 ): readonly { readonly node: StateNode; readonly tone: Tone }[] {
@@ -174,6 +171,27 @@ export function reviewQueue(
     .map((node) => ({ node, tone: toneOf(node, graph.properties) }))
     .filter(({ tone }) => !rowOf(tone).settled)
     .sort((a, b) => rank(a.tone) - rank(b.tone) || compare(a.node.id, b.node.id));
+}
+
+/** The header line of SPEC §12. 脆弱性 counts scanner findings (`status.vuln`), not every red box. */
+export function headerCounts(graph: Graph): {
+  readonly nodes: number;
+  readonly unreviewed: number;
+  readonly vulnerable: number;
+  readonly violated: number;
+} {
+  return {
+    nodes: graph.nodes.length,
+    unreviewed: reviewQueue(graph).length,
+    vulnerable: graph.nodes.filter((node) => node.status.vuln).length,
+    violated: violated(graph).length,
+  };
+}
+
+/** Only step 0 is the initial state; a later step without an event took an event-less transition. */
+export function stepEvent(index: number, event: string | null): string {
+  if (event !== null) return event;
+  return index === 0 ? "（初期状態）" : "（イベントなし）";
 }
 
 function compare(a: string, b: string): number {
@@ -399,7 +417,7 @@ export function sceneOf(
         box: beside,
         lines: [
           `step ${step + 1}/${trace.steps.length}`,
-          ...(current.event === null ? [] : [`イベント: ${current.event}`]),
+          `イベント: ${stepEvent(step, current.event)}`,
           ...Object.entries(current.vars).map(([name, value]) => `${name} = ${value}`),
           ...(looping ? [`↺ 繰り返し（step ${loopStart + 1} から）`] : []),
         ],

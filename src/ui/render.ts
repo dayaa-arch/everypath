@@ -9,10 +9,11 @@ import {
   type ViewState,
 } from "./state.js";
 import {
-  reviewQueue,
+  headerCounts,
   rowOf,
   type SceneItem,
   sceneOf,
+  stepEvent,
   TONES,
   type ToneRow,
   toneOf,
@@ -466,13 +467,12 @@ function headerOf(state: ViewState, commands: Commands, controls: HeaderControls
     connection,
   ];
   if (graph !== null) {
-    const queue = reviewQueue(graph);
-    const danger = queue.filter(({ tone }) => tone === "danger").length;
+    const counts = headerCounts(graph);
     items.push(
       html(
         "span",
         { class: "counts" },
-        `ノード ${graph.nodes.length} · 未レビュー ${queue.length} · 脆弱性 ${danger} · 性質違反 ${violated(graph).length}`,
+        `ノード ${counts.nodes} · 未レビュー ${counts.unreviewed} · 脆弱性 ${counts.vulnerable} · 性質違反 ${counts.violated}`,
       ),
     );
     const stale = graph.properties.filter((p) => p.staleModel === true).length;
@@ -696,7 +696,7 @@ function replayControls(replay: Replay, commands: Commands): Content[] {
       button("▶", () => commands.dispatch({ kind: "step", delta: 1 }), step === last),
     ),
     html("p", {}, `状態: ${current.state}`),
-    html("p", {}, `イベント: ${current.event ?? "（初期状態）"}`),
+    html("p", {}, `イベント: ${stepEvent(step, current.event)}`),
     html("p", { class: "vars" }, vars.length === 0 ? "変数なし" : vars.join(", ")),
     loopStart === null
       ? null
