@@ -31,6 +31,8 @@ export type Hierarchy = {
   /** The nearest state that is an ancestor of both, `null` for the top level. */
   readonly commonAncestor: (a: StateName, b: StateName) => StateName | null;
   readonly isLeaf: (id: StateName) => id is Leaf;
+  /** The child of `id` that `@state-initial` marks, or `null`. */
+  readonly markedChild: (id: StateName) => StateName | null;
   /** The child entering `id` goes to: the one `@state-initial` marks, else the only child, else `null`. */
   readonly initialChild: (id: StateName) => StateName | null;
   /** The leaves at or under `id`, in id order. */
@@ -60,12 +62,23 @@ function memo<T>(compute: (id: StateName) => T): (id: StateName) => T {
   };
 }
 
+const built = new WeakMap<readonly TreeNode[], Hierarchy>();
+
 /**
- * Builds the tree from the `parent` links. The scanner has validated them (`resolveHierarchy`), but a
- * hand-edited graph.json must not hang or overflow the viewer, so a link to an unknown state, to
- * itself, on a cycle or too deep is ignored here as well.
+ * Builds the tree from the `parent` links, once per `nodes` array: the viewer asks on every frame.
+ * The scanner has validated the links (`resolveHierarchy`), but a hand-edited graph.json must not hang
+ * or overflow the viewer, so a link to an unknown state, to itself, on a cycle or too deep is ignored
+ * here as well.
  */
 export function hierarchyOf(nodes: readonly TreeNode[]): Hierarchy {
+  const known = built.get(nodes);
+  if (known !== undefined) return known;
+  const hierarchy = buildHierarchy(nodes);
+  built.set(nodes, hierarchy);
+  return hierarchy;
+}
+
+function buildHierarchy(nodes: readonly TreeNode[]): Hierarchy {
   const ids = [...new Set(nodes.map((node) => node.id))].sort(compare);
   const known = new Set(ids);
   const links = new Map<StateName, StateName>();
@@ -77,11 +90,7 @@ export function hierarchyOf(nodes: readonly TreeNode[]): Hierarchy {
   for (const id of onCycles(ids, links)) links.delete(id);
   cutTooDeep(ids, links);
 
-  const children = new Map<StateName, StateName[]>();
-  for (const id of ids) {
-    const parent = links.get(id);
-    if (parent !== undefined) children.set(parent, [...(children.get(parent) ?? []), id]);
-  }
+  const children = childrenByParent(ids, links);
   const childrenOf = (id: StateName): readonly StateName[] => children.get(id) ?? [];
   const isLeaf = (id: StateName): id is Leaf => known.has(id) && !children.has(id);
   const leaves = ids.filter(isLeaf);
@@ -94,11 +103,13 @@ export function hierarchyOf(nodes: readonly TreeNode[]): Hierarchy {
     for (let at = links.get(id); at !== undefined; at = links.get(at)) up.push(at);
     return up;
   };
+  const markedChild = (id: StateName): StateName | null => {
+    const marked = marks.get(id);
+    return marked !== undefined && links.get(marked) === id ? marked : null;
+  };
   const initialChild = (id: StateName): StateName | null => {
     const kids = childrenOf(id);
-    const marked = marks.get(id);
-    if (marked !== undefined && kids.includes(marked)) return marked;
-    return kids.length === 1 ? (kids[0] ?? null) : null;
+    return markedChild(id) ?? (kids.length === 1 ? (kids[0] ?? null) : null);
   };
   const within: (id: StateName) => readonly Leaf[] = memo((id) => {
     if (!known.has(id)) return [];
@@ -133,6 +144,7 @@ export function hierarchyOf(nodes: readonly TreeNode[]): Hierarchy {
       return ancestorsOf(b).find((id) => above.has(id)) ?? null;
     },
     isLeaf,
+    markedChild,
     initialChild,
     within,
     enter,
@@ -172,14 +184,7 @@ function onCycles(
  * layer, each layer in id order.
  */
 function cutTooDeep(ids: readonly StateName[], links: Map<StateName, StateName>): StateName[] {
-  const children = new Map<StateName, StateName[]>();
-  for (const id of ids) {
-    const parent = links.get(id);
-    if (parent === undefined) continue;
-    const siblings = children.get(parent);
-    if (siblings === undefined) children.set(parent, [id]);
-    else siblings.push(id);
-  }
+  const children = childrenByParent(ids, links);
   const cut: { readonly id: StateName; readonly layer: number }[] = [];
   const queue = ids.filter((id) => !links.has(id)).map((id) => ({ id, depth: 0, layer: 0 }));
   for (const { id, depth, layer } of queue) {
@@ -194,6 +199,22 @@ function cutTooDeep(ids: readonly StateName[], links: Map<StateName, StateName>)
     }
   }
   return cut.sort((a, b) => a.layer - b.layer || compare(a.id, b.id)).map(({ id }) => id);
+}
+
+/** Each parent's children, in the order of `ids`. */
+function childrenByParent(
+  ids: readonly StateName[],
+  links: ReadonlyMap<StateName, StateName>,
+): Map<StateName, StateName[]> {
+  const children = new Map<StateName, StateName[]>();
+  for (const id of ids) {
+    const parent = links.get(id);
+    if (parent === undefined) continue;
+    const siblings = children.get(parent);
+    if (siblings === undefined) children.set(parent, [id]);
+    else siblings.push(id);
+  }
+  return children;
 }
 
 /** One file's `@state-parent`. */
@@ -221,6 +242,14 @@ export type HierarchyProblem =
       readonly claims: NonEmpty<ParentClaim>;
     }
   | { readonly kind: "parent-too-deep"; readonly claim: ParentClaim }
+  | {
+      /**
+       * The `@state-initial` of a state whose `@state-parent` was dropped (a cycle, too deep). It
+       * marked the entry of a level the state is no longer on, so it marks none.
+       */
+      readonly kind: "initial-unplaced";
+      readonly claim: InitialClaim;
+    }
   | {
       /** Two siblings, or two top-level states, marked `@state-initial`. The first claim is kept. */
       readonly kind: "initial-conflict";
@@ -292,6 +321,10 @@ export function resolveHierarchy(input: {
 
   const marks = new Map<StateName | null, InitialClaim>();
   for (const claim of input.initials) {
+    if (kept.has(claim.node) && !links.has(claim.node)) {
+      problems.push({ kind: "initial-unplaced", claim });
+      continue;
+    }
     const level = links.get(claim.node) ?? null;
     const first = marks.get(level);
     if (first === undefined) marks.set(level, claim);

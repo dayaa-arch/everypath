@@ -146,6 +146,12 @@ const NONE: readonly never[] = [];
 
 const compareText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
+function append<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const list = map.get(key);
+  if (list === undefined) map.set(key, [value]);
+  else list.push(value);
+}
+
 /** SPEC §5 `@state-parent`: the statechart with every parent replaced by the leaves inside it. */
 function flattenModel(graph: Declared): {
   readonly model: FlatModel;
@@ -154,7 +160,7 @@ function flattenModel(graph: Declared): {
   const hierarchy = hierarchyOf(graph.nodes);
   const { flows, unreadGuards } = graph;
   const bySource = new Map<StateName, DeclaredFlow[]>();
-  for (const edge of flows) bySource.set(edge.from, [...(bySource.get(edge.from) ?? []), edge]);
+  for (const edge of flows) append(bySource, edge.from, edge);
 
   const arcs: FlatArc[] = [];
   const kept = new Map<DeclaredFlow, Set<StateName>>();
@@ -183,9 +189,7 @@ function flattenModel(graph: Declared): {
   );
 
   const groups = new Map<string, StateName[]>();
-  for (const node of graph.nodes) {
-    if (node.group !== null) groups.set(node.group, [...(groups.get(node.group) ?? []), node.id]);
-  }
+  for (const node of graph.nodes) if (node.group !== null) append(groups, node.group, node.id);
   const real = new Set(graph.nodes.filter((node) => !node.status.planned).map((node) => node.id));
   const model = mint({
     hierarchy,
@@ -420,7 +424,7 @@ export function flatten(graph: Declared, file: PropertiesFile): Flat {
     }
   }
   const start = file.entry ?? (graph.model.initial === null ? NONE : [graph.model.initial]);
-  const entered = [...graph.flows.map((edge) => edge.to), ...start];
+  const entered = [...new Set(model.arcs.map((arc) => arc.declared.to)), ...start];
   return {
     model,
     entry: entryOf(model, file),

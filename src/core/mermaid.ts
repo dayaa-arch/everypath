@@ -72,7 +72,7 @@ export function toMermaid(graph: Graph): string {
       : [
           `${idOf(name)} : ${name}`,
           `state ${idOf(name)} {`,
-          ...levelOf(name, hierarchy.initialChild(name)).map((line) => `${INDENT}${line}`),
+          ...levelOf(name, hierarchy.markedChild(name)).map((line) => `${INDENT}${line}`),
           "}",
         ];
   /** One level, in `graph.nodes` order: its states, the arrow to where entering lands, its arrows. */

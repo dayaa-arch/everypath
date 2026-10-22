@@ -189,6 +189,36 @@ describe("hierarchy: entering a parent", () => {
     assert.deepEqual(graph.warnings, []);
   });
 
+  it("does not warn about an unmarked parent only a shadowed transition would enter", async () => {
+    const root = await makeRepo({
+      ...two,
+      "src/q.ts": ts("@state Q", "@state-next P on:e"),
+      "src/k.ts": ts("@state K", "@state-parent Q", "@state-next X on:e"),
+      "src/x.ts": ts("@state X"),
+      "src/s.ts": ts("@state S", "@state-initial", "@state-next Q"),
+    });
+    const { graph, flat } = await analyze(root, { now: T1 });
+
+    assert.ok(!arcs(flat).some((arc) => arc.includes("->C")), "no arc enters P");
+    assert.deepEqual(ambiguous(graph), []);
+  });
+
+  it("names at most ten children of an unmarked parent and counts the rest", async () => {
+    const files: Record<string, string> = {
+      "src/p.ts": ts("@state P"),
+      "src/s.ts": ts("@state S", "@state-initial", "@state-next P"),
+    };
+    for (let index = 10; index < 25; index++) {
+      files[`src/c${index}.ts`] = ts(`@state C${index}`, "@state-parent P");
+    }
+    const [warning] = ambiguous((await analyze(await makeRepo(files), { now: T1 })).graph);
+
+    assert.match(
+      warning?.message ?? "",
+      /P の子（C10、C11、C12、C13、C14、C15、C16、C17、C18、C19、ほか 5 件）/,
+    );
+  });
+
   it("warns when the model starts in the unmarked parent, or the properties file enters it", async () => {
     const started = await analyze(
       await makeRepo({
@@ -420,12 +450,29 @@ describe("hierarchy: the @state-parent tag", () => {
     );
   });
 
-  it("counts the mark of a state whose parent was dropped as a top-level mark", async () => {
-    const root = await makeRepo({
+  it("drops the mark of a state whose parent link was dropped, and says so, instead of starting there", async () => {
+    const chain = Array.from({ length: MAX_DEPTH + 2 }, (_, index) => `L${index}`);
+    const files: Record<string, string> = {
       "src/a.ts": ts("@state A", "@state-parent B", "@state-initial"),
       "src/b.ts": ts("@state B", "@state-parent A"),
-    });
-    assert.equal((await scan(root, { now: T1 })).model.initial, "A");
+    };
+    for (const [index, id] of chain.entries()) {
+      files[`src/${id}.ts`] = ts(
+        `@state ${id}`,
+        ...(index === 0 ? [] : [`@state-parent ${chain[index - 1]}`]),
+        ...(index === chain.length - 1 ? ["@state-initial"] : []),
+      );
+    }
+    const graph = await scan(await makeRepo(files), { now: T1 });
+
+    assert.equal(graph.model.initial, null);
+    const dropped = graph.warnings.filter((warning) =>
+      /@state-initial も使いません/.test(warning.message),
+    );
+    assert.deepEqual(
+      dropped.map((warning) => `${warning.file}:${warning.line}`),
+      ["src/L4.ts:3", "src/a.ts:3"],
+    );
   });
 });
 
@@ -718,6 +765,21 @@ describe("hierarchy: Mermaid", () => {
     );
   });
 
+  it("draws no entry arrow inside a parent whose only child carries no mark", async () => {
+    const root = await makeRepo({
+      "src/p.ts": ts("@state P"),
+      "src/c.ts": ts("@state C", "@state-parent P"),
+      "src/s.ts": ts("@state S", "@state-initial", "@state-next P"),
+    });
+    const { graph, flat } = await analyze(root, { now: T1 });
+    const text = toMermaid(graph);
+    const start = text.indexOf("state s2 {");
+
+    assert.deepEqual(arcs(flat), ["S->C"], "entering P still lands on its only child");
+    assert.ok(start > 0, "P is a composite state");
+    assert.ok(!text.slice(start, text.indexOf("}", start)).includes("[*]"));
+  });
+
   it("marks leaves only, draws no entry arrow inside an unmarked parent, and never marks a container planned", async () => {
     const root = await makeRepo({
       "src/c1.ts": ts("@state C1", "@state-parent P"),
@@ -757,5 +819,47 @@ describe("hierarchy: the tree is total", () => {
   it("answers [] for a name the graph does not have", async () => {
     const { flat } = await analyze(await makeRepo(AREA), { now: T1 });
     assert.deepEqual(flat.model.hierarchy.within(name("Nowhere")), []);
+  });
+
+  it("builds a parent with 40,000 children in under a second", () => {
+    const nodes = [
+      { id: name("P") },
+      ...Array.from({ length: 40_000 }, (_, index) => ({
+        id: name(`C${index}`),
+        parent: name("P"),
+      })),
+    ];
+    const started = performance.now();
+    const tree = hierarchyOf(nodes);
+    const elapsed = performance.now() - started;
+
+    assert.equal(tree.childrenOf(name("P")).length, 40_000);
+    assert.ok(elapsed < 1000, `${Math.round(elapsed)} ms`);
+  });
+
+  it("is built once per nodes array, so a viewer asking every frame does not rebuild it", () => {
+    const nodes = [{ id: name("P") }, { id: name("C"), parent: name("P") }];
+    assert.equal(hierarchyOf(nodes), hierarchyOf(nodes));
+    assert.notEqual(hierarchyOf(nodes), hierarchyOf([...nodes]));
+  });
+});
+
+describe("hierarchy: a long cycle", () => {
+  it("names ten of its members and counts the rest", async () => {
+    const files: Record<string, string> = {};
+    for (let index = 10; index < 40; index++) {
+      files[`src/a${index}.ts`] = ts(
+        `@state A${index}`,
+        `@state-parent A${index === 39 ? 10 : index + 1}`,
+      );
+    }
+    const graph = await scan(await makeRepo(files), { now: T1 });
+    const [warning, ...others] = graph.warnings;
+
+    assert.deepEqual(others, []);
+    assert.match(
+      warning?.message ?? "",
+      /（A10 → A11 → A12 → A13 → A14 → A15 → A16 → A17 → A18 → A19 → ほか 20 件）/,
+    );
   });
 });

@@ -20,6 +20,7 @@ import {
   type TreeNode,
 } from "./hierarchy.js";
 import { type ImportContext, resolveImports } from "./imports.js";
+import { listed } from "./listing.js";
 import { resolveNext, type VarTable } from "./model.js";
 import { checkProperties, violationsOf } from "./properties.js";
 import { navigationPaths, resolveRoute, routeTable } from "./routes.js";
@@ -395,7 +396,7 @@ function describeProblem(problem: HierarchyProblem): ScanWarning {
       return warningAt(
         claim.file,
         claim.line,
-        `@state-parent が輪になっています（${problem.members.join(" → ")}）。この輪の親は使いません`,
+        `@state-parent が輪になっています（${listed(problem.members, " → ")}）。この輪の親は使いません`,
       );
     }
     case "parent-too-deep":
@@ -403,6 +404,12 @@ function describeProblem(problem: HierarchyProblem): ScanWarning {
         problem.claim.file,
         problem.claim.line,
         `${problem.claim.node} の入れ子が深すぎます（親は ${MAX_DEPTH} 段まで）。この @state-parent は使いません`,
+      );
+    case "initial-unplaced":
+      return warningAt(
+        problem.claim.file,
+        problem.claim.line,
+        `${problem.claim.node} の @state-parent を使わないので、この @state-initial も使いません`,
       );
     case "initial-conflict": {
       const { kept, dropped, level } = problem;
@@ -419,7 +426,7 @@ function describeProblem(problem: HierarchyProblem): ScanWarning {
 
 /** A parent something enters, with several children and none marked: `flatten` enters them all. */
 function ambiguityWarning(id: StateName, hierarchy: Hierarchy, locate: Locate): ScanWarning {
-  const children = hierarchy.childrenOf(id).join("、");
+  const children = listed(hierarchy.childrenOf(id), "、");
   return {
     ...locate(id),
     message: `${id} の子（${children}）のどれにも @state-initial がありません。${id} への遷移はすべての子に入るとみなします。入る子に @state-initial を書いてください`,
