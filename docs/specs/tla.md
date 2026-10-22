@@ -57,6 +57,8 @@ Prototype で確かめたこと（手書きの example モデルを TLC 2.19 で
 
 実装中に決めたこと。`installTla` は取得元を引数で受け、`EVERYPATH_TLA_URL` と `EVERYPATH_TLA_SHA256` の読み取りと片方だけのときの exit 2 は CLI の境界で行う。`exportTla` も `rejected` を返し、CLI が警告として出す。`java -version` が exit 0 以外なら Java が無いと扱う（macOS の JDK 無しのスタブのため）。初期状態が性質を破るときの TLC は状態数を出さないので、その結果の `statesExplored` は `null`。`SPEC.md` §19 の 8 は、`retries` の宣言だけを `0..10` に変えても `lock-after-3` は成立する（ガード `retries<3` が上限を抑えるため。実機で確認）。違反を出すにはガードも `retries<10` と `retries==10` に変える。
 
+`docs/specs/typeok.md` で変えたこと。`TypeOK` の判定は `result.json` の `typeOk` ではなく `properties` の最後に、予約した id `TypeOK` の性質として入る。上のデータの形の `ResultFile.typeOk` と `TlcCheck.typeOk` は無くなった。`check --tlc` は `TypeOK` をほかの性質と同じ行の形で出す。
+
 ## 非目標
 - サーバーとビューア（`/check/tlc`、ステップ再生）、`never-reach` の TLC 検査、`dep-only-via`
 - `everypath.config.json` の `tla.jar`。環境変数と既定の場所だけを読む
