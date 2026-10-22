@@ -119,6 +119,7 @@ node dist/cli.js check example --tlc
 | `everypath init [dir]` | 設定、性質、スキル、hook の例を置き、`.gitignore` に追記する |
 | `everypath scan [dir] [--json] [--quiet]` | 一回スキャンして `.everypath/graph.json` を書く |
 | `everypath check [dir] [--tlc [--timeout 秒]]` | 性質を検査する。違反があれば終了コード 1 |
+| `everypath export [dir] --mermaid` | 状態と遷移を Mermaid の `stateDiagram-v2` にして標準出力に出す。README や PR に貼れる。何も書かない |
 | `everypath tla export [dir]` | `.everypath/tla/Model.tla` と `Model.cfg` を書く |
 | `everypath tla install` | `tla2tools.jar` を `~/.everypath/` に置く |
 | `everypath serve [dir] [--port 4747] [--open]` | 監視して図を配るサーバーを起動する |
