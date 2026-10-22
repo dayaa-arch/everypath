@@ -557,12 +557,21 @@ async function runCheck(
   ];
   const stderr = warnings.map(describeWarning);
   const failure = tlcFailure(summary);
+  // A stored result.json is not evidence: a committed or stale file could hide a real path. Only a
+  // TLC run inside this check may clear a quick-check violation from the exit code.
+  const clearedNow = summary?.kind === "checked";
+  const storedOnly = clearedNow ? [] : graph.properties.filter(isGuardOnly);
+  if (storedOnly.length > 0) {
+    stderr.push(
+      `ガードを無視したときだけの経路が ${storedOnly.length} 件ありますが、この実行では TLC を走らせていないので終了コードに数えます（everypath check --tlc で確かめられます）`,
+    );
+  }
   if (summary?.kind === "missing") stderr.push(...summary.guide);
   if (stderr.length > 0) process.stderr.write(`${stderr.join("\n")}\n`);
   process.stdout.write(`${reportChecks(graph, warnings, failure ?? []).join("\n")}\n`);
 
   const rejected = warnings.some((warning) => warning.file === PROPERTIES_FILE);
-  const violated = graph.properties.some(isLiveViolation);
+  const violated = graph.properties.some(isLiveViolation) || storedOnly.length > 0;
   return rejected || violated || failure !== null ? 1 : 0;
 }
 

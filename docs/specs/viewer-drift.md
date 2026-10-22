@@ -43,7 +43,7 @@ type SceneItem = … | { kind: "group"; name: string; box: Box; label: Box } // 
 - `SPEC.md` §7.3 の「宣言のみ = グレー」には従わない。`docs/specs/drift.md` のとおり、呼び出しが無いことは証拠にならない。
 - グループ枠は箱が 2 つ以上のグループだけに描く。1 つの箱の枠は箱の線を二重にするだけなので、グループ名は詳細パネルに出す。枠の名前のラベルは辺のラベルが避ける場所に入れる。
 - 数えない扱いは `never-reach` に限らず、`tlc` 欄を持つ性質すべて（今は `never-reach` と変数の無い `invariant`）に当てる。`tlc.result: "ok"` の意味（ガードどおりの振る舞いではその経路を通れない）は種類によらないため。
-- `docs/specs/phase2-properties.md` の「`check` の終了コードは簡易検査のまま」を改める。`graph.json` の `result`、`counterexamples`、ノードの `violations` は簡易検査のままにする。そのため `docs/specs/server.md` の「TLC の判定は簡易検査の判定を上書きしない」は守られる。代わりに、モデルのキーが合う `result.json` は簡易検査の違反を終了コードから外せる。`result.json` は TLC だけが判定する性質（変数を含む `invariant`、`leads-to`）では元から信頼している。また、決定 0003 で git の外にあるので、CI は自分の `check --tlc` で作り直す。
+- `docs/specs/phase2-properties.md` の「`check` の終了コードは簡易検査のまま」を改める。`graph.json` の `result`、`counterexamples`、ノードの `violations` は簡易検査のままにする。そのため `docs/specs/server.md` の「TLC の判定は簡易検査の判定を上書きしない」は守られる。簡易検査の違反を終了コードから外せるのは、同じ `check --tlc` の中で走らせた TLC が「ガードを守れば届かない」と言ったときだけにする。保存済みの `result.json` は表示（画面の色、`check` の説明）にだけ使い、終了コードは変えない。キーを合わせた偽の `result.json` をコミットすれば本物の違反を CI で消せてしまうため（サーバーの敵対的レビューで退けた形。リードのレビューで直した）。
 - ズームの各ファイルのテスト状況は、`graph.json` がノード単位の `tested` しか持たないので、そこから導けるときだけ出す。
 
 実装中に決めたこと、分かったこと。

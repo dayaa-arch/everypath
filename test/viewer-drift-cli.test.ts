@@ -58,8 +58,8 @@ describe("check and TLC's verdict on a quick-check violation (condition 7)", () 
     const checked = await checkTlc(root, await allOk());
     const plain = runCli(["check", root]);
 
+    assert.equal(checked.status, 0, checked.stdout);
     for (const result of [checked, plain]) {
-      assert.equal(result.status, 0, result.stdout);
       assert.ok(lineOf(result.stdout, "成立 no-lock [never-reach]"), result.stdout);
       assert.ok(
         result.stdout.includes("  ガードを無視したときだけの経路: ログイン →(login_fail) ロック"),
@@ -72,6 +72,16 @@ describe("check and TLC's verdict on a quick-check violation (condition 7)", () 
         result.stdout,
       );
     }
+  });
+
+  it("lets only a TLC run in this check clear the exit code, never a stored result.json", async () => {
+    const root = await exampleWithNoLock();
+    await checkTlc(root, await allOk());
+
+    const plain = runCli(["check", root]);
+
+    assert.equal(plain.status, 1, plain.stdout);
+    assert.match(plain.stderr, /この実行では TLC を走らせていないので終了コードに数えます/);
   });
 
   it("keeps counting it when the model has changed since TLC said ok", async () => {

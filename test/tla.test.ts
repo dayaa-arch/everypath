@@ -1173,11 +1173,12 @@ describe("tla: TLC's verdict beside a quick-check violation", () => {
       expr: "state != ロック",
     });
     const java = await fakeJava(await allOk());
-    runCli(["check", "--tlc", root], root, java.env);
+    const checked = runCli(["check", "--tlc", root], root, java.env);
 
     const plain = runCli(["check", root]);
 
-    assert.equal(plain.status, 0, plain.stdout);
+    assert.equal(checked.status, 0, checked.stdout);
+    assert.equal(plain.status, 1, "a stored result.json alone never clears the exit code");
     const graph = await readGraph(root);
     for (const id of ["no-lock", "no-lock-state"]) {
       const property = resultOf(graph, id);
