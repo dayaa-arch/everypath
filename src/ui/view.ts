@@ -285,12 +285,28 @@ export type SceneItem =
       readonly box: Box;
       /** "step 2/3", "event: forgot", "authed = FALSE", "retries = 0", "↺ 繰り返し" */
       readonly lines: readonly string[];
+    }
+  | {
+      /**
+       * SPEC §12.1's zoom to file granularity: the node's files, laid over the canvas from the box's
+       * top-left corner, so no other box moves.
+       */
+      readonly kind: "files";
+      readonly id: StateName;
+      readonly box: Box;
+      readonly rows: readonly FileRow[];
     };
+
+/**
+ * `tested` is null where graph.json cannot tell: it records one `tested` per node, true only when
+ * every file of the node is tested.
+ */
+export type FileRow = { readonly file: string; readonly tested: boolean | null };
 
 /**
  * The canvas as data. `live` is everything that moves with the dragged box (the box, its edges, trail
  * segments and callout touching it); `base` is the rest. With no drag, `live` is empty. Each list is
- * in paint order: group frames, dep lines, flow lines, drift lines, trail, boxes, callout.
+ * in paint order: group frames, dep lines, flow lines, drift lines, trail, boxes, callout, files.
  */
 export type Scene = {
   readonly base: readonly SceneItem[];
@@ -446,6 +462,12 @@ export function sceneOf(
     });
   }
 
+  const zoomed = graph.nodes.find((node) => node.id === state.zoom);
+  const corner = zoomed === undefined ? undefined : boxOf(zoomed.id);
+  if (zoomed !== undefined && corner !== undefined) {
+    items.push({ item: filesOf(zoomed, corner), touches: [zoomed.id] });
+  }
+
   const moving = (touches: readonly StateName[]): boolean =>
     drag !== null && touches.includes(drag.id);
   const boxes = items.flatMap(({ item }) =>
@@ -470,6 +492,30 @@ function placeLabel(
     boxes[0] ??
     boxAt({ x: 0, y: 0 });
   return { text, box };
+}
+
+/** The rows of a file card: a heading, then one per file (or one saying there is none). */
+export const FILE_CARD = { heading: 30, row: 20, bottom: 10, inset: 12 } as const;
+const TESTED_WORD = "テスト済み";
+
+/** The open files of `node`, over its box: at least as large as the box, wide enough for each row. */
+function filesOf(node: StateNode, corner: Box): Extract<SceneItem, { readonly kind: "files" }> {
+  const tested = node.status.tested ? true : node.files.length === 1 ? false : null;
+  const rows = node.files.map((file) => ({ file, tested }));
+  const widest = Math.max(
+    labelWidth(`${node.id} のファイル`),
+    ...rows.map(({ file }) => labelWidth(file) + FILE_CARD.inset + labelWidth(TESTED_WORD)),
+  );
+  const box = {
+    x: corner.x,
+    y: corner.y,
+    width: Math.max(corner.width, widest + 2 * FILE_CARD.inset),
+    height: Math.max(
+      corner.height,
+      FILE_CARD.heading + Math.max(rows.length, 1) * FILE_CARD.row + FILE_CARD.bottom,
+    ),
+  };
+  return { kind: "files", id: node.id, box, rows };
 }
 
 /** Air round a group's boxes, and the height of the row its name takes above them. */

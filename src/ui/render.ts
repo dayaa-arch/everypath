@@ -17,6 +17,7 @@ import { type Action, type Replay, replayOf, type TlcView, type ViewState } from
 import {
   checkedByLabel,
   DRIFT,
+  FILE_CARD,
   headerCounts,
   type Look,
   reviewQueue,
@@ -325,7 +326,13 @@ export function mount(commands: Commands): Viewer {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     if (event.key === "ArrowLeft") commands.dispatch({ kind: "step", delta: -1 });
     if (event.key === "ArrowRight") commands.dispatch({ kind: "step", delta: 1 });
-    if (event.key === "Escape") commands.dispatch({ kind: "select", id: null, extend: false });
+    if (event.key === "Escape") commands.dispatch({ kind: "escape" });
+  });
+
+  // The pointer is captured by the canvas, so the box is found under the pointer, not by target.
+  canvas.addEventListener("dblclick", (event) => {
+    const id = nodeAt(document.elementFromPoint(event.clientX, event.clientY));
+    if (id !== null) commands.dispatch({ kind: "zoom", id });
   });
 
   return {
@@ -411,6 +418,8 @@ function draw(item: SceneItem): SVGElement {
         ),
       );
     }
+    case "files":
+      return drawFiles(item);
     default: {
       const _exhaustive: never = item;
       return _exhaustive;
@@ -450,6 +459,40 @@ function drawBox(item: Extract<SceneItem, { kind: "box" }>): SVGElement {
     ].filter((child) => child !== null),
   );
   return group;
+}
+
+/** The open files of a box. It carries the box's id, so a press on it drags or selects that box. */
+function drawFiles(item: Extract<SceneItem, { kind: "files" }>): SVGElement {
+  const { box, rows, id } = item;
+  const left = box.x + FILE_CARD.inset;
+  const right = box.x + box.width - FILE_CARD.inset;
+  const rowY = (index: number): number =>
+    box.y + FILE_CARD.heading + index * FILE_CARD.row + FILE_CARD.row / 2;
+  const listed =
+    rows.length === 0
+      ? [svg("text", { class: "file", x: left, y: rowY(0) }, "ファイルなし（計画のみ）")]
+      : rows.flatMap((row, index) => [
+          svg("text", { class: "file", x: left, y: rowY(index) }, row.file),
+          row.tested === null
+            ? null
+            : svg(
+                "text",
+                { class: row.tested ? "tested" : "untested", x: right, y: rowY(index) },
+                row.tested ? "テスト済み" : "未テスト",
+              ),
+        ]);
+  return svg(
+    "g",
+    { class: "files", "data-id": id },
+    svg("rect", { class: "card", ...box, rx: 8 }),
+    svg(
+      "text",
+      { class: "heading", x: left, y: box.y + FILE_CARD.heading / 2 + 2 },
+      `${id} のファイル`,
+    ),
+    ...listed,
+    svg("title", {}, "ダブルクリックか Escape で閉じます"),
+  );
 }
 
 function swatch(row: ToneRow): SVGSVGElement {
@@ -641,6 +684,11 @@ function panelOf(state: ViewState, commands: Commands): Content[] {
         "p",
         { class: "hint" },
         "箱はドラッグで動かせます。背景のドラッグで画面を動かし、ホイールで拡大と縮小をします。",
+      ),
+      html(
+        "p",
+        { class: "hint" },
+        "箱をダブルクリックすると中のファイルが開きます。もう一度ダブルクリックするか Escape で閉じます。",
       ),
     ];
   }

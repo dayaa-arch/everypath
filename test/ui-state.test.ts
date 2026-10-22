@@ -117,6 +117,7 @@ describe("the first state", () => {
       model: { kind: "unknown" },
       templates: null,
       prompt: null,
+      zoom: null,
     });
   });
 });

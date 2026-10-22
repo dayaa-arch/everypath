@@ -54,7 +54,7 @@ export type ModelText =
  * has no action of its own (it is "live" after any graph and "offline" after `offline`); `tlc`
  * splits `finished` into `done` and `error`; `notice` holds the server's answer to a refused request.
  * docs/specs/viewer-panels.md adds the two tabs, the change log, the text of `Model.tla`, the
- * templates and the instruction last generated.
+ * templates and the instruction last generated; docs/specs/viewer-drift.md the open files.
  */
 export type ViewState = {
   readonly graph: Graph | null;
@@ -74,6 +74,8 @@ export type ViewState = {
   readonly templates: PromptTemplates | null;
   /** The instruction last generated for the current selection; any change of selection drops it. */
   readonly prompt: Prompt | null;
+  /** The node whose files are open on the canvas (SPEC §12.1's zoom to file granularity). */
+  readonly zoom: StateName | null;
 };
 
 export type Action =
@@ -96,11 +98,14 @@ export type Action =
   | { readonly kind: "tab"; readonly panel: ViewState["panelTab"] }
   | { readonly kind: "tab"; readonly dock: ViewState["dockTab"] }
   | { readonly kind: "generate"; readonly prompt: PromptKind }
-  | { readonly kind: "dismiss-prompt" };
+  | { readonly kind: "dismiss-prompt" }
+  | { readonly kind: "zoom"; readonly id: StateName }
+  | { readonly kind: "escape" };
 
 /**
  * No graph, `saved` as the layout, "connecting", TLC idle, nothing selected, dep edges shown, no
- * notice, the detail and queue tabs, no history, no model text, no templates, no instruction.
+ * notice, the detail and queue tabs, no history, no model text, no templates, no instruction, no
+ * files open.
  */
 export function initialState(saved: Layout): ViewState {
   return {
@@ -117,6 +122,7 @@ export function initialState(saved: Layout): ViewState {
     model: { kind: "unknown" },
     templates: null,
     prompt: null,
+    zoom: null,
   };
 }
 
@@ -150,6 +156,9 @@ const HISTORY_LIMIT = 200;
  * - history merges entries into `history` (see `mergeHistory`). model, templates and tab set their
  *   field. generate keeps the instruction built from the selection and the templates, and changes
  *   nothing when it cannot be built. dismiss-prompt drops it.
+ * - zoom opens the node's files, or closes them when they are that node's already; an id not in the
+ *   graph changes nothing. A graph event without the node closes them. Nothing else moves.
+ * - escape closes the files when they are open, and otherwise clears the selection.
  */
 export function reduce(state: ViewState, action: Action): ViewState {
   switch (action.kind) {
@@ -167,6 +176,7 @@ export function reduce(state: ViewState, action: Action): ViewState {
         selection,
         history: diff === null ? state.history : mergeHistory(state.history, [diff]),
         prompt: sameNodes(state.selection, selection) ? state.prompt : null,
+        zoom: graph.nodes.some((n) => n.id === state.zoom) ? state.zoom : null,
       };
     }
     case "offline":
@@ -234,6 +244,11 @@ export function reduce(state: ViewState, action: Action): ViewState {
     }
     case "dismiss-prompt":
       return state.prompt === null ? state : { ...state, prompt: null };
+    case "zoom":
+      if (!state.graph?.nodes.some((n) => n.id === action.id)) return state;
+      return { ...state, zoom: state.zoom === action.id ? null : action.id };
+    case "escape":
+      return state.zoom === null ? withSelection(state, NONE) : { ...state, zoom: null };
     default: {
       const _exhaustive: never = action;
       return _exhaustive;

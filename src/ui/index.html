@@ -127,6 +127,13 @@ label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
 #canvas.labels-on-hover .line .label { opacity: 0; }
 #canvas.labels-on-hover .line:hover .label { opacity: 1; }
 .callout rect { fill: var(--paper); stroke: var(--ink); stroke-width: 1; }
+.files { cursor: pointer; }
+.files .card { fill: var(--paper); stroke: var(--ink); stroke-width: 1.5; filter: drop-shadow(0 2px 6px rgb(0 0 0 / 0.18)); }
+.files text { font-size: 13px; dominant-baseline: middle; fill: var(--ink); }
+.files .heading { font-weight: 600; }
+.files .file { font-family: var(--mono); }
+.files .tested { fill: var(--muted); text-anchor: end; }
+.files .untested { font-weight: 600; text-anchor: end; }
 .callout text { font: 13px/1 var(--mono); fill: var(--ink); }
 
 #panel {
