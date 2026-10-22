@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readdir, readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
-import { describe, it } from "node:test";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { analyze, scan } from "../src/core/scan.js";
 import type { Graph } from "../src/core/types.js";
@@ -12,6 +13,30 @@ import { depPairs, deps, makeRepo, readGraph } from "./helpers/repo.js";
 const T1 = new Date("2026-10-22T00:00:00.000Z");
 const T2 = new Date("2026-10-22T01:00:00.000Z");
 const fixtures = fileURLToPath(new URL("./fixtures/", import.meta.url));
+
+const bulkRoots: string[] = [];
+
+after(async () => {
+  await Promise.all(bulkRoots.map((root) => rm(root, { recursive: true, force: true })));
+});
+
+/** `makeRepo` for a thousand files: the directories first, then the files in parallel, as a slow disk is idle between writes. */
+async function bulkRepo(files: Readonly<Record<string, string>>): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "everypath-imports-"));
+  bulkRoots.push(root);
+  const entries = Object.entries(files);
+  await Promise.all(
+    [...new Set(entries.map(([path]) => dirname(join(root, path))))].map((dir) =>
+      mkdir(dir, { recursive: true }),
+    ),
+  );
+  for (let at = 0; at < entries.length; at += 64) {
+    await Promise.all(
+      entries.slice(at, at + 64).map(([path, content]) => writeFile(join(root, path), content)),
+    );
+  }
+  return root;
+}
 
 const testedIds = (graph: Graph): string[] =>
   graph.nodes
@@ -192,7 +217,7 @@ describe("imports: damaged sources", () => {
       }
     }
     assert.ok(count >= 200, `${count} variants`);
-    const root = await makeRepo(files);
+    const root = await bulkRepo(files);
 
     const first = await analyze(root, { now: T1 });
     const second = await analyze(root, { now: T1 });
@@ -259,7 +284,7 @@ describe("imports: the 1,000-file budget", () => {
           `// @state G${p}_${f}\npackage p${p}\n\nimport (\n\t"fmt"\n\t"example.com/big/p${(p + 1) % packages}"\n\t"example.com/big/p${(p + 2) % packages}"\n\t"github.com/x/y"\n)\n\n${filler(40, (k) => `func f${k}() int { return ${k} }`)}\n`;
       }
     }
-    const root = await makeRepo(files);
+    const root = await bulkRepo(files);
 
     const runs = await cpuRuns(root);
 
@@ -279,7 +304,7 @@ describe("imports: the 1,000-file budget", () => {
       files[`src/m${i}.rs`] =
         `// @state M${i}\n${filler(3, (k) => `use crate::m${(i + k + 1) % modules}::Item;`)}\n\n${filler(40, (k) => `pub fn f${k}() -> u32 { ${k} }`)}\n`;
     }
-    const root = await makeRepo(files);
+    const root = await bulkRepo(files);
 
     const runs = await cpuRuns(root);
 
@@ -302,7 +327,7 @@ describe("imports: the 1,000-file budget", () => {
           `// @state C${a}_${b}\npackage p${a};\n\nimport java.util.List;\n${singles}\nimport p${(a + 2) % packages}.*;\n\npublic class C${a}_${b} {\n${filler(40, (k) => `  int f${k}() { return ${k}; }`)}\n}\n`;
       }
     }
-    const root = await makeRepo(files);
+    const root = await bulkRepo(files);
 
     const runs = await cpuRuns(root);
 
@@ -325,7 +350,7 @@ describe("imports: the 1,000-file budget", () => {
           `// @state C${a}_${b}\npackage p${a}\n\nimport kotlin.collections.List\n${singles}\nimport p${(a + 2) % packages}.*\n\nclass C${a}_${b} {\n${filler(40, (k) => `  fun f${k}() = ${k}`)}\n}\n`;
       }
     }
-    const root = await makeRepo(files);
+    const root = await bulkRepo(files);
 
     const runs = await cpuRuns(root);
 
