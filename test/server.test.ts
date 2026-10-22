@@ -981,6 +981,7 @@ describe("serve: prompt templates (docs/specs/viewer-panels.md condition 6)", ()
     "draw-model",
     "explain-model",
     "fix-counterexample",
+    "fix-drift",
     "propose-properties",
     "write-tests",
   ];

@@ -30,7 +30,7 @@ type DriftDecision = { readonly from: StateName; readonly to: StateName; readonl
 type ViewState = … & { zoom: StateName | null; decisions: readonly DriftDecision[] };
 type Action = … | { kind: "zoom"; id: StateName } | { kind: "escape" } | ({ kind: "decide-drift" } & DriftDecision);
 // src/ui/view.ts
-type SceneItem = … | { kind: "group"; name: string; box: Box }
+type SceneItem = … | { kind: "group"; name: string; box: Box; label: Box } // label は名前の矩形
   | { kind: "files"; id: StateName; box: Box; rows: readonly { file: string; tested: boolean | null }[] };
 // line の look は "flow" | "dep" | "observed" | "trail"
 ```

@@ -53,11 +53,14 @@ async function markupFromStrings(dir: string): Promise<Finding[]> {
 const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(?\s*)["']([^"']+)["']/g;
 
 /**
- * An import of Node, of the server, or of core code that is neither the types file nor the prompt
- * filler (which has no imports itself, so allowing it cannot let Node in; see below).
+ * The core modules the page may load. None of them loads anything but the types file's types, so
+ * allowing them cannot let Node in (see below).
  */
+const SHARED_CORE = ["types", "prompts", "expr", "verdict"] as const;
+
+/** An import of Node, of the server, or of core code outside `SHARED_CORE`. */
 async function strayImports(dir: string): Promise<Finding[]> {
-  const shared = new Set(["types", "prompts"].map((name) => resolve(dir, "..", "core", name)));
+  const shared = new Set(SHARED_CORE.map((name) => resolve(dir, "..", "core", name)));
   const found: Finding[] = [];
   for (const file of (await filesUnder(dir)).filter((name) => name.endsWith(".ts"))) {
     const text = await readFile(file, "utf8");
@@ -135,7 +138,7 @@ describe("src/ui builds no markup from strings", () => {
   });
 });
 
-describe("src/ui imports only itself, core/types, core/prompts and packages", () => {
+describe("src/ui imports only itself, the shared core modules and packages", () => {
   it("does so today", async () => {
     assert.deepEqual(await strayImports(uiDir), []);
   });
@@ -155,11 +158,13 @@ describe("src/ui imports only itself, core/types, core/prompts and packages", ()
     });
   }
 
-  it("allows its own modules, the types file, the prompt filler and a package", async () => {
+  it("allows its own modules, the shared core modules and a package", async () => {
     const copy = await copyOfUi({
       "ok.ts": [
         'import type { Graph } from "../core/types.js";',
         'import { fillTemplate } from "../core/prompts.js";',
+        'import { edgeLabel } from "../core/expr.js";',
+        'import { isLiveViolation } from "../core/verdict.js";',
         'import { place } from "./layout.js";',
         'import { graphlib } from "@dagrejs/dagre";',
       ].join("\n"),
@@ -190,6 +195,34 @@ describe("src/core/prompts.ts, which src/ui and src/server both load", () => {
   ]) {
     it(`finds ${line}`, () => {
       assert.equal(loadsAnything(`export const x = 1;\n${line}\n`), true);
+    });
+  }
+});
+
+/** The text with every `import type { … } from "./types.js";` taken out. */
+function withoutTypeImports(text: string): string {
+  return text.replace(/^import\s+type\s+\{[^}]*\}\s+from\s+"\.\/types\.js";$/gm, "");
+}
+
+describe("src/core/expr.ts and src/core/verdict.ts, which src/ui loads", () => {
+  for (const name of ["expr", "verdict"]) {
+    it(`${name}.ts loads nothing but the types of the types file`, async () => {
+      const text = await readFile(
+        fileURLToPath(new URL(`../src/core/${name}.ts`, import.meta.url)),
+        "utf8",
+      );
+      assert.equal(loadsAnything(withoutTypeImports(text)), false);
+    });
+  }
+
+  for (const line of [
+    'import { parseGuard } from "./types.js";',
+    'import type { Graph } from "./scan.js";',
+    'import { readFile } from "node:fs/promises";',
+  ]) {
+    it(`finds ${line}`, () => {
+      const text = `import type { GuardExpr } from "./types.js";\n${line}\n`;
+      assert.equal(loadsAnything(withoutTypeImports(text)), true);
     });
   }
 });
