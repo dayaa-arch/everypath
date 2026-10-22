@@ -123,7 +123,7 @@ describe("TLC's output (docs/specs/tlc-limits.md condition 4)", () => {
     );
 
     assert.equal(result.status, 1);
-    assert.match(result.stdout, /エラー TLC: TLC の出力が.*先頭を捨てた/);
+    assert.match(result.stdout, /エラー TLC: TLC の出力が.*先頭を捨て/);
     assert.equal(resultOf((await readGraph(root)).properties, "no-unauth-home").result, "error");
   });
 });

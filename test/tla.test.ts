@@ -541,12 +541,12 @@ describe("tla: reading TLC output", () => {
   });
 
   it("reads a Java failure as an error that carries the first line TLC printed", () => {
-    const output = 'Exception in thread "main" java.lang.OutOfMemoryError: Java heap space\n';
+    const output = 'Exception in thread "main" java.lang.NoClassDefFoundError: tlc2/TLC\n';
 
     const parsed = parseTlcOutput(output, FIXTURE_NAMES);
 
     assert.ok(parsed.kind === "error");
-    assert.match(parsed.message, /OutOfMemoryError/);
+    assert.match(parsed.message, /NoClassDefFoundError/);
   });
 
   it("turns anything it cannot map back into an error, never an exception", async () => {

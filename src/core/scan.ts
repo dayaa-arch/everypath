@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { basename, posix, resolve } from "node:path";
 import { type Notes, readNotes } from "./annotations.js";
+import type { Config } from "./config.js";
 import { sanitizeStateName } from "./expr.js";
 import {
   type DeclaredFlow,
@@ -91,7 +92,8 @@ type Link = { readonly from: StateName; readonly to: StateName; readonly via: re
  * starts here because `graph.json` holds property results but not the definitions they came from:
  * `flat` is the statechart with its properties as the checking lanes read it. `history` is the line a
  * scan would append; it does not depend on property results. TLC's last verdicts (`result.json`) are
- * an input like any other, so every graph carries them.
+ * an input like any other, so every graph carries them. `config` is the one this analysis read, for
+ * the settings no graph carries, such as TLC's heap.
  */
 export async function analyze(
   root: string,
@@ -100,6 +102,7 @@ export async function analyze(
   readonly graph: Graph;
   readonly flat: Flat;
   readonly history: HistoryEntry | null;
+  readonly config: Config;
 }> {
   const workspace = await readWorkspace(resolve(root));
   const context = importContext({
@@ -109,7 +112,8 @@ export async function analyze(
   });
   const facts = workspace.sources.map((source) => extractFacts(source, context));
   const { graph, flat } = fold(workspace, facts, options.now ?? new Date());
-  return { graph, flat, history: diff(workspace.previous, graph, options.reason ?? "scan") };
+  const history = diff(workspace.previous, graph, options.reason ?? "scan");
+  return { graph, flat, history, config: workspace.config };
 }
 
 /** SPEC §8. `analyze`, then writes `.everypath/graph.json` and, if something changed, `history.jsonl`. */
