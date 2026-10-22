@@ -1,11 +1,27 @@
 import { posix } from "node:path";
+import type { Manifest } from "./imports-common.js";
+import { type GoModules, goModules, resolveGo } from "./imports-go.js";
 
 export type ImportContext = {
   /** Every walked source file, root-relative. Imports resolve only to these. */
   readonly files: ReadonlySet<string>;
   /** `config.aliases` as `[prefix, root-relative directory]`, longest prefix first. */
   readonly aliases: readonly (readonly [string, string])[];
+  readonly go: GoModules;
 };
+
+/** What a scan knows before it reads any one file: the walked paths, the config and the manifests. */
+export function importContext(input: {
+  readonly files: readonly string[];
+  readonly aliases: ImportContext["aliases"];
+  readonly manifests: readonly Manifest[];
+}): ImportContext {
+  return {
+    files: new Set(input.files),
+    aliases: input.aliases,
+    go: goModules(input.files, input.manifests),
+  };
+}
 
 const JS_EXTENSIONS: readonly string[] = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 const JS_TO_TS: ReadonlyMap<string, readonly string[]> = new Map([
@@ -19,14 +35,29 @@ const JS_SPECIFIER =
 const PYTHON_FROM = /^[ \t]*from[ \t]+(\.*)([\w.]*)[ \t]+import[ \t]+(\([^)]*\)|[^\n]*)/gm;
 const PYTHON_IMPORT = /^[ \t]*import[ \t]+([^\n#;]+)/gm;
 
+/** The files one source file imports, each `null` where an import resolves to nothing in the repository. */
+type Resolver = (
+  path: string,
+  content: string,
+  context: ImportContext,
+) => readonly (string | null)[];
+
+const resolveJsFile: Resolver = (path, content, context) =>
+  jsSpecifiers(content).map((specifier) => resolveJs(path, specifier, context));
+
+const resolvePythonFile: Resolver = (path, content, context) =>
+  pythonModules(path, content).map((module) => resolvePython(module, context));
+
+/** Which resolver reads a file, by extension. A language is a row; a file of any other extension imports nothing. */
+const RESOLVERS: ReadonlyMap<string, Resolver> = new Map<string, Resolver>([
+  ...JS_EXTENSIONS.map((extension): [string, Resolver] => [extension, resolveJsFile]),
+  [".py", resolvePythonFile],
+  [".go", (path, content, context) => resolveGo(path, content, context.go)],
+]);
+
 /** The files `path` imports, as root-relative paths. Unresolvable imports (packages, builtins) are dropped. */
 export function resolveImports(path: string, content: string, context: ImportContext): string[] {
-  const extension = posix.extname(path);
-  const targets = JS_EXTENSIONS.includes(extension)
-    ? jsSpecifiers(content).map((specifier) => resolveJs(path, specifier, context))
-    : extension === ".py"
-      ? pythonModules(path, content).map((module) => resolvePython(module, context))
-      : [];
+  const targets = RESOLVERS.get(posix.extname(path))?.(path, content, context) ?? [];
   return [
     ...new Set(targets.flatMap((target) => (target === null || target === path ? [] : [target]))),
   ].sort();
