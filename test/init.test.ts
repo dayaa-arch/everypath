@@ -271,7 +271,10 @@ describe("skill/SKILL.md", () => {
   it("states the eleven rules of SPEC.md 14.1, each with its reason", async () => {
     const skill = await read("skill/SKILL.md");
 
-    const items = skill.split(/^(?=\d+\. )/m).filter((part) => /^\d+\. /.test(part));
+    const items = skill
+      .split(/^(?=\d+\. )/m)
+      .filter((part) => /^\d+\. /.test(part))
+      .map((part) => part.split(/\n\s*\n/)[0] ?? "");
     assert.equal(items.length, 11, items.join("\n---\n"));
     for (const item of items) assert.match(item, /理由: \S/, item);
     const mentions = [
