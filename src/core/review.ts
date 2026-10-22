@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { parseStateName } from "./expr.js";
 import { asText, errorMessage, isRecord } from "./json.js";
 import type { Approval, NodeReview, ReviewMark, ScanWarning, StateName } from "./types.js";
+import { conflictRemedy } from "./verdict.js";
 
 // Approvals as a set of immutable records (decision 0004). Each approval or revocation is one file
 // `.everypath/review/<id>.jsonl` that names the records its author saw and replaces (`supersedes`).
@@ -400,7 +401,7 @@ export function conflictWarnings(id: StateName, review: NodeReview | undefined):
   return [
     warning(
       REVIEW_DIRECTORY,
-      `${id}: 承認が食い違っています（${parts}）。ビューアで内容を確かめ、承認し直すか取り消してください`,
+      `${id}: 承認が食い違っています（${parts}）。${conflictRemedy(review)}`,
     ),
   ];
 }

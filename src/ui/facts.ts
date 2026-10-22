@@ -7,7 +7,7 @@ import type {
   StateName,
   StateNode,
 } from "../core/types.js";
-import { isLiveViolation } from "../core/verdict.js";
+import { conflictRemedy, isLiveViolation } from "../core/verdict.js";
 import type { DriftDecision, DriftFix, Selection } from "./state.js";
 
 // Reads of the graph and the selection that state.ts, view.ts, prompt.ts and render.ts share. It
@@ -117,7 +117,7 @@ export function reviewSummary(node: StateNode): ReviewSummary {
     };
   }
   return {
-    alert: "承認が食い違っています。内容を確かめて、承認し直すか取り消してください",
+    alert: `承認が食い違っています。${conflictRemedy(review)}`,
     rows: [
       ["承認", `食い違い（記録 ${review.conflict.length} 件）`],
       ...review.conflict.map((mark) => ["記録", describeMark(mark, node.hash)] as const),

@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import { parseStateName } from "../src/core/expr.js";
-import { foldReview, parseRecordFile, planChange, type ReviewChange } from "../src/core/review.js";
+import {
+  conflictWarnings,
+  foldReview,
+  parseRecordFile,
+  planChange,
+  type ReviewChange,
+} from "../src/core/review.js";
 import { analyze } from "../src/core/scan.js";
 import type { Graph } from "../src/core/types.js";
 import { reviewSummary } from "../src/ui/facts.js";
@@ -173,5 +179,28 @@ describe("viewer: the color of a conflict", () => {
     assert.equal(toneOf(node(graph, "食い違い"), graph.properties), "unreviewed");
     assert.equal(node(graph, "証明済み").status.proof, "passed");
     assert.equal(toneOf(node(graph, "証明済み"), graph.properties), "unreviewed");
+  });
+});
+
+describe("an unreadable record points at the file, not at approving again", () => {
+  it("tells the reader to restore or delete the file in the panel and in scan's warning", async () => {
+    const graph = await panelGraph();
+    const approved = node(graph, "承認済み");
+    const file = ".everypath/review/0123456789abcdef.jsonl";
+    const review = {
+      conflict: [
+        { kind: "approve", hash: approved.hash, at: AT1, by: "taro", note: "" },
+        { kind: "unreadable", file },
+      ],
+    } as const;
+
+    const summary = reviewSummary({ ...approved, review });
+    const [warned] = conflictWarnings(approved.id, review);
+
+    for (const text of [summary.alert ?? "", warned?.message ?? ""]) {
+      assert.ok(text.includes(file), text);
+      assert.match(text, /git で元に戻すか消して/);
+      assert.doesNotMatch(text, /承認し直すか取り消して/);
+    }
   });
 });
