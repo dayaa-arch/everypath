@@ -183,11 +183,12 @@ function awaitsTlc({ checkedBy, result }: PropertyResult): boolean {
 }
 
 /**
- * Lays TLC's stored verdicts over the quick lane's on every scan, so they outlive rescans. A verdict
- * fills only a result the quick check left to TLC, and only for a definition of the same id and kind:
- * an `ok` or `violated` the quick check reached is never replaced, whatever `result.json` says. When
- * the current model has a key other than the one TLC checked, the verdict is marked `staleModel`.
- * `checkedBy` stays the quick lane's.
+ * Lays TLC's stored verdicts over the quick lane's on every scan, so they outlive rescans. Only a
+ * verdict on a definition of the same id and kind counts. It fills a result the quick check left to
+ * TLC, and it goes beside a violation the quick check found, in `tlc`: an `ok` or `violated` the
+ * quick check reached is never replaced, whatever `result.json` says. A quick-check `ok` gets none,
+ * because no behavior takes a path the graph does not have. When the current model has a key other
+ * than the one TLC checked, the verdict is marked `staleModel`. `checkedBy` stays the quick lane's.
  */
 export function withTlcResults(
   graph: Pick<Graph, "nodes" | "edges" | "model">,
@@ -198,9 +199,14 @@ export function withTlcResults(
   if (stored === null) return quick;
   const generated = generateTla(graph, file);
   const fresh = generated.ok && modelKey(generated.model) === stored.key;
+  const stale: { readonly staleModel?: true } = fresh ? {} : { staleModel: true };
   return quick.map((result): PropertyResult => {
     const verdict = stored.byId.get(result.id);
-    if (verdict === undefined || verdict.kind !== result.kind || !awaitsTlc(result)) return result;
-    return fresh ? { ...result, ...verdict } : { ...result, ...verdict, staleModel: true };
+    if (verdict === undefined || verdict.kind !== result.kind) return result;
+    if (awaitsTlc(result)) return { ...result, ...verdict, ...stale };
+    if (result.result !== "violated" || verdict.result === "pending") return result;
+    const { counterexamples, statesExplored, checkedAt } = verdict;
+    const tlc = { result: verdict.result, counterexamples, statesExplored, checkedAt, ...stale };
+    return { ...result, tlc };
   });
 }
