@@ -12,13 +12,14 @@ export function nameOf(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
-/** Appends to the list under `key`, making it first. */
+/** Appends to the list under `key`, starting the list when there is none. */
 export function pushTo<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   const list = map.get(key);
   if (list === undefined) map.set(key, [value]);
   else list.push(value);
 }
 
+/** The names joined with `/`, leaving out an empty one, so the repository root `""` adds nothing. */
 export function joinPath(directory: string, ...names: readonly string[]): string {
   return [directory, ...names].filter((name) => name !== "").join("/");
 }
