@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 import type { Manifest } from "./imports-common.js";
 import { type GoModules, goModules, resolveGo } from "./imports-go.js";
+import { type RustCrates, resolveRust, rustCrates } from "./imports-rust.js";
 
 export type ImportContext = {
   /** Every walked source file, root-relative. Imports resolve only to these. */
@@ -8,6 +9,7 @@ export type ImportContext = {
   /** `config.aliases` as `[prefix, root-relative directory]`, longest prefix first. */
   readonly aliases: readonly (readonly [string, string])[];
   readonly go: GoModules;
+  readonly rust: RustCrates;
 };
 
 /** What a scan knows before it reads any one file: the walked paths, the config and the manifests. */
@@ -20,6 +22,7 @@ export function importContext(input: {
     files: new Set(input.files),
     aliases: input.aliases,
     go: goModules(input.files, input.manifests),
+    rust: rustCrates(input.files, input.manifests),
   };
 }
 
@@ -53,6 +56,7 @@ const RESOLVERS: ReadonlyMap<string, Resolver> = new Map<string, Resolver>([
   ...JS_EXTENSIONS.map((extension): [string, Resolver] => [extension, resolveJsFile]),
   [".py", resolvePythonFile],
   [".go", (path, content, context) => resolveGo(path, content, context.go)],
+  [".rs", (path, content, context) => resolveRust(path, content, context.rust)],
 ]);
 
 /** The files `path` imports, as root-relative paths. Unresolvable imports (packages, builtins) are dropped. */
