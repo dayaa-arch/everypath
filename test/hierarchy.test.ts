@@ -573,6 +573,35 @@ describe("hierarchy: drift", () => {
     const logout = graph.edges.find((edge) => edge.type === "flow" && edge.from === "Area");
     assert.equal(logout?.type === "flow" && logout.observed, true);
   });
+
+  const driftOf = (graph: Graph): string[] =>
+    graph.drift.map((drift) => `${drift.from}->${drift.to}`);
+
+  it("counts a leaf's call as drift when an inner transition shadowed its parent's", async () => {
+    const root = await makeRepo({
+      ...AREA,
+      "src/a.ts": `${ts("@state A", "@state-parent Area", "@state-initial", "@state-next A on:logout")}router.push("/out");\n`,
+      "src/out.ts": ts("@state Out", "@state-route /out"),
+    });
+    const { graph, flat } = await analyze(root, { now: T1 });
+
+    assert.ok(!arcs(flat).includes("A->Out(logout)"), "A's logout stays in A");
+    assert.deepEqual(driftOf(graph), ["A->Out"]);
+    const logout = graph.edges.find((edge) => edge.type === "flow" && edge.from === "Area");
+    assert.equal(logout?.type === "flow" && logout.observed, false);
+  });
+
+  it("counts a call between children as drift under a parent's self-loop, except where re-entry lands", async () => {
+    const root = await makeRepo({
+      "src/p.ts": ts("@state P", "@state-next P on:reset"),
+      "src/a.ts": `${ts("@state A", "@state-parent P", "@state-initial", "@state-route /a")}router.push("/b");\n`,
+      "src/b.ts": `${ts("@state B", "@state-parent P", "@state-route /b")}router.push("/a");\n`,
+    });
+    const { graph, flat } = await analyze(root, { now: T1 });
+
+    assert.deepEqual(arcs(flat), ["A->A(reset)", "B->A(reset)"]);
+    assert.deepEqual(driftOf(graph), ["A->B"]);
+  });
 });
 
 describe("hierarchy: Mermaid", () => {

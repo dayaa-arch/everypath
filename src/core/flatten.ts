@@ -6,7 +6,7 @@ import type {
   EventName,
   Expr,
   FlowEdge,
-  Graph,
+  GraphModel,
   GuardExpr,
   Leaf,
   ModelVar,
@@ -16,6 +16,7 @@ import type {
   PropertyExpr,
   PropertyId,
   StateName,
+  StateNode,
   StatePred,
   VarAtom,
 } from "./types.js";
@@ -57,6 +58,9 @@ export type FlatPropertyDef = {
     }
 );
 
+/** A `@state-next` as declared, before the code is compared with it (`observed`). */
+export type DeclaredFlow = Omit<FlowEdge, "observed">;
+
 /**
  * One step the model can take, from a leaf to a leaf. A transition declared on a parent is one arc per
  * leaf inside it and per leaf it lands on; its guard may carry the negation of an inner rival's.
@@ -68,7 +72,7 @@ export type FlatArc = {
   readonly guard: GuardExpr | null;
   readonly set: readonly Assignment[];
   /** The `@state-next` this arc comes from. `declared.from` is `from` or one of its ancestors. */
-  readonly declared: FlowEdge;
+  readonly declared: DeclaredFlow;
 };
 
 declare const flattened: unique symbol;
@@ -83,7 +87,8 @@ export type FlatModel = {
   readonly real: readonly Leaf[];
   /**
    * By source leaf, target leaf, event and text: the order `scan` sorts flow edges in, so a graph with
-   * no `@state-parent` keeps its order, and a parent and its hand-flattened twin give one order.
+   * no `@state-parent` keeps its order, and a parent and its hand-flattened twin give one order. Ties
+   * go by the declaration's source and target, so the order never depends on how the flows came in.
    */
   readonly arcs: readonly FlatArc[];
   /** What entering `model.initial` lands on. Empty without a top-level `@state-initial`. */
@@ -118,21 +123,23 @@ export type Flat = {
   readonly ambiguous: readonly StateName[];
 };
 
-type ModelShape = Pick<Graph, "nodes" | "edges" | "model">;
+/** The statechart as the annotations declare it: what flattening reads, before any code is compared. */
+export type Declared = {
+  readonly nodes: readonly StateNode[];
+  readonly flows: readonly DeclaredFlow[];
+  readonly deps: readonly DepEdge[];
+  readonly model: GraphModel;
+};
 
 const NONE: readonly never[] = [];
 
 const compareText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-function flowsOf(graph: ModelShape): FlowEdge[] {
-  return graph.edges.filter((edge): edge is FlowEdge => edge.type === "flow");
-}
-
 /** SPEC §5 `@state-parent`: the statechart with every parent replaced by the leaves inside it. */
-export function flattenModel(graph: ModelShape): FlatModel {
+export function flattenModel(graph: Declared): FlatModel {
   const hierarchy = hierarchyOf(graph.nodes);
-  const flows = flowsOf(graph);
-  const bySource = new Map<StateName, FlowEdge[]>();
+  const { flows } = graph;
+  const bySource = new Map<StateName, DeclaredFlow[]>();
   for (const edge of flows) bySource.set(edge.from, [...(bySource.get(edge.from) ?? []), edge]);
 
   const arcs: FlatArc[] = [];
@@ -151,7 +158,9 @@ export function flattenModel(graph: ModelShape): FlatModel {
       compareText(a.from, b.from) ||
       compareText(a.to, b.to) ||
       compareText(a.event ?? "", b.event ?? "") ||
-      compareText(a.declared.text, b.declared.text),
+      compareText(a.declared.text, b.declared.text) ||
+      compareText(a.declared.from, b.declared.from) ||
+      compareText(a.declared.to, b.declared.to),
   );
 
   const groups = new Map<string, StateName[]>();
@@ -167,7 +176,7 @@ export function flattenModel(graph: ModelShape): FlatModel {
     initial: graph.model.initial === null ? NONE : hierarchy.enter(graph.model.initial),
     vars: graph.model.vars,
     events: graph.model.events,
-    deps: graph.edges.filter((edge): edge is DepEdge => edge.type === "dep"),
+    deps: graph.deps,
     groups,
   });
 }
@@ -187,10 +196,10 @@ const SHADOWED = Symbol("shadowed");
  * shadows.
  */
 function guardAt(
-  edge: FlowEdge,
+  edge: DeclaredFlow,
   source: Leaf,
   hierarchy: Hierarchy,
-  bySource: ReadonlyMap<StateName, readonly FlowEdge[]>,
+  bySource: ReadonlyMap<StateName, readonly DeclaredFlow[]>,
 ): GuardExpr | null | typeof SHADOWED {
   if (edge.from === source || edge.event === null) return edge.guard;
   const chain = [source, ...hierarchy.ancestorsOf(source)];
@@ -360,7 +369,7 @@ function mentions(def: PropertyDef): readonly (readonly [string, readonly StateN
  * differently. A name no state has is a typo more often than a choice: it is reported and judged as
  * an empty set, as before.
  */
-export function flatten(graph: ModelShape, file: PropertiesFile): Flat {
+export function flatten(graph: Declared, file: PropertiesFile): Flat {
   const model = flattenModel(graph);
   const { hierarchy } = model;
   const unknown: UnknownName[] = [];
@@ -378,7 +387,7 @@ export function flatten(graph: ModelShape, file: PropertiesFile): Flat {
     }
   }
   const start = file.entry ?? (graph.model.initial === null ? NONE : [graph.model.initial]);
-  const entered = [...flowsOf(graph).map((edge) => edge.to), ...start];
+  const entered = [...graph.flows.map((edge) => edge.to), ...start];
   return {
     model,
     entry: entryOf(model, file),

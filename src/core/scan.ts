@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { basename, posix, resolve } from "node:path";
 import { type Notes, readNotes } from "./annotations.js";
 import { sanitizeStateName } from "./expr.js";
-import { type Flat, flatten } from "./flatten.js";
+import { type DeclaredFlow, type Flat, type FlatArc, type FlatModel, flatten } from "./flatten.js";
 import {
   type Hierarchy,
   type HierarchyProblem,
@@ -69,9 +69,6 @@ type FileFacts = {
 type Member = { readonly file: FileFacts; readonly id: StateName };
 
 type Link = { readonly from: StateName; readonly to: StateName; readonly via: readonly string[] };
-
-/** A `@state-next` edge before the code is compared with it. */
-type DeclaredFlow = Omit<FlowEdge, "observed">;
 
 /**
  * SPEC §8. Reads the repository and folds it into the graph without writing anything. The TLA+ lane
@@ -179,9 +176,7 @@ function fold(
   const flows = collectFlows(members, new Map(model.vars.map((decl) => [decl.name, decl])));
   const tree = collectTree(members, flows.edges);
   const hierarchy = hierarchyOf(tree.nodes);
-  const observed = collectObserved(members);
-  const { flowEdges, observedEdges, drift } = checkDrift(flows.edges, observed.links, hierarchy);
-  const edges = [...collectDeps(members), ...flowEdges, ...observedEdges].sort(compareEdges);
+  const deps = collectDeps(members);
   const built = collectNodes(members, tree.nodes, hierarchy, {
     tested: testedFiles(facts),
     findings: groupBy([...workspace.findings].sort(compareFindings), (finding) => finding.file),
@@ -194,7 +189,13 @@ function fold(
     vars: model.vars,
     events: [...new Set([...model.events, ...flows.events])].sort(compareText),
   };
-  const flat = flatten({ nodes: built, edges, model: graphModel }, workspace.properties);
+  const flat = flatten(
+    { nodes: built, flows: flows.edges, deps, model: graphModel },
+    workspace.properties,
+  );
+  const observed = collectObserved(members);
+  const { flowEdges, observedEdges, drift } = checkDrift(flows.edges, observed.links, flat.model);
+  const edges = [...deps, ...flowEdges, ...observedEdges].sort(compareEdges);
   const checked = checkProperties(flat, at);
   const properties = withTlcResults(flat, checked.properties, workspace.tlc);
   const violations = violationsOf(properties);
@@ -507,32 +508,36 @@ function collectObserved(members: readonly Member[]) {
 }
 
 /**
- * Compares the code with the declaration by `(from, to)`: code shows no event or guard. A call that
- * no flow declares is drift. A flow that no call takes is only unobserved, because a missing call
- * proves nothing. A flow covers a call when its source holds the caller (a parent's `@state-next`
- * holds for every state inside it) and its target holds the callee; without `@state-parent` both are
- * equality.
+ * Compares the code with the declaration on the arcs of the flat model: code shows no event or guard.
+ * A call no arc takes is drift. A flow no call takes is only unobserved, because a missing call proves
+ * nothing. An arc takes a call when it leaves a leaf inside the caller, under a `@state-next` whose
+ * source holds the caller and whose target holds the callee, so a parent's transition an inner one
+ * shadowed takes no call from that leaf. When the caller is already inside that target (a parent's
+ * self-loop, a move up to an ancestor), the arc must land inside the callee: re-entering lands where
+ * entering does. Without `@state-parent` this is `(from, to)` equality.
  */
 function checkDrift(
   declared: readonly DeclaredFlow[],
   observed: readonly Link[],
-  hierarchy: Hierarchy,
+  { arcs, hierarchy }: FlatModel,
 ) {
-  const pair = (from: StateName, to: StateName): string => JSON.stringify([from, to]);
-  const declaredPairs = new Set(declared.map(({ from, to }) => pair(from, to)));
-  /** Every pair a flow could be declared on to cover the call: an ancestor-or-self of each end. */
-  const covering = ({ from, to }: Link): string[] =>
-    [from, ...hierarchy.ancestorsOf(from)].flatMap((source) =>
-      [to, ...hierarchy.ancestorsOf(to)].map((target) => pair(source, target)),
-    );
-  const seen = new Set(observed.flatMap(covering));
-  const undeclared = observed.filter(
-    (link) => !covering(link).some((key) => declaredPairs.has(key)),
-  );
+  const arcsOf = groupBy(arcs, (arc) => arc.declared);
+  const bySource = groupBy(declared, (edge) => edge.from);
+  const takes = (arc: FlatArc, { from, to }: Link): boolean =>
+    hierarchy.contains(from, arc.from) &&
+    (hierarchy.contains(arc.declared.to, from)
+      ? hierarchy.contains(to, arc.to)
+      : hierarchy.contains(arc.declared.to, to));
+  const taken = new Set<DeclaredFlow>();
+  const undeclared = observed.filter((link) => {
+    const flows = [link.from, ...hierarchy.ancestorsOf(link.from)]
+      .flatMap((source) => bySource.get(source) ?? [])
+      .filter((edge) => (arcsOf.get(edge) ?? []).some((arc) => takes(arc, link)));
+    for (const edge of flows) taken.add(edge);
+    return flows.length === 0;
+  });
   return {
-    flowEdges: declared.map(
-      (edge): FlowEdge => ({ ...edge, observed: seen.has(pair(edge.from, edge.to)) }),
-    ),
+    flowEdges: declared.map((edge): FlowEdge => ({ ...edge, observed: taken.has(edge) })),
     observedEdges: undeclared.map(
       (link): ObservedEdge => ({ type: "observed", ...link, declared: false, observed: true }),
     ),

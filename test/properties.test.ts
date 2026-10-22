@@ -4,7 +4,7 @@ import { flatten } from "../src/core/flatten.js";
 import { checkProperties, PROPERTIES_FILE, parseProperties } from "../src/core/properties.js";
 import { scan } from "../src/core/scan.js";
 import type { Graph, PropertyResult } from "../src/core/types.js";
-import { makeRepo, node, readGraph, runCli, ts } from "./helpers/repo.js";
+import { deps, flows, makeRepo, node, readGraph, runCli, ts } from "./helpers/repo.js";
 
 const T1 = new Date("2026-10-21T00:00:00.000Z");
 
@@ -484,7 +484,13 @@ describe("properties: speed", () => {
     assert.deepEqual(warnings, []);
 
     const started = performance.now();
-    const checked = checkProperties(flatten(graph, file), graph.generatedAt);
+    const declared = {
+      nodes: graph.nodes,
+      flows: flows(graph),
+      deps: deps(graph),
+      model: graph.model,
+    };
+    const checked = checkProperties(flatten(declared, file), graph.generatedAt);
     const elapsed = performance.now() - started;
 
     assert.equal(checked.properties.length, 4);
