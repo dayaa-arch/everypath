@@ -1,0 +1,5 @@
+SPECIFICATION Spec
+INVARIANT P1_no_unauth_home
+INVARIANT P2_lock_after_3
+INVARIANT TypeOK
+PROPERTY P3_logout_eventually_login

@@ -1,0 +1,166 @@
+---- MODULE Model ----
+\* everypath が注釈から生成した。手で直さず、注釈を直して作り直す
+EXTENDS Naturals
+
+\* S1 = DB層
+\* S2_Home = Home
+\* S3 = パスワードリセット
+\* S4 = マイページ
+\* S5 = ログアウト
+\* S6 = ログイン
+\* S7 = ロック
+\* S8 = 新規登録
+States == {"S1", "S2_Home", "S3", "S4", "S5", "S6", "S7", "S8"}
+
+\* tau = イベント無しの遷移
+\* e1_back = back
+\* e2_cancel = cancel
+\* e3_code_invalid = code_invalid
+\* e4_login_fail = login_fail
+\* e5_login_ok = login_ok
+\* e6_logout = logout
+\* e7_open_mypage = open_mypage
+\* e8_reset_done = reset_done
+\* e9_signup_done = signup_done
+Events == {"tau", "e1_back", "e2_cancel", "e3_code_invalid", "e4_login_fail", "e5_login_ok", "e6_logout", "e7_open_mypage", "e8_reset_done", "e9_signup_done"}
+
+\* v1_authed = authed
+\* v2_retries = retries
+VARIABLES state, v1_authed, v2_retries, lastEvent
+vars == <<state, v1_authed, v2_retries, lastEvent>>
+
+TypeOK ==
+  /\ state \in States
+  /\ v1_authed \in BOOLEAN
+  /\ v2_retries \in 0..3
+  /\ lastEvent \in Events
+
+\* 入口: ログイン
+Init ==
+  /\ state \in {"S6"}
+  /\ v1_authed = FALSE
+  /\ v2_retries = 0
+  /\ lastEvent = "tau"
+
+\* src/home.ts: @state-next マイページ on:open_mypage
+A1 ==
+  /\ state = "S2_Home"
+  /\ state' = "S4"
+  /\ lastEvent' = "e7_open_mypage"
+  /\ UNCHANGED <<v1_authed, v2_retries>>
+
+\* src/auth/reset.ts: @state-next Home on:reset_done
+A2 ==
+  /\ state = "S3"
+  /\ state' = "S2_Home"
+  /\ lastEvent' = "e8_reset_done"
+  /\ UNCHANGED <<v1_authed, v2_retries>>
+
+\* src/auth/reset.ts: @state-next パスワードリセット on:code_invalid
+A3 ==
+  /\ state = "S3"
+  /\ state' = "S3"
+  /\ lastEvent' = "e3_code_invalid"
+  /\ UNCHANGED <<v1_authed, v2_retries>>
+
+\* src/auth/reset.ts: @state-next ログイン on:cancel
+A4 ==
+  /\ state = "S3"
+  /\ state' = "S6"
+  /\ lastEvent' = "e2_cancel"
+  /\ UNCHANGED <<v1_authed, v2_retries>>
+
+\* src/mypage.ts: @state-next Home on:back
+A5 ==
+  /\ state = "S4"
+  /\ state' = "S2_Home"
+  /\ lastEvent' = "e1_back"
+  /\ UNCHANGED <<v1_authed, v2_retries>>
+
+\* src/mypage.ts: @state-next ログアウト on:logout set:authed=FALSE
+A6 ==
+  /\ state = "S4"
+  /\ state' = "S5"
+  /\ v1_authed' = FALSE
+  /\ lastEvent' = "e6_logout"
+  /\ UNCHANGED <<v2_retries>>
+
+\* src/auth/logout.ts: @state-next ログイン
+A7 ==
+  /\ state = "S5"
+  /\ state' = "S6"
+  /\ lastEvent' = "tau"
+  /\ UNCHANGED <<v1_authed, v2_retries>>
+
+\* src/auth/login.ts: @state-next Home on:login_ok set:authed=TRUE, retries=0
+A8 ==
+  /\ state = "S6"
+  /\ state' = "S2_Home"
+  /\ v1_authed' = TRUE
+  /\ v2_retries' = 0
+  /\ lastEvent' = "e5_login_ok"
+
+\* src/auth/login.ts: @state-next パスワードリセット
+A9 ==
+  /\ state = "S6"
+  /\ state' = "S3"
+  /\ lastEvent' = "tau"
+  /\ UNCHANGED <<v1_authed, v2_retries>>
+
+\* src/auth/login.ts: @state-next ログイン on:login_fail if:retries<3 set:retries=retries+1
+A10 ==
+  /\ state = "S6"
+  /\ v2_retries < 3
+  /\ state' = "S6"
+  /\ v2_retries' = v2_retries + 1
+  /\ lastEvent' = "e4_login_fail"
+  /\ UNCHANGED <<v1_authed>>
+
+\* src/auth/login.ts: @state-next ロック on:login_fail if:retries==3
+A11 ==
+  /\ state = "S6"
+  /\ v2_retries = 3
+  /\ state' = "S7"
+  /\ lastEvent' = "e4_login_fail"
+  /\ UNCHANGED <<v1_authed, v2_retries>>
+
+\* src/auth/login.ts: @state-next 新規登録
+A12 ==
+  /\ state = "S6"
+  /\ state' = "S8"
+  /\ lastEvent' = "tau"
+  /\ UNCHANGED <<v1_authed, v2_retries>>
+
+\* src/auth/signup.ts: @state-next ログイン on:signup_done
+A13 ==
+  /\ state = "S8"
+  /\ state' = "S6"
+  /\ lastEvent' = "e9_signup_done"
+  /\ UNCHANGED <<v1_authed, v2_retries>>
+
+Next ==
+  \/ A1
+  \/ A2
+  \/ A3
+  \/ A4
+  \/ A5
+  \/ A6
+  \/ A7
+  \/ A8
+  \/ A9
+  \/ A10
+  \/ A11
+  \/ A12
+  \/ A13
+
+Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
+
+\* everypath.properties.json: no-unauth-home（未認証で Home・マイページにいない）
+P1_no_unauth_home == (state \in {"S2_Home", "S4"} => v1_authed = TRUE)
+
+\* everypath.properties.json: lock-after-3（4 回目の失敗は存在しない）
+P2_lock_after_3 == v2_retries <= 3
+
+\* everypath.properties.json: logout-eventually-login（ログアウトしたら必ずログイン画面に戻る）
+P3_logout_eventually_login == state \in {"S5"} ~> state \in {"S6"}
+====

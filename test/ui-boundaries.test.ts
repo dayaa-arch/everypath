@@ -56,7 +56,7 @@ const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(?\s*)["']([^"']+)["']/g;
  * The core modules the page may load. None of them loads anything but the types file's types, so
  * allowing them cannot let Node in (see below).
  */
-const SHARED_CORE = ["types", "prompts", "expr", "verdict"] as const;
+const SHARED_CORE = ["types", "prompts", "expr", "verdict", "hierarchy"] as const;
 
 /** An import of Node, of the server, or of core code outside `SHARED_CORE`. */
 async function strayImports(dir: string): Promise<Finding[]> {
@@ -165,6 +165,7 @@ describe("src/ui imports only itself, the shared core modules and packages", () 
         'import { fillTemplate } from "../core/prompts.js";',
         'import { edgeLabel } from "../core/expr.js";',
         'import { isLiveViolation } from "../core/verdict.js";',
+        'import { hierarchyOf } from "../core/hierarchy.js";',
         'import { place } from "./layout.js";',
         'import { graphlib } from "@dagrejs/dagre";',
       ].join("\n"),
@@ -204,8 +205,8 @@ function withoutTypeImports(text: string): string {
   return text.replace(/^import\s+type\s+\{[^}]*\}\s+from\s+"\.\/types\.js";$/gm, "");
 }
 
-describe("src/core/expr.ts and src/core/verdict.ts, which src/ui loads", () => {
-  for (const name of ["expr", "verdict"]) {
+describe("src/core/expr.ts, verdict.ts and hierarchy.ts, which src/ui loads", () => {
+  for (const name of ["expr", "verdict", "hierarchy"]) {
     it(`${name}.ts loads nothing but the types of the types file`, async () => {
       const text = await readFile(
         fileURLToPath(new URL(`../src/core/${name}.ts`, import.meta.url)),

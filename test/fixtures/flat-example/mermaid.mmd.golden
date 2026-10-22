@@ -1,0 +1,25 @@
+stateDiagram-v2
+    classDef violated fill:#f8cecc,stroke:#c62828,stroke-width:3px,color:#222222
+    classDef planned fill:#ffffff,stroke:#8c8c8c,stroke-width:1.5px,stroke-dasharray:6 4,color:#8c8c8c
+    s1 : DB層
+    s2 : Home
+    s3 : パスワードリセット
+    s4 : マイページ
+    s5 : ログアウト
+    s6 : ログイン
+    s7 : ロック
+    s8 : 新規登録
+    [*] --> s6
+    s2 --> s4 : open_mypage
+    s3 --> s2 : reset_done
+    s3 --> s3 : code_invalid
+    s3 --> s6 : cancel
+    s4 --> s2 : back
+    s4 --> s5 : logout
+    s5 --> s6
+    s6 --> s2 : login_ok
+    s6 --> s3
+    s6 --> s6 : login_fail [retries<3]
+    s6 --> s7 : login_fail [retries==3]
+    s6 --> s8
+    s8 --> s6 : signup_done
