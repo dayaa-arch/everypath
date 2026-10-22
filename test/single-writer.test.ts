@@ -10,15 +10,19 @@ import { openWriter, type Published } from "../src/server/writer.js";
 import { makeRepo, ts, writeFiles } from "./helpers/repo.js";
 
 /**
- * A structural test: R-01 holds because writes to disk have two homes, and the server's writes go
+ * A structural test: R-01 holds because writes to disk have three homes, and the server's writes go
  * through the queue instead of calling the writers itself. This reads the imports of `src/**` and
  * fails when a file reaches around that.
  */
 
 const SRC = fileURLToPath(new URL("../src", import.meta.url));
 
-/** The only files allowed to write: `.everypath/` output and the TLC run directory. */
-const WRITERS: ReadonlySet<string> = new Set(["core/workspace.ts", "core/tla/run.ts"]);
+/** The only files allowed to write: `.everypath/` output, the TLC run directory and `init`'s templates. */
+const WRITERS: ReadonlySet<string> = new Set([
+  "core/workspace.ts",
+  "core/tla/run.ts",
+  "core/init.ts",
+]);
 
 const FS_MODULE = /^(?:node:)?fs(?:\/promises)?$/;
 
@@ -150,7 +154,7 @@ async function inspect(directory: string): Promise<{
 }
 
 describe("single writer", () => {
-  it("lets only src/core/workspace.ts and src/core/tla/run.ts write, and keeps src/server/ off the writers", async () => {
+  it("lets only workspace.ts, tla/run.ts and init.ts in src/core/ write, and keeps src/server/ off the writers", async () => {
     const { writers, violations } = await inspect(SRC);
 
     assert.deepEqual(violations, []);
