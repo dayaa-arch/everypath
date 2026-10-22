@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Flat, FlatArc, FlatModel, FlatPropertyDef, LeafExpr } from "../flatten.js";
+import { listed } from "../listing.js";
 import { checkComparison, type VarTable } from "../model.js";
 import type {
   Assignment,
@@ -15,6 +16,21 @@ import type {
 
 /** The name of the range check. Property checks are `P`, a digit and a name, so none can be it. */
 export const TYPE_OK = "TypeOK";
+
+/**
+ * The most arcs Model.tla gets one action each for. TLC tries every action in every state, so its
+ * time grows with arcs times states. Measured with TLC 1.7.4 (`-workers auto`) on a guarded
+ * self-loop of a parent: 10,000 arcs took 5 s, 20,000 took 8 s (a 4 MB Model.tla, 565 states; 42 s
+ * in one run beside other work) and 30,000 took 22 s, against the default 120 s budget. A parent
+ * multiplies: a self-loop on one with 1,000 unmarked children is 1,000,000 arcs, a 148 MB Model.tla.
+ */
+export const MAX_ARCS = 20_000;
+
+/**
+ * The most bytes Model.tla may take: twice what `MAX_ARCS` arcs took at the measured 200 bytes each,
+ * so only long guards reach it. An inherited arc carries the negation of every inner rival's guard.
+ */
+export const MAX_TLA_BYTES = 8 * 1024 * 1024;
 
 /** ASCII identifier to display name. TLC prints only the keys; `result.json` stores the whole table. */
 export type TlaNames = {
@@ -345,12 +361,13 @@ function nextOf(actions: readonly string[], history: readonly History[], naming:
   ];
 }
 
+/** Model.tla, or `null` as soon as it would pass `MAX_TLA_BYTES`. */
 function render(
   model: FlatModel,
   entry: readonly Leaf[],
   accepted: readonly TlcDef[],
   naming: Naming,
-): string {
+): string | null {
   const { vars } = model;
   const names = (table: Table<string>) => [...table.id.values()];
   const history = [...naming.history.values()];
@@ -361,6 +378,14 @@ function render(
     ...history.map(({ name }) => name),
   ].join(", ");
   const actions = model.arcs.map((arc, index) => ({ arc, name: `A${index + 1}` }));
+  const written: string[][] = [];
+  let bytes = 0;
+  for (const { arc, name } of actions) {
+    const text = action(arc, name, model, naming);
+    bytes += Buffer.byteLength(text);
+    if (bytes > MAX_TLA_BYTES) return null;
+    written.push([text]);
+  }
   const blocks = [
     [
       "---- MODULE Model ----",
@@ -404,7 +429,7 @@ function render(
         ...history.map(({ name, avoid }) => `${name} = (state \\in ${stateSet(avoid, naming)})`),
       ]),
     ],
-    ...actions.map(({ arc, name }) => [action(arc, name, model, naming)]),
+    ...written,
     nextOf(
       actions.map(({ name }) => name),
       history,
@@ -413,7 +438,8 @@ function render(
     ["Spec == Init /\\ [][Next]_vars /\\ WF_vars(Next)"],
     ...accepted.map((def) => [definition(def, nameOf(naming.checks, def.id), naming)]),
   ];
-  return `${blocks.map((block) => block.join("\n")).join("\n\n")}\n====\n`;
+  const tla = `${blocks.map((block) => block.join("\n")).join("\n\n")}\n====\n`;
+  return Buffer.byteLength(tla) > MAX_TLA_BYTES ? null : tla;
 }
 
 /**
@@ -426,24 +452,74 @@ export function modelKey({ tla, names }: Pick<TlaModel, "tla" | "names">): strin
   return createHash("sha1").update(read.join("\n")).update(JSON.stringify(names)).digest("hex");
 }
 
+/** Why no Model.tla was made. `too-large` names the parents whose arcs made it so, most arcs first. */
+export type Unmodeled =
+  | { readonly ok: false; readonly kind: "no-entry"; readonly reason: string }
+  | {
+      readonly ok: false;
+      readonly kind: "too-large";
+      readonly reason: string;
+      readonly parents: readonly StateName[];
+    };
+
+export type Generated = { readonly ok: true; readonly model: TlaModel } | Unmodeled;
+
+/**
+ * The parents a transition was declared on or into, by how many arcs they spread it to, most first.
+ * An arc a leaf declared to a leaf counts for none.
+ */
+function spreading(model: FlatModel): { readonly id: StateName; readonly arcs: number }[] {
+  const counts = new Map<StateName, number>();
+  for (const { declared } of model.arcs) {
+    for (const end of new Set([declared.from, declared.to])) {
+      if (!model.hierarchy.isLeaf(end)) counts.set(end, (counts.get(end) ?? 0) + 1);
+    }
+  }
+  return [...counts]
+    .map(([id, arcs]) => ({ id, arcs }))
+    .sort((a, b) => b.arcs - a.arcs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+function tooLarge(model: FlatModel, over: string): Unmodeled {
+  const parents = spreading(model);
+  const named =
+    parents.length === 0
+      ? ""
+      : `。遷移を増やしている親: ${listed(
+          parents.map(({ id, arcs }) => `${id}（${arcs} 本）`),
+          "、",
+        )}`;
+  return {
+    ok: false,
+    kind: "too-large",
+    reason: `${over}ので、Model.tla を作りません（TLC は動かず、簡易検査だけで判定します）${named}`,
+    parents: parents.map(({ id }) => id),
+  };
+}
+
 /**
  * SPEC §10.1. `invariant`, `leads-to` and `never-reach` become TLA+; every other kind stays with the
  * BFS lane. A never-reach is checked with the invariants, where TLC follows the guards the BFS lane
- * ignores. Fails as a whole only without an entry state: Init would be empty and TLC would call that
- * a success.
+ * ignores. Fails as a whole without an entry state (Init would be empty and TLC would call that a
+ * success) and past `MAX_ARCS` or `MAX_TLA_BYTES`, which it finds before building the text. Never
+ * throws: every scan with a stored TLC result calls it.
  */
-export function generateTla(
-  flat: Flat,
-):
-  | { readonly ok: true; readonly model: TlaModel }
-  | { readonly ok: false; readonly reason: string } {
+export function generateTla(flat: Flat): Generated {
   const entry = flat.entry;
   if (entry.length === 0) {
     return {
       ok: false,
+      kind: "no-entry",
       reason:
         "入口にする状態がありません（entry も @state-initial も入エッジの無い状態も無い）。TLA+ の Init を作れません",
     };
+  }
+  const { arcs } = flat.model;
+  if (arcs.length > MAX_ARCS) {
+    return tooLarge(
+      flat.model,
+      `平らにした遷移が ${arcs.length} 本で、上限 ${MAX_ARCS} 本を超える`,
+    );
   }
   const vars: VarTable = new Map(flat.model.vars.map((decl) => [decl.name, decl]));
   const accepted: TlcDef[] = [];
@@ -460,11 +536,16 @@ export function generateTla(
   const invariants = [...accepted.filter((def) => def.kind !== "leads-to").map(checkName), TYPE_OK];
   const temporal = accepted.filter((def) => def.kind === "leads-to").map(checkName);
   const events: Record<string, EventName | null> = { tau: null, ...naming.events.back };
+  const tla = render(flat.model, entry, accepted, naming);
+  if (tla === null) {
+    const limit = MAX_TLA_BYTES / 1024 / 1024;
+    return tooLarge(flat.model, `Model.tla が上限 ${limit} MB を超える`);
+  }
 
   return {
     ok: true,
     model: {
-      tla: render(flat.model, entry, accepted, naming),
+      tla,
       cfg: (checks) => {
         const invariant = checks.filter((check) => invariants.includes(check));
         return `${[

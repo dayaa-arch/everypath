@@ -588,6 +588,64 @@ describe("hierarchy: a parent is a shorthand, never a different model", () => {
   });
 });
 
+describe("hierarchy: a model too large for TLC", () => {
+  /** P holds `children` unmarked children; S enters P. A stored result.json makes every scan generate. */
+  const parentWith = (children: number, p: string): Record<string, string> => {
+    const files: Record<string, string> = {
+      "src/p.ts": p,
+      "src/s.ts": ts("@state S", "@state-initial", "@state-next P on:go"),
+      "everypath.properties.json": JSON.stringify({
+        properties: [{ id: "no-c1", kind: "never-reach", target: ["C1"] }],
+      }),
+      ".everypath/tla/result.json": JSON.stringify({ version: 1, key: "old", properties: [] }),
+    };
+    for (let index = 0; index < children; index++) {
+      files[`src/c${index}.ts`] = ts(`@state C${index}`, "@state-parent P");
+    }
+    return files;
+  };
+  const tooLarge = (graph: Graph) =>
+    graph.warnings.filter((warning) => warning.message.includes("Model.tla を作りません"));
+
+  it("skips Model.tla for the 1,000-children arc explosion and names the parent; the scan and the quick check go on", async () => {
+    const root = await makeRepo(parentWith(1000, ts("@state P", "@state-next P on:reset")));
+    const { graph, flat } = await analyze(root, { now: T1 });
+
+    assert.equal(flat.model.arcs.length, 1000 * 1000 + 1000);
+    const generated = generateTla(flat);
+    assert.ok(!generated.ok);
+    assert.match(generated.reason, /1001000 本で、上限 20000 本/);
+    const [warning, ...others] = tooLarge(graph);
+    assert.deepEqual(others, []);
+    assert.equal(warning?.message, generated.reason);
+    assert.match(warning?.message ?? "", /親: P（1001000 本）/);
+    assert.equal(warning?.file, "src/p.ts");
+    assert.equal(graph.properties.find((p) => p.id === "no-c1")?.result, "violated");
+  });
+
+  it("skips Model.tla once its text would pass 8 MB, with few arcs and one long guard", async () => {
+    const guard = Array.from({ length: 10_000 }, (_, index) => `n == ${index % 4}`).join(" || ");
+    const root = await makeRepo(
+      parentWith(
+        100,
+        ts("@state P", "@state-var n: 0..3 = 0", `@state-next S on:back if:${guard}`),
+      ),
+    );
+    const { graph, flat } = await analyze(root, { now: T1 });
+
+    assert.ok(flat.model.arcs.length < 20_000);
+    const generated = generateTla(flat);
+    assert.ok(!generated.ok);
+    assert.match(generated.reason, /Model.tla が上限 8 MB を超える/);
+    assert.equal(tooLarge(graph).length, 1);
+  });
+
+  it("warns about nothing for a model inside both budgets", async () => {
+    const { graph } = await analyze(await makeRepo(parentWith(3, ts("@state P"))), { now: T1 });
+    assert.deepEqual(tooLarge(graph), []);
+  });
+});
+
 describe("hierarchy: drift", () => {
   it("counts a child's call as declared when its parent declares the transition", async () => {
     const root = await makeRepo({

@@ -23,6 +23,7 @@ import { type ImportContext, resolveImports } from "./imports.js";
 import { resolveNext, type VarTable } from "./model.js";
 import { checkProperties, violationsOf } from "./properties.js";
 import { navigationPaths, resolveRoute, routeTable } from "./routes.js";
+import { generateTla, type Unmodeled } from "./tla/generate.js";
 import { withTlcResults } from "./tla/result.js";
 import type {
   DepEdge,
@@ -210,7 +211,8 @@ function fold(
   const { flowEdges, observedEdges, drift } = checkDrift(flows.edges, observed.links, flat.model);
   const edges = [...deps, ...flowEdges, ...observedEdges].sort(compareEdges);
   const checked = checkProperties(flat, at);
-  const properties = withTlcResults(flat, checked.properties, workspace.tlc);
+  const tla = generateTla(flat);
+  const properties = withTlcResults(tla, checked.properties, workspace.tlc);
   const violations = violationsOf(properties);
   const nodes = built.map((node) => ({ ...node, violations: violations.get(node.id) ?? [] }));
   const real = nodes.filter((node) => !node.status.planned && node.container !== true);
@@ -244,6 +246,7 @@ function fold(
       ...observed.warnings,
       ...tree.warnings,
       ...flat.ambiguous.map((id) => ambiguityWarning(id, hierarchy, tree.locate)),
+      ...(tla.ok || tla.kind !== "too-large" ? [] : [tooLargeWarning(tla, tree.locate)]),
       ...checked.warnings,
     ].sort(compareWarnings),
   };
@@ -422,6 +425,15 @@ function ambiguityWarning(id: StateName, hierarchy: Hierarchy, locate: Locate): 
     message: `${id} の子（${children}）のどれにも @state-initial がありません。${id} への遷移はすべての子に入るとみなします。入る子に @state-initial を書いてください`,
     detail: null,
   };
+}
+
+/** Why TLC will not run, at the parent that spread the most arcs. */
+function tooLargeWarning(
+  { reason, parents: [first] }: Extract<Unmodeled, { kind: "too-large" }>,
+  locate: Locate,
+): ScanWarning {
+  const at = first === undefined ? { file: null, line: null } : locate(first);
+  return { ...at, message: reason, detail: null };
 }
 
 /**
