@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { printGuard } from "../src/core/expr.js";
 import type { Flat } from "../src/core/flatten.js";
-import { MAX_DEPTH } from "../src/core/hierarchy.js";
+import { hierarchyOf, MAX_DEPTH, resolveHierarchy } from "../src/core/hierarchy.js";
 import { toMermaid } from "../src/core/mermaid.js";
 import { checkProperties } from "../src/core/properties.js";
 import { analyze, scan } from "../src/core/scan.js";
@@ -225,6 +225,42 @@ describe("hierarchy: entering a parent", () => {
 });
 
 describe("hierarchy: a tree that is not a tree never stops a scan (R-04)", () => {
+  const chainOf = (length: number) => Array.from({ length }, (_, index) => name(`L${index}`));
+
+  it("cuts every fourth link of a 2,000-link chain, the shallowest first, in under 100 ms", () => {
+    const chain = chainOf(2000);
+    const parents = chain.slice(1).map((node, index) => ({
+      node,
+      parent: chain[index] ?? node,
+      file: `src/${node}.ts`,
+      line: 2,
+    }));
+    const started = performance.now();
+    const { nodes, problems } = resolveHierarchy({ nodes: chain, parents, initials: [] });
+    const elapsed = performance.now() - started;
+
+    assert.deepEqual(
+      problems.map((problem) => (problem.kind === "parent-too-deep" ? problem.claim.node : "?")),
+      chain.filter((_, index) => index > 0 && index % (MAX_DEPTH + 1) === 0),
+    );
+    const tree = hierarchyOf(nodes);
+    assert.ok(chain.every((id) => tree.ancestorsOf(id).length <= MAX_DEPTH));
+    assert.ok(elapsed < 100, `${Math.round(elapsed)} ms`);
+  });
+
+  it("caps the depth of a hand-edited graph.json, so a 20,000-link chain overflows no stack", () => {
+    const chain = chainOf(20_000);
+    const tree = hierarchyOf(
+      chain.map((id, index) => {
+        const parent = chain[index - 1];
+        return parent === undefined ? { id } : { id, parent };
+      }),
+    );
+
+    assert.deepEqual(tree.within(name("L0")), ["L3"]);
+    assert.deepEqual(tree.ancestorsOf(name("L19999")), ["L19998", "L19997", "L19996"]);
+  });
+
   it("drops the links of cycles and of a pile too deep, keeps every node, warns once each, exits 0", async () => {
     const chain = Array.from({ length: MAX_DEPTH + 2 }, (_, index) => `L${index}`);
     const files: Record<string, string> = {

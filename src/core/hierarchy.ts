@@ -62,8 +62,8 @@ function memo<T>(compute: (id: StateName) => T): (id: StateName) => T {
 
 /**
  * Builds the tree from the `parent` links. The scanner has validated them (`resolveHierarchy`), but a
- * hand-edited graph.json must not hang the viewer, so a link to an unknown state, to itself, or on a
- * cycle is ignored here as well.
+ * hand-edited graph.json must not hang or overflow the viewer, so a link to an unknown state, to
+ * itself, on a cycle or too deep is ignored here as well.
  */
 export function hierarchyOf(nodes: readonly TreeNode[]): Hierarchy {
   const ids = [...new Set(nodes.map((node) => node.id))].sort(compare);
@@ -75,6 +75,7 @@ export function hierarchyOf(nodes: readonly TreeNode[]): Hierarchy {
     if (initialChild !== undefined) marks.set(id, initialChild);
   }
   for (const id of onCycles(ids, links)) links.delete(id);
+  cutTooDeep(ids, links);
 
   const children = new Map<StateName, StateName[]>();
   for (const id of ids) {
@@ -162,6 +163,37 @@ function onCycles(
     for (const id of path) settled.add(id);
   }
   return cyclic;
+}
+
+/**
+ * Deletes from `links` (acyclic) each link that puts a state more than `MAX_DEPTH` below a root. Only
+ * the shallowest layer that is too deep loses its links; what is under a cut state is measured again
+ * from it. One pass from the roots down, so a chain costs its length. Returns the cut states, layer by
+ * layer, each layer in id order.
+ */
+function cutTooDeep(ids: readonly StateName[], links: Map<StateName, StateName>): StateName[] {
+  const children = new Map<StateName, StateName[]>();
+  for (const id of ids) {
+    const parent = links.get(id);
+    if (parent === undefined) continue;
+    const siblings = children.get(parent);
+    if (siblings === undefined) children.set(parent, [id]);
+    else siblings.push(id);
+  }
+  const cut: { readonly id: StateName; readonly layer: number }[] = [];
+  const queue = ids.filter((id) => !links.has(id)).map((id) => ({ id, depth: 0, layer: 0 }));
+  for (const { id, depth, layer } of queue) {
+    for (const child of children.get(id) ?? []) {
+      if (depth < MAX_DEPTH) {
+        queue.push({ id: child, depth: depth + 1, layer });
+        continue;
+      }
+      links.delete(child);
+      cut.push({ id: child, layer: layer + 1 });
+      queue.push({ id: child, depth: 0, layer: layer + 1 });
+    }
+  }
+  return cut.sort((a, b) => a.layer - b.layer || compare(a.id, b.id)).map(({ id }) => id);
 }
 
 /** One file's `@state-parent`. */
@@ -253,19 +285,9 @@ export function resolveHierarchy(input: {
   }
   for (const id of cyclic) links.delete(id);
 
-  // Only the shallowest layer that is too deep loses its links; then the rest is measured again.
-  const depth = (id: StateName): number => {
-    let count = 0;
-    for (let at = links.get(id); at !== undefined; at = links.get(at)) count++;
-    return count;
-  };
-  for (let deep = ids.filter((id) => depth(id) === MAX_DEPTH + 1); deep.length > 0; ) {
-    for (const id of deep) {
-      const claim = kept.get(id);
-      if (claim !== undefined) problems.push({ kind: "parent-too-deep", claim });
-      links.delete(id);
-    }
-    deep = ids.filter((id) => depth(id) === MAX_DEPTH + 1);
+  for (const id of cutTooDeep(ids, links)) {
+    const claim = kept.get(id);
+    if (claim !== undefined) problems.push({ kind: "parent-too-deep", claim });
   }
 
   const marks = new Map<StateName | null, InitialClaim>();
