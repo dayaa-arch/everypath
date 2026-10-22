@@ -26,7 +26,7 @@ npx everypath init
 
 | ファイル | 中身 |
 |---|---|
-| `everypath.config.json` | 任意の設定。import の別名（`aliases`）、テストファイルを状態に含めるか（`includeTests`）、無視するパス（`ignore`）、`prove` が使う検証ツール（`proof`） |
+| `everypath.config.json` | 任意の設定。import の別名（`aliases`）、テストファイルを状態に含めるか（`includeTests`）、無視するパス（`ignore`）、`prove` が使う検証ツール（`proof`）、TLC の Java のヒープの上限（`tla.maxHeap`） |
 | `everypath.properties.json` | 性質の定義。最初は空 |
 | `.claude/skills/everypath/SKILL.md` | Claude Code のスキル。エージェントにアノテーションの書き方と守ることを伝える |
 | `.claude/settings.example.json` | Claude Code がファイルを書くたびに `npx everypath scan --quiet` を走らせる hook の例 |
@@ -134,7 +134,7 @@ npx everypath tla install
 npx everypath check --tlc
 ```
 
-`tla install` は `tla2tools.jar` を `~/.everypath/` に置きます。`check --tlc` は変数とガードを含めてすべての経路を調べ、反例を状態、イベント、変数の値の列で出します。簡易検査の違反の経路を TLC がガードどおりには通れないと確かめた場合は、その性質を「ガードを無視したときだけの経路」として出し、終了コードに数えません。タイムアウトは既定で 120 秒で、`--timeout 300` のように秒で変えられます。
+`tla install` は `tla2tools.jar` を `~/.everypath/` に置きます。`check --tlc` は変数とガードを含めてすべての経路を調べ、反例を状態、イベント、変数の値の列で出します。簡易検査の違反の経路を TLC がガードどおりには通れないと確かめた場合は、その性質を「ガードを無視したときだけの経路」として出し、終了コードに数えません。タイムアウトは既定で 120 秒で、`--timeout 300` のように秒で変えられます。TLC の Java のヒープの上限は既定で 3 GB で、メモリが足りないと日本語のエラーで止まります。`everypath.config.json` の `{ "tla": { "maxHeap": "6g" } }` で変えられます。
 
 ## 関数単位の証明
 
