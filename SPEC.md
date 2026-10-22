@@ -713,7 +713,7 @@ src/auth/reset.ts（機能: パスワードリセット）を修正してくだ�
 }
 ```
 
-`everypath serve` の監視で十分なので hook は任意。hook を使うのは、サーバーを起動せず `graph.json` だけ最新にしたいとき、または CI で性質チェックを走らせたいとき。
+`everypath serve` の監視で十分なので hook は任意。hook を使うのは、サーバーを起動せず `graph.json` だけ最新にしたいとき、または CI で性質チェックを走らせたいとき。`serve` の稼働中は、`scan`、`check`、`check --tlc` は自分で書かず、`.everypath/serve.json` が指すサーバーに渡す（`docs/specs/serve-cli-guard.md`）。hook と `serve` を併用しても書き手は 1 つのまま。
 
 ---
 

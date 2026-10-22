@@ -38,10 +38,10 @@ const SERVER_WRITER = "server/writer.ts";
 const OTHER_WRITERS = ["scan", "scanWithHistory", "rescanWithHistory", "checkTlc", "exportTla"];
 const WRITING_MODULE = /(?:^|\/)(?:workspace|scan|tla\/run)\.js$/;
 
-/** Every function workspace.ts exports whose name starts with write, commit or replace. */
+/** Every function workspace.ts exports whose name starts with write, commit, replace or remove. */
 async function workspaceWriters(): Promise<string[]> {
   const source = withoutComments(await readFile(join(SRC, "core", "workspace.ts"), "utf8"));
-  const exported = /^export\s+(?:async\s+)?function\s+((?:write|commit|replace)\w*)/gm;
+  const exported = /^export\s+(?:async\s+)?function\s+((?:write|commit|replace|remove)\w*)/gm;
   return [...source.matchAll(exported)].map(([, name = ""]) => name);
 }
 
@@ -162,10 +162,12 @@ describe("single writer: the writers it knows", () => {
   it("reads the writers of workspace.ts from its exports, and none of its readers", async () => {
     const names = await workspaceWriters();
 
-    for (const writer of ["writeWorkspace", "writeApproval", "commitTlc", "replaceFile"]) {
+    const writers = ["writeWorkspace", "writeApproval", "commitTlc", "replaceFile"];
+    for (const writer of [...writers, "writeServeRecord", "removeServeRecord"]) {
       assert.ok(names.includes(writer), `${writer} in ${names.join(", ")}`);
     }
-    for (const reader of ["readWorkspace", "readOutput", "isScanInput", "serializeGraph"]) {
+    const readers = ["readWorkspace", "readOutput", "isScanInput", "serializeGraph"];
+    for (const reader of [...readers, "readServeRecord"]) {
       assert.ok(!names.includes(reader), reader);
     }
   });
@@ -270,7 +272,7 @@ describe("single writer: the queue", () => {
   it("runs jobs submitted together one at a time, in the order they came", async () => {
     const root = await makeRepo({ "src/a.ts": ts("@state A"), "src/b.ts": ts("@state B") });
     const reasons: string[] = [];
-    const writer = await openWriter(root, "tester", ({ reason }: Published) =>
+    const writer = await openWriter(root, "tester", 4747, ({ reason }: Published) =>
       reasons.push(reason),
     );
     const [a, b] = [stateName("A"), stateName("B")];
@@ -294,7 +296,7 @@ describe("single writer: the queue", () => {
   it("lets a rescan that is still waiting answer for the rescans submitted after it", async () => {
     const root = await makeRepo({ "src/a.ts": ts("@state A") });
     const reasons: string[] = [];
-    const writer = await openWriter(root, "tester", ({ reason }: Published) => {
+    const writer = await openWriter(root, "tester", 4747, ({ reason }: Published) => {
       reasons.push(reason);
       // Seen only by a rescan that runs after this one.
       writeFileSync(

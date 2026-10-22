@@ -43,6 +43,34 @@ export type TlcOutcome =
     };
 
 /**
+ * What `check --tlc` reports of a run, in the shape it crosses a process in: the CLI that ran TLC and
+ * the CLI that asked the server to run it print the same lines from it. `rejected` is the reasons.
+ */
+export type TlcSummary =
+  | { readonly kind: "missing"; readonly guide: readonly string[] }
+  | { readonly kind: "unmodeled"; readonly reason: string }
+  | {
+      readonly kind: "checked";
+      readonly rejected: readonly string[];
+      readonly typeOk: Counterexample | null;
+      readonly error: string | null;
+    };
+
+export function summarizeTlc(outcome: TlcOutcome): TlcSummary {
+  switch (outcome.kind) {
+    case "missing":
+      return { kind: "missing", guide: outcome.guide };
+    case "unmodeled":
+      return { kind: "unmodeled", reason: outcome.reason };
+    case "checked": {
+      const { typeOk, error } = outcome.record;
+      const rejected = outcome.rejected.map(({ reason }) => reason);
+      return { kind: "checked", rejected, typeOk, error };
+    }
+  }
+}
+
+/**
  * `$EVERYPATH_TLA_JAR`, else `~/.everypath/tla2tools.jar`. Where both `check --tlc` and `tla install`
  * look. Absolute, because TLC runs in another directory.
  */

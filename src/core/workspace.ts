@@ -5,7 +5,15 @@ import { join, posix, resolve } from "node:path";
 import { CONFIG_FILE, type Config, DEFAULT_CONFIG, parseConfig } from "./config.js";
 import { parseEventName, parseStateName } from "./expr.js";
 import { parseFindings, rootRelative } from "./findings.js";
-import { asItems, asText, errorMessage, isMissing, isRecord, readJsonFile } from "./json.js";
+import {
+  asInteger,
+  asItems,
+  asText,
+  errorMessage,
+  isMissing,
+  isRecord,
+  readJsonFile,
+} from "./json.js";
 import { NO_PROPERTIES, PROPERTIES_FILE, parseProperties } from "./properties.js";
 import { parseStoredVerdicts, type StoredVerdicts, type TlcRecord } from "./tla/result.js";
 import type {
@@ -25,6 +33,7 @@ export const OUTPUT_DIRECTORY = ".everypath";
 const TLA_DIRECTORY = `${OUTPUT_DIRECTORY}/tla`;
 const TLC_RESULT_FILE = `${TLA_DIRECTORY}/result.json`;
 const REVIEW_FILE = `${OUTPUT_DIRECTORY}/review.json`;
+const SERVE_FILE = `${OUTPUT_DIRECTORY}/serve.json`;
 
 const IGNORED_DIRECTORIES: ReadonlySet<string> = new Set(
   "node_modules .git dist build out .next __pycache__ venv .venv coverage target vendor .everypath".split(
@@ -258,6 +267,79 @@ export async function writeTlaModel(
 export async function commitTlc(root: string, record: TlcRecord): Promise<void> {
   await writeTlaModel(root, record);
   await replaceFile(join(root, TLC_RESULT_FILE), `${JSON.stringify(record, null, 2)}\n`);
+}
+
+/**
+ * `.everypath/serve.json`: the `everypath serve` that owns this directory's writes, found by the CLI
+ * so it hands its own writes over. Output only: a scan never reads it.
+ */
+export type ServeRecord = { readonly version: 1; readonly pid: number; readonly port: number };
+
+const MAX_PORT = 65_535;
+
+function parseServeRecord(raw: unknown): ServeRecord | null {
+  if (!isRecord(raw) || raw.version !== 1) return null;
+  const pid = asInteger(raw.pid);
+  const port = asInteger(raw.port);
+  if (pid === null || pid <= 0 || port === null || port <= 0 || port > MAX_PORT) return null;
+  return { version: 1, pid, port };
+}
+
+/** A missing or damaged file is no record. */
+export async function readServeRecord(root: string): Promise<ServeRecord | null> {
+  const file = await readJsonFile(join(root, SERVE_FILE));
+  return file.kind === "ok" ? parseServeRecord(file.value) : null;
+}
+
+/** Signal 0 only asks: `EPERM` is a process of another user, which is alive. */
+export function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return codeOf(error) === "EPERM";
+  }
+}
+
+function serializeServeRecord(record: ServeRecord): string {
+  return `${JSON.stringify(record, null, 2)}\n`;
+}
+
+/**
+ * Claims the directory for `record`, which names the server about to write it. A record that is
+ * there already and names another running process is returned untouched: that server owns the
+ * directory. One that is damaged or names a dead process (or this one) was left by a run that did
+ * not clean up, so it is replaced. `null` means the claim is held.
+ */
+export async function writeServeRecord(
+  root: string,
+  record: ServeRecord,
+): Promise<ServeRecord | null> {
+  const path = join(await outputDirectory(root, OUTPUT_DIRECTORY), "serve.json");
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
+  const created = await open(path, flags, 0o666).catch((error: unknown) => {
+    if (codeOf(error) !== "EEXIST") throw error;
+    return null;
+  });
+  if (created !== null) {
+    try {
+      await created.writeFile(serializeServeRecord(record));
+    } finally {
+      await created.close();
+    }
+    return null;
+  }
+  const held = await readServeRecord(root);
+  if (held !== null && held.pid !== record.pid && isRunning(held.pid)) return held;
+  await replaceFile(path, serializeServeRecord(record));
+  return null;
+}
+
+/** Removes the record only while it is still this server's: a later server's is not ours to delete. */
+export async function removeServeRecord(root: string, record: ServeRecord): Promise<void> {
+  const held = await readServeRecord(root);
+  if (held?.pid !== record.pid || held.port !== record.port) return;
+  await rm(join(await outputDirectory(root, OUTPUT_DIRECTORY), "serve.json"), { force: true });
 }
 
 /** Writes beside `path` and renames onto it, so a reader sees the old file or the new one, never half. */

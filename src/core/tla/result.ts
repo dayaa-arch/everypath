@@ -11,7 +11,8 @@ import type {
   Step,
   VarName,
 } from "../types.js";
-import { generateTla, modelKey, type TlaModel, type TlaNames } from "./generate.js";
+import { generateTla, modelKey, type TlaNames } from "./generate.js";
+import type { TlcSummary } from "./run.js";
 
 /**
  * `.everypath/tla/result.json`: what one TLC run decided, and about which model. A run returns it and
@@ -127,11 +128,50 @@ export function parseStoredVerdicts(raw: unknown): StoredVerdicts | null {
 }
 
 /**
+ * `TlcSummary` from JSON, or `null` when any part of it does not read as one: the server's answer to
+ * `check --tlc` is a boundary like `result.json`.
+ */
+export function parseTlcSummary(raw: unknown): TlcSummary | null {
+  if (!isRecord(raw)) return null;
+  switch (raw.kind) {
+    case "missing": {
+      const guide = asTexts(raw.guide);
+      return guide === null ? null : { kind: "missing", guide };
+    }
+    case "unmodeled": {
+      const reason = asText(raw.reason);
+      return reason === null ? null : { kind: "unmodeled", reason };
+    }
+    case "checked": {
+      const rejected = asTexts(raw.rejected);
+      const typeOk = raw.typeOk === null ? null : parseCounterexample(raw.typeOk);
+      const error = raw.error === null ? null : asText(raw.error);
+      if (rejected === null || (raw.typeOk !== null && typeOk === null)) return null;
+      if (raw.error !== null && error === null) return null;
+      return { kind: "checked", rejected, typeOk, error };
+    }
+    default:
+      return null;
+  }
+}
+
+function asTexts(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const texts: string[] = [];
+  for (const item of value) {
+    const text = asText(item);
+    if (text === null) return null;
+    texts.push(text);
+  }
+  return texts;
+}
+
+/**
  * One properties-file warning per definition the model leaves out; a warning there fails the check.
  * Only `check --tlc` and `tla export` say this: a plain scan does not depend on whether TLC ever ran.
  */
-export function rejectionWarnings({ rejected }: Pick<TlaModel, "rejected">): ScanWarning[] {
-  return rejected.map(({ reason }) => ({
+export function rejectionWarnings(reasons: readonly string[]): ScanWarning[] {
+  return reasons.map((reason) => ({
     file: PROPERTIES_FILE,
     line: null,
     message: reason,
