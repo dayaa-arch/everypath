@@ -1,6 +1,6 @@
 import type { NodeStatus, PropertyResult, StateName, StateNode } from "../core/types.js";
 import { isLiveViolation } from "./facts.js";
-import { type Box, labelAt, type Point } from "./layout.js";
+import type { Box, Point } from "./layout.js";
 import { type Action, type Replay, replayOf, type TlcView, type ViewState } from "./state.js";
 import {
   headerCounts,
@@ -301,10 +301,6 @@ function draw(item: SceneItem): SVGElement {
       return drawBox(item);
     case "line": {
       const d = `M ${item.points.map((p) => `${p.x} ${p.y}`).join(" L ")}`;
-      const where = labelAt(item.points);
-      const upright = item.points.some(
-        (point, index) => point.x === where.x && item.points[index + 1]?.x === where.x,
-      );
       return svg(
         "g",
         { class: `line ${item.look}` },
@@ -320,11 +316,11 @@ function draw(item: SceneItem): SVGElement {
           : svg(
               "text",
               {
-                class: upright ? "label upright" : "label",
-                x: upright ? where.x + 6 : where.x,
-                y: where.y,
+                class: "label",
+                x: item.label.box.x + item.label.box.width / 2,
+                y: item.label.box.y + item.label.box.height / 2,
               },
-              item.label,
+              item.label.text,
             ),
       );
     }

@@ -231,13 +231,60 @@ function tidy(points: readonly Point[]): readonly Point[] {
   return kept;
 }
 
-/** Where an edge's label goes: the midpoint of the polyline's middle segment. */
-export function labelAt(points: readonly Point[]): Point {
-  const middle = Math.floor((points.length - 1) / 2);
-  const a = points[middle];
-  const b = points[middle + 1] ?? a;
-  if (a === undefined || b === undefined) return { x: 0, y: 0 };
-  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+/** A label's height, the air round its text, and how far from a line it stands when beside it. */
+const LABEL_HEIGHT = 18;
+const LABEL_PADDING = 8;
+const LABEL_GAP = 2;
+
+/** True when the interiors meet; boxes that only touch do not overlap. */
+export function overlaps(a: Box, b: Box): boolean {
+  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+}
+
+/**
+ * Where an edge's label may go, best first, as the box the 13 px text takes (13 px for a character
+ * wider than Latin-1, 7.5 px for the rest, plus 8 px of air). First on the line: the segments of the
+ * polyline from the middle one outwards (the one after it, the one before it, and so on), and on
+ * each the midpoint, then the point a quarter of the way along, then three quarters. Then beside the
+ * line at the same points (above or below a horizontal segment, right or left of a vertical one),
+ * for a line too short to carry its text clear of the boxes it joins, as a self-loop is.
+ */
+export function labelBoxes(text: string, points: readonly Point[]): readonly Box[] {
+  const width =
+    [...text].reduce((sum, char) => sum + ((char.codePointAt(0) ?? 0) > 0xff ? 13 : 7.5), 0) +
+    LABEL_PADDING;
+  const centred = (at: Point): Box => ({
+    x: at.x - width / 2,
+    y: at.y - LABEL_HEIGHT / 2,
+    width,
+    height: LABEL_HEIGHT,
+  });
+  const segments = points.flatMap((a, index) => {
+    const b = points[index + 1];
+    return b === undefined ? [] : [{ a, b }];
+  });
+  const middle = Math.floor(segments.length / 2);
+  const order = [middle];
+  for (let reach = 1; order.length < segments.length; reach++) {
+    if (middle + reach < segments.length) order.push(middle + reach);
+    if (middle - reach >= 0) order.push(middle - reach);
+  }
+  const spots = order.flatMap((index) => {
+    const segment = segments[index];
+    if (segment === undefined) return [];
+    const { a, b } = segment;
+    return [0.5, 0.25, 0.75].map((t) => ({
+      at: { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t },
+      upright: a.x === b.x,
+    }));
+  });
+  const beside = spots.flatMap(({ at, upright }) => {
+    const reach = upright ? width / 2 + LABEL_GAP : LABEL_HEIGHT / 2 + LABEL_GAP;
+    return upright
+      ? [centred({ x: at.x + reach, y: at.y }), centred({ x: at.x - reach, y: at.y })]
+      : [centred({ x: at.x, y: at.y - reach }), centred({ x: at.x, y: at.y + reach })];
+  });
+  return [...spots.map(({ at }) => centred(at)), ...beside];
 }
 
 /** A dropped box lands on the 20 px grid, like draw.io. */

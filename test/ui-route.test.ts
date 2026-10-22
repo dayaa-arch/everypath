@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { type Box, type Point, route } from "../src/ui/layout.js";
+import { type Box, labelBoxes, overlaps, type Point, route } from "../src/ui/layout.js";
 
 /** docs/specs/viewer.md condition 5: every box is 180×64 (SPEC §12.1). */
 const WIDTH = 180;
@@ -169,5 +169,48 @@ describe("route from a box to itself", () => {
     for (const [index, one] of all.entries()) {
       for (const next of all.slice(index + 1)) assert.equal(shareASegment(one, next), false);
     }
+  });
+});
+
+describe("where the label of an edge may go", () => {
+  const line: readonly Point[] = [
+    { x: 0, y: 0 },
+    { x: 0, y: 40 },
+    { x: 100, y: 40 },
+    { x: 100, y: 100 },
+  ];
+
+  it("sizes the box from the text: 13 px a wide character, 7.5 px the rest, 8 px of air, 18 px high", () => {
+    const [first] = labelBoxes("ab", line);
+    const [wide] = labelBoxes("あ", line);
+
+    assert.ok(first !== undefined && wide !== undefined);
+    assert.equal(first.width, 2 * 7.5 + 8);
+    assert.equal(wide.width, 13 + 8);
+    assert.equal(first.height, 18);
+  });
+
+  it("tries the middle segment's midpoint first, then its quarter points", () => {
+    const [first, second, third] = labelBoxes("ab", line);
+
+    assert.ok(first !== undefined && second !== undefined && third !== undefined);
+    assert.equal(first.x + first.width / 2, 50);
+    assert.equal(first.y + first.height / 2, 40);
+    assert.equal(second.x + second.width / 2, 25);
+    assert.equal(third.x + third.width / 2, 75);
+  });
+
+  it("has a place beside a self-loop that is clear of its own box", () => {
+    const origin = boxAt(0, 0);
+    const loop = route(origin, origin);
+
+    const boxes = labelBoxes("code_invalid", loop);
+
+    assert.ok(boxes.some((candidate) => !overlaps(candidate, origin)));
+  });
+
+  it("does not count boxes that only touch as overlapping", () => {
+    assert.equal(overlaps(boxAt(0, 0), boxAt(WIDTH, 0)), false);
+    assert.equal(overlaps(boxAt(0, 0), boxAt(WIDTH - 1, 0)), true);
   });
 });
