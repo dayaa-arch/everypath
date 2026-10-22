@@ -61,6 +61,9 @@ export type ScanOptions = {
 };
 
 const TEST_PATH = /(^|[/._-])(test|tests|spec|specs|__tests__)([/._-]|$)/i;
+
+/** A Dafny file is checked by `everypath prove`, and no test imports it, so it needs no test. */
+const isProofFile = (path: string): boolean => posix.extname(path) === ".dfy";
 const INDEX_STEMS: ReadonlySet<string> = new Set(["index", "__init__", "main"]);
 
 /** What one source file contributes, before it meets any other file. */
@@ -675,7 +678,9 @@ function buildNode(
     lines: files.reduce((sum, file) => sum + file.lines, 0),
     hash,
     status: {
-      tested: files.length > 0 && files.every((file) => context.tested.has(file.path)),
+      tested:
+        files.length > 0 &&
+        files.every((file) => isProofFile(file.path) || context.tested.has(file.path)),
       vuln: findings.length > 0,
       wip: files.some((file) => file.notes.wip),
       planned: files.length === 0 && !container,
