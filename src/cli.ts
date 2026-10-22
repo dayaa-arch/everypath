@@ -6,8 +6,9 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { type InitAction, initRepository, linesHidingReview } from "./core/init.js";
 import { errorMessage } from "./core/json.js";
+import { toMermaid } from "./core/mermaid.js";
 import { PROPERTIES_FILE } from "./core/properties.js";
-import { scan } from "./core/scan.js";
+import { analyze, scan } from "./core/scan.js";
 import { rejectionWarnings } from "./core/tla/result.js";
 import {
   checkTlc,
@@ -33,6 +34,7 @@ const USAGE = [
   "使い方: everypath init [dir]",
   "        everypath scan [dir] [--json] [--quiet]",
   "        everypath check [dir] [--tlc [--timeout 秒]]",
+  "        everypath export [dir] --mermaid",
   "        everypath tla export [dir]",
   "        everypath tla install",
   "        everypath serve [dir] [--port 4747] [--open]",
@@ -44,13 +46,14 @@ const UI_PATH = fileURLToPath(new URL("../dist/ui.html", import.meta.url));
 /** `templates/prompts/` of this package, found the same way. */
 const PROMPTS_DIR = fileURLToPath(new URL("../templates/prompts/", import.meta.url));
 
-type Label = "init" | "scan" | "check" | "tla export" | "tla install" | "serve";
+type Label = "init" | "scan" | "check" | "export" | "tla export" | "tla install" | "serve";
 
 /** The options each command takes; `--help` goes with every one. */
 const ACCEPTS: Readonly<Record<Label, readonly string[]>> = {
   init: [],
   scan: ["json", "quiet"],
   check: ["tlc", "timeout"],
+  export: ["mermaid"],
   "tla export": [],
   "tla install": [],
   serve: ["port", "open"],
@@ -79,6 +82,7 @@ type Command =
       readonly port: number;
       readonly open: boolean;
     }
+  | { readonly kind: "export"; readonly directory: string }
   | { readonly kind: "tla-export"; readonly directory: string }
   | { readonly kind: "tla-install"; readonly source: InstallSource | null };
 
@@ -148,6 +152,16 @@ function parseCheck(positionals: readonly string[], values: Values): Result<Comm
   return accept({ kind: "check", directory, tlc: { timeoutMs: Number(seconds) * 1000 } });
 }
 
+function parseExport(positionals: readonly string[], values: Values): Result<Command> {
+  const [, directory = ".", ...extra] = positionals;
+  if (extra.length > 0) return unknownCommand(positionals);
+  const refused = unaccepted("export", values);
+  if (refused !== null) return refused;
+  return values.mermaid === true
+    ? accept({ kind: "export", directory })
+    : refuse("export には --mermaid を指定してください");
+}
+
 function parseServe(positionals: readonly string[], values: Values): Result<Command> {
   const [, directory = ".", ...extra] = positionals;
   if (extra.length > 0) return unknownCommand(positionals);
@@ -215,6 +229,7 @@ function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Result<C
         json: { type: "boolean" },
         quiet: { type: "boolean" },
         tlc: { type: "boolean" },
+        mermaid: { type: "boolean" },
         timeout: { type: "string" },
         port: { type: "string" },
         open: { type: "boolean" },
@@ -235,6 +250,8 @@ function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Result<C
         return parseScan(positionals, values);
       case "check":
         return parseCheck(positionals, values);
+      case "export":
+        return parseExport(positionals, values);
       case "tla":
         return parseTla(positionals, values, env);
       case "serve":
@@ -393,6 +410,8 @@ async function main(args: readonly string[]): Promise<number> {
       return runScan(root, command);
     case "check":
       return runCheck(root, command.tlc);
+    case "export":
+      return runMermaid(root);
     case "tla-export":
       return runExport(root);
     case "serve":
@@ -516,6 +535,22 @@ async function runCheck(
   const rejected = warnings.some((warning) => warning.file === PROPERTIES_FILE);
   const violated = graph.properties.some((p) => p.result === "violated" && !p.staleModel);
   return rejected || violated || failure !== null ? 1 : 0;
+}
+
+/**
+ * Prints the diagram from `analyze`, which only reads: nothing is written here, and a running serve
+ * is not asked to scan. The scan's warnings go to stderr so that stdout is the diagram alone.
+ */
+async function runMermaid(root: string): Promise<number> {
+  const { graph } = await analyze(root);
+  if (graph.nodes.length === 0) {
+    return fail("状態がありません。ソースの先頭に @state を書いてから実行してください");
+  }
+  if (graph.warnings.length > 0) {
+    process.stderr.write(`${graph.warnings.map(describeWarning).join("\n")}\n`);
+  }
+  process.stdout.write(toMermaid(graph));
+  return 0;
 }
 
 async function runExport(root: string): Promise<number> {
