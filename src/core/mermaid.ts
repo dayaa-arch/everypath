@@ -1,4 +1,5 @@
 import { edgeLabel } from "./expr.js";
+import { hierarchyOf } from "./hierarchy.js";
 import type { FlowEdge, Graph, PropertyId, StateName, StateNode } from "./types.js";
 import { isLiveViolation } from "./verdict.js";
 
@@ -38,6 +39,11 @@ const INDENT = "    ";
  * written once, as the description in `sN : name`, and never as an id. A new state renumbers the ids
  * after it. Edges follow `graph.edges`, which `scan` keeps sorted. The start arrow is `model.initial`
  * alone; without a `@state-initial` there is none.
+ *
+ * A parent (`@state-parent`) is a composite state `state sN { … }` holding its children, with its own
+ * `[*] -->` to the child it enters when one is marked. An arrow is written in the block of the nearest
+ * state that holds both its ends, and starts at the state it was declared on: the composite is the
+ * idiom for "this arrow holds for everything inside". Only a leaf carries a mark.
  */
 export function toMermaid(graph: Graph): string {
   const ids = new Map(graph.nodes.map((node, index) => [node.id, `s${index + 1}`]));
@@ -46,17 +52,37 @@ export function toMermaid(graph: Graph): string {
     if (id === undefined) throw new Error(`${name} is on an edge but is not a node of the graph`);
     return id;
   };
+  const hierarchy = hierarchyOf(graph.nodes);
   const live = new Set(graph.properties.filter(isLiveViolation).map((property) => property.id));
   const markOf = (node: StateNode): Mark["name"] | undefined =>
-    MARKS.find((mark) => mark.applies(node, live))?.name;
+    hierarchy.isLeaf(node.id) ? MARKS.find((mark) => mark.applies(node, live))?.name : undefined;
 
-  const start = graph.model.initial === null ? [] : [`[*] --> ${idOf(graph.model.initial)}`];
-  const arrows = graph.edges
-    .filter((edge): edge is FlowEdge => edge.type === "flow")
-    .map((edge) => {
-      const label = edgeLabel(edge);
-      return `${idOf(edge.from)} --> ${idOf(edge.to)}${label === "" ? "" : ` : ${label}`}`;
-    });
+  const flows = graph.edges.filter((edge): edge is FlowEdge => edge.type === "flow");
+  const arrowsIn = (scope: StateName | null): string[] =>
+    flows
+      .filter((edge) => hierarchy.commonAncestor(edge.from, edge.to) === scope)
+      .map((edge) => {
+        const label = edgeLabel(edge);
+        return `${idOf(edge.from)} --> ${idOf(edge.to)}${label === "" ? "" : ` : ${label}`}`;
+      });
+  /** A state's declaration line, and for a parent the block of what is inside it. */
+  const declare = (name: StateName): string[] =>
+    hierarchy.isLeaf(name)
+      ? [`${idOf(name)} : ${name}`]
+      : [
+          `${idOf(name)} : ${name}`,
+          `state ${idOf(name)} {`,
+          ...levelOf(name, hierarchy.initialChild(name)).map((line) => `${INDENT}${line}`),
+          "}",
+        ];
+  /** One level, in `graph.nodes` order: its states, the arrow to where entering lands, its arrows. */
+  const levelOf = (scope: StateName | null, initial: StateName | null): string[] => [
+    ...graph.nodes
+      .filter(({ id }) => hierarchy.parentOf(id) === scope)
+      .flatMap(({ id }) => declare(id)),
+    ...(initial === null ? [] : [`[*] --> ${idOf(initial)}`]),
+    ...arrowsIn(scope),
+  ];
   const marked = MARKS.flatMap(({ name }) => {
     const members = graph.nodes.filter((node) => markOf(node) === name);
     return members.length === 0
@@ -66,9 +92,7 @@ export function toMermaid(graph: Graph): string {
 
   const body = [
     ...MARKS.map(({ name, style }) => `classDef ${name} ${style}`),
-    ...graph.nodes.map((node) => `${idOf(node.id)} : ${node.id}`),
-    ...start,
-    ...arrows,
+    ...levelOf(null, graph.model.initial),
     ...marked,
   ];
   const lines = ["stateDiagram-v2", ...body.map((line) => `${INDENT}${line}`)];
