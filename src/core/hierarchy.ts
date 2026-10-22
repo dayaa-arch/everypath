@@ -6,6 +6,14 @@ import type { Leaf, NonEmpty, StateName, StateNode } from "./types.js";
 /** A state may have this many ancestors: a tree four levels deep. Deeper is a typo or a cycle in the making. */
 export const MAX_DEPTH = 3;
 
+/**
+ * A state with children that no file claims (`container: true`): a frame round them and nothing else,
+ * with no file to test, review, approve or open.
+ */
+export function isContainer(node: Pick<StateNode, "container">): boolean {
+  return node.container === true;
+}
+
 /** What graph.json keeps of the tree. A `StateNode` is one. */
 export type TreeNode = Pick<StateNode, "id" | "parent" | "initialChild">;
 

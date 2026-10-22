@@ -1,5 +1,5 @@
 import { edgeLabel } from "../core/expr.js";
-import { hierarchyOf } from "../core/hierarchy.js";
+import { hierarchyOf, isContainer } from "../core/hierarchy.js";
 import type { Counterexample, Graph, PropertyResult, StateName, StateNode } from "../core/types.js";
 import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
 import { selectedIds } from "./facts.js";
@@ -176,7 +176,7 @@ export function reviewQueue(
 ): readonly { readonly node: StateNode; readonly tone: Tone }[] {
   const rank = (tone: Tone): number => TONES.findIndex((row) => row.tone === tone);
   return graph.nodes
-    .filter((node) => node.container !== true)
+    .filter((node) => !isContainer(node))
     .map((node) => ({ node, tone: toneOf(node, graph.properties) }))
     .filter(({ tone }) => !rowOf(tone).settled)
     .sort((a, b) => rank(a.tone) - rank(b.tone) || compare(a.node.id, b.node.id));
@@ -423,8 +423,7 @@ export function sceneOf(
   const groups = framesOf(graph, boxOf, movers);
   const nested = parents.map((parent) => {
     const node = graph.nodes.find((n) => n.id === parent.id);
-    const tone =
-      node === undefined || node.container === true ? null : toneOf(node, graph.properties);
+    const tone = node === undefined || isContainer(node) ? null : toneOf(node, graph.properties);
     return {
       item: {
         kind: "parent",
@@ -522,7 +521,7 @@ export function sceneOf(
   }
 
   // A container has no files to list, and its frame is not a planned box.
-  const zoomed = graph.nodes.find((node) => node.id === state.zoom && node.container !== true);
+  const zoomed = graph.nodes.find((node) => node.id === state.zoom && !isContainer(node));
   const corner = zoomed === undefined ? undefined : boxOf(zoomed.id);
   if (zoomed !== undefined && corner !== undefined) {
     items.push({ item: filesOf(zoomed, corner), touches: movers(zoomed.id) });

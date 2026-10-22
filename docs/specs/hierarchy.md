@@ -18,7 +18,7 @@ AI エージェントが「ログイン後のどの画面からもログアウ�
 - [x] 11. 読みは 1 つ。`Model.tla` の各アクションから読み戻した（始点、終点、イベント）の列が、簡易検査の探す `flat.model.arcs` と一致する。継いだアクションの注釈に「（P から継承）」が付き、注釈は `modelKey` に入らない（同上）
 - [x] 12. 実機の TLC。example の複製に 認証済み（Home と マイページ を持ち、logout を 1 回だけ宣言）を足し、`state == ログアウト => !authed` を置くと、`check --tlc` が継いだ logout を通る反例を返し、親の宣言に `set:authed=FALSE` を足すと成立する（手で実行し、出力を残す）
 - [x] 13. Mermaid。親は `sN : 名前` と `state sN { … }` になり、中の `[*] -->` は入口の印があるときだけ、矢印は両端を含む一番内側のブロックに書く。印は葉だけに付く。手元の Mermaid 11 の `parse` と `render` に通る（`test/hierarchy.test.ts`。描画は以前の担当者が置いた `mermaid.min.js` で手で確かめる。依存は足さない）
-- [x] 14. ビューア。親は中の箱と子の枠を囲む枠で、名前の帯を持つ。親を端に持つ遷移は枠から 1 本だけ出る。枠は `layout.json` に書かず、`place` は前の座標を 1 つも変えず、親には点を付けない。子を足すと兄弟の近くの、よその箱を枠に入れない位置に置く。名乗るファイルの無い親の枠は計画のみの点線で描かず、未レビュー一覧に入らず、承認ボタンを持たない。`relayout` は親を dagre の cluster にし、親が無ければ今と同じ座標（`test/hierarchy-viewer.test.ts`）
+- [x] 14. ビューア。親は中の箱と子の枠を囲む枠で、名前の帯を持つ。親を端に持つ遷移は枠から 1 本だけ出る。枠は `layout.json` に書かず、`place` は前の座標を 1 つも変えず、親には点を付けない。子を足すと兄弟の近くの、よその箱を枠に入れない位置に置く。名乗るファイルの無い親の枠は計画のみの点線で描かず、未レビュー一覧に入らず、承認ボタンを持たない。サーバーも入れ物の承認を 409 と日本語の理由で断り、何も書かない（`test/server.test.ts`）。入れ物かどうかは `hierarchy.ts` の `isContainer` 1 つで決める。`relayout` は親を dagre の cluster にし、親が無ければ今と同じ座標（`test/hierarchy-viewer.test.ts`）
 - [x] 15. 見張り。木のフィールド（`parent`、`initialChild`）と意味の問い（`enter`、`ambiguousEntries`、`within`、`subtree`）を読んでよいファイルを `test/hierarchy-boundaries.test.ts` が名指しし、違反を植えたソースで落ちる。`Graph` は `checkProperties` と `generateTla` に渡せない（`test/hierarchy.check.ts` の `@ts-expect-error`）
 - [x] 16. 文書。`skill/SKILL.md` と `README.md` のタグに `@state-parent` があり、例が 1 つあり、例は警告なしでスキャンできる。規則は 11 項目のまま（`test/init.test.ts`）
 

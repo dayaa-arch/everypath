@@ -14,6 +14,7 @@ import {
   type Hierarchy,
   type HierarchyProblem,
   hierarchyOf,
+  isContainer,
   MAX_DEPTH,
   type ParentClaim,
   resolveHierarchy,
@@ -216,7 +217,7 @@ function fold(
   const properties = withTlcResults(tla, checked.properties, workspace.tlc);
   const violations = violationsOf(properties);
   const nodes = built.map((node) => ({ ...node, violations: violations.get(node.id) ?? [] }));
-  const real = nodes.filter((node) => !node.status.planned && node.container !== true);
+  const real = nodes.filter((node) => !node.status.planned && !isContainer(node));
 
   const graph: Graph = {
     version: 1,

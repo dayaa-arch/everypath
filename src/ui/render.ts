@@ -1,4 +1,4 @@
-import { hierarchyOf } from "../core/hierarchy.js";
+import { hierarchyOf, isContainer } from "../core/hierarchy.js";
 import { PROMPT_KINDS, type PromptKind } from "../core/prompts.js";
 import type {
   EdgeRef,
@@ -763,7 +763,7 @@ function panelOf(state: ViewState, commands: Commands): Content[] {
   }
   return [
     html("h2", {}, node.id),
-    node.container === true
+    isContainer(node)
       ? html("span", { class: "chip" }, "中の状態を囲む枠（ファイルなし）")
       : chip(rowOf(toneOf(node, graph.properties))),
     html(
@@ -796,7 +796,7 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
   const tree = hierarchyOf(graph.nodes);
   const parent = tree.parentOf(node.id);
   const children = tree.childrenOf(node.id);
-  const container = node.container === true;
+  const container = isContainer(node);
   return [
     node.desc === null ? null : html("p", {}, node.desc),
     children.length === 0

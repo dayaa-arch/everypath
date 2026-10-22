@@ -1,3 +1,4 @@
+import { isContainer } from "../core/hierarchy.js";
 import { fillTemplate, type PromptKind, type Scope } from "../core/prompts.js";
 import type {
   Counterexample,
@@ -37,7 +38,7 @@ const flowsFrom = (graph: Graph, id: StateName): readonly FlowEdge[] =>
 const READY = (): null => null;
 
 /** Neither a planned node nor a container has a file to test or to annotate. */
-const hasCode = (node: StateNode): boolean => !node.status.planned && node.container !== true;
+const hasCode = (node: StateNode): boolean => !node.status.planned && !isContainer(node);
 
 /**
  * When each kind applies and what it waits for, in one place: the panel's buttons, the counts of

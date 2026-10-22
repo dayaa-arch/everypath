@@ -1,3 +1,4 @@
+import { isContainer } from "../core/hierarchy.js";
 import { rescanWithHistory, scanWithHistory } from "../core/scan.js";
 import type { TlcRecord } from "../core/tla/result.js";
 import type { Graph, HistoryEntry, Layout, StateName } from "../core/types.js";
@@ -43,8 +44,11 @@ export function alreadyServed(holder: ServeRecord): Error {
   );
 }
 
-/** `missing-node`: no node of that id in the last graph. `stale-hash`: the node changed since. */
-export type JobResult = "done" | "missing-node" | "stale-hash";
+/**
+ * `missing-node`: no node of that id in the last graph. `stale-hash`: the node changed since.
+ * `container`: the node is a frame round its children, with no file to approve.
+ */
+export type JobResult = "done" | "missing-node" | "stale-hash" | "container";
 
 /** A graph the writer wrote, its history line (`null` when no node or edge changed), and why. */
 export type Published = {
@@ -103,6 +107,7 @@ export async function openWriter(
       case "approve": {
         const node = nodeOf(job.id);
         if (node === undefined) return "missing-node";
+        if (isContainer(node)) return "container";
         if (job.hash !== null && job.hash !== node.hash) return "stale-hash";
         const at = new Date().toISOString();
         await writeApproval(root, node.id, { hash: node.hash, at, by: reviewer, note: job.note });
