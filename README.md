@@ -72,6 +72,20 @@ hook を使うときは、`settings.example.json` の `hooks` を `.claude/setti
 // @state-next Home on:back
 ```
 
+## 依存を読む言語
+
+ファイル間の `import` は、図の点線の依存と、テスト済みの印になります。読める言語は次のとおりです。解決できない `import` と、候補が複数あって 1 つに決められない `import` は、何も記録しません。
+
+| 言語 | 解決する `import` |
+|---|---|
+| JavaScript / TypeScript | 相対パスと、`everypath.config.json` の `aliases`。外部パッケージは無視します |
+| Python | `from a.b import`、`import a.b`、相対 `import`。ファイルのディレクトリ、ルート、`src/`、`app/` から探します |
+| Go | `go.mod`（入れ子も）の `module` パス。`import` は、そのパッケージのディレクトリにある `_test.go` 以外の全ファイルに当たります |
+| Rust | `mod foo;`、`use crate::…`、`self::`、`super::`、`Cargo.toml` のクレート名。外部クレートは無視します |
+| Java / Kotlin | `src/main/java`、`src/main/kotlin`、`src/test/java`、`src/test/kotlin`（入れ子のモジュール可）とルートから `a/b/C.java` か `.kt` を探します。`a.b.*` はそのパッケージの直下の全ファイルです |
+
+Go の `_test.go`、Rust の `tests/`、Java と Kotlin の `src/test/` はテストファイルで、`import` 先をテスト済みにします。Java と Kotlin の同じパッケージのクラスは `import` なしで使えるので、`import` を書かないテストはテスト済みの印になりません。Ruby は `import` を読みません。
+
 ## 図を開く
 
 ```bash
