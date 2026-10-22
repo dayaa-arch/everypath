@@ -197,7 +197,6 @@ export type GraphStats = {
   readonly unreviewed: number;
 };
 
-/** `dep-only-via` waits for phase 2: its `from_group`, `target` and `via` are not read yet. */
 export type PropertyDef = {
   readonly id: PropertyId;
   readonly description: string | null;
@@ -211,7 +210,13 @@ export type PropertyDef = {
     }
   | { readonly kind: "always-reach"; readonly target: NonEmpty<StateName> }
   | { readonly kind: "no-dead-end"; readonly except: readonly StateName[] }
-  | { readonly kind: "dep-only-via" }
+  | {
+      readonly kind: "dep-only-via";
+      /** `from_group` in the file: a `@state-group` value. Every state of the group is a start. */
+      readonly fromGroup: string;
+      readonly target: NonEmpty<StateName>;
+      readonly via: NonEmpty<StateName>;
+    }
 );
 
 /** `everypath.properties.json` after validation. A `null` entry means "work it out from the graph". */
@@ -239,6 +244,20 @@ export type Counterexample = {
   readonly loopStart: number | null;
 };
 
+/**
+ * What TLC said about a property the quick check found violated. The quick check takes every guard as
+ * true, so its path may be one no behavior can take: `ok` means the path is open only with guards
+ * ignored, and `violated` comes with a behavior TLC found, with the variable values.
+ */
+export type TlcVerdict = {
+  readonly result: "ok" | "violated" | "error";
+  readonly counterexamples: readonly Counterexample[];
+  readonly statesExplored: number | null;
+  readonly checkedAt: string;
+  /** As on `PropertyResult`: the model TLC checked has changed since. */
+  readonly staleModel?: true;
+};
+
 export type PropertyResult = {
   readonly id: PropertyId;
   readonly kind: PropertyDef["kind"];
@@ -255,6 +274,12 @@ export type PropertyResult = {
    * marks no node and fails no check.
    */
   readonly staleModel?: true;
+  /**
+   * Only on a quick-check `violated` that TLC also checked. It sits beside the quick check's verdict
+   * and never replaces it: `result`, `counterexamples`, `checkedBy` and the marks on nodes stay the
+   * quick check's.
+   */
+  readonly tlc?: TlcVerdict;
 };
 
 export type Graph = {
