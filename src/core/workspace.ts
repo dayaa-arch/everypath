@@ -16,6 +16,7 @@ import {
   readJsonFile,
 } from "./json.js";
 import type { PromptKind } from "./prompts.js";
+import { mergeProofs, PROOFS_FILE, parseProofs } from "./proofs.js";
 import { NO_PROPERTIES, PROPERTIES_FILE, parseProperties } from "./properties.js";
 import { parseStoredVerdicts, type StoredVerdicts, type TlcRecord } from "./tla/result.js";
 import type {
@@ -25,6 +26,7 @@ import type {
   Graph,
   HistoryEntry,
   Layout,
+  ProofEntry,
   PropertiesFile,
   ScanWarning,
   StateName,
@@ -42,8 +44,9 @@ const IGNORED_DIRECTORIES: ReadonlySet<string> = new Set(
     " ",
   ),
 );
+/** `.dfy` is here so a Dafny proof can name its node with `@state` and join that node's files. */
 const SOURCE_EXTENSIONS: ReadonlySet<string> = new Set(
-  ".js .jsx .ts .tsx .mjs .cjs .py .go .rb .rs .java .kt".split(" "),
+  ".js .jsx .ts .tsx .mjs .cjs .py .go .rb .rs .java .kt .dfy".split(" "),
 );
 /** Files that name a package for the import resolvers (`go.mod`, `Cargo.toml`). The walk reads them beside the sources. */
 const MANIFEST_NAMES: ReadonlySet<string> = new Set(["go.mod", "Cargo.toml"]);
@@ -57,6 +60,7 @@ const FINDINGS_FILES: readonly string[] = [
 const OUTPUT_INPUTS: ReadonlySet<string> = new Set([
   REVIEW_FILE,
   TLC_RESULT_FILE,
+  PROOFS_FILE,
   ...FINDINGS_FILES.filter((file) => file.startsWith(`${OUTPUT_DIRECTORY}/`)),
 ]);
 
@@ -85,6 +89,8 @@ export type Workspace = {
   readonly previous: Previous | null;
   /** TLC's last verdicts, from `result.json`. `null` before any TLC run. */
   readonly tlc: StoredVerdicts | null;
+  /** The usable entries of `proofs.json`, by node id. */
+  readonly proofs: ReadonlyMap<string, ProofEntry>;
   /** Inputs that could not be used. Each is a warning, never an error. */
   readonly warnings: readonly ScanWarning[];
 };
@@ -103,11 +109,12 @@ export async function readWorkspace(root: string): Promise<Workspace> {
   const walked = await walk(root, configured.config);
   const sources = await readSources(root, walked.paths);
   const manifests = await readManifests(root, walked.manifests);
-  const [findings, review, previous, tlc] = await Promise.all([
+  const [findings, review, previous, tlc, proofs] = await Promise.all([
     readFindings(root, configured.config),
     readApprovals(root),
     readPrevious(root),
     readTlcResult(root),
+    readProofs(root),
   ]);
   return {
     root,
@@ -120,6 +127,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
     approvals: review.approvals,
     previous,
     tlc: tlc.stored,
+    proofs: proofs.entries,
     warnings: [
       ...configured.warnings,
       ...properties.warnings,
@@ -129,6 +137,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
       ...findings.warnings,
       ...review.warnings,
       ...tlc.warnings,
+      ...proofs.warnings,
     ],
   };
 }
@@ -216,6 +225,25 @@ export async function writeApproval(
   await replaceFile(path, `${JSON.stringify(review, null, 2)}\n`);
 }
 
+/**
+ * Sets the entries of `updates` in `proofs.json` and keeps every other id as it was, like
+ * `writeApproval`. `everypath prove` is its only caller: the server reads the file and never writes it.
+ * A file that is there but is not a JSON object is never overwritten.
+ */
+export async function writeProofs(
+  root: string,
+  updates: ReadonlyMap<string, ProofEntry>,
+): Promise<void> {
+  const file = await readJsonFile(join(root, PROOFS_FILE));
+  if (file.kind === "invalid") {
+    throw new Error(`${PROOFS_FILE} を読めないので書き換えません: ${file.reason}`);
+  }
+  const text = mergeProofs(file.kind === "ok" ? file.value : undefined, updates);
+  if (text === null) throw new Error(`${PROOFS_FILE} がオブジェクトでないので書き換えません`);
+  const directory = await outputDirectory(root, OUTPUT_DIRECTORY);
+  await replaceFile(join(directory, "proofs.json"), text);
+}
+
 /** `.everypath/layout.json`, as the viewer sent it. */
 export async function writeLayout(root: string, layout: Layout): Promise<void> {
   const directory = await outputDirectory(root, OUTPUT_DIRECTORY);
@@ -240,6 +268,7 @@ export async function readOutput(
  * asks only this. Under `.everypath/` only the scan's inputs count, so `graph.json`, `history.jsonl`,
  * the layout and every temporary file never start a scan. `review.json` and `tla/result.json` do,
  * though the server writes them too: that rescan finds the graph it already sent and writes nothing.
+ * So does `proofs.json`, which only `everypath prove` writes.
  * Elsewhere, outside the walk's ignored directories, a source file counts, and so does any JSON file
  * (the config, the properties, every findings file wherever `findings` points), a package manifest
  * (`go.mod`, `Cargo.toml`: they decide what an import resolves to) and any name without an extension,
@@ -552,6 +581,19 @@ async function readTlcResult(root: string) {
         warnings: [fileWarning(TLC_RESULT_FILE, `${TLC_RESULT_FILE} の形が違うので使いません`)],
       }
     : { stored, warnings: [] };
+}
+
+/** A missing file is no proof yet. A damaged one is a warning and counts as absent. */
+async function readProofs(root: string) {
+  const file = await readJsonFile(join(root, PROOFS_FILE));
+  if (file.kind === "missing") return { entries: new Map<string, ProofEntry>(), warnings: [] };
+  if (file.kind === "invalid") {
+    return {
+      entries: new Map<string, ProofEntry>(),
+      warnings: [unreadable(PROOFS_FILE, file.reason)],
+    };
+  }
+  return parseProofs(file.value);
 }
 
 /** A missing or damaged `graph.json` counts as absent: the scan then treats every node as new. */

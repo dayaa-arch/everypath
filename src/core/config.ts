@@ -1,6 +1,6 @@
 import { posix } from "node:path";
 import { asItems, asText, isRecord } from "./json.js";
-import type { ScanWarning } from "./types.js";
+import type { ProofTool, Prover, ScanWarning } from "./types.js";
 
 export const CONFIG_FILE = "everypath.config.json";
 
@@ -12,6 +12,8 @@ export type Config = {
   /** Where to look for findings before the default locations. */
   readonly findings: string | null;
   readonly ignore: readonly Glob[];
+  /** What `everypath prove` runs, or `null` when the key is absent or unusable. */
+  readonly proof: Prover | null;
 };
 
 /** A compiled `ignore` pattern, tested against a root-relative `/` path. */
@@ -22,7 +24,25 @@ export const DEFAULT_CONFIG: Config = {
   includeTests: false,
   findings: null,
   ignore: [],
+  proof: null,
 };
+
+/** The command of each tool when `proof.command` is left out. `command` has none: it must be written. */
+const DEFAULT_COMMANDS: Readonly<Record<ProofTool, string | null>> = {
+  dafny: "dafny verify {files}",
+  verus: "verus {files}",
+  command: null,
+};
+
+const isProofTool = (raw: unknown): raw is ProofTool =>
+  typeof raw === "string" && Object.hasOwn(DEFAULT_COMMANDS, raw);
+
+function proverOf(raw: unknown): Prover | null {
+  if (!isRecord(raw) || !isProofTool(raw.tool)) return null;
+  const written = raw.command === undefined ? DEFAULT_COMMANDS[raw.tool] : asText(raw.command);
+  const command = written?.trim() ?? "";
+  return command === "" ? null : { tool: raw.tool, command };
+}
 
 /**
  * `dirs` is `**` and a slash: no directory or any run of them. `globstar` is a bare `**`, any run of
@@ -166,6 +186,12 @@ export function parseConfig(value: unknown): {
     ),
     findings: read("findings", "ファイルのパス（文字列）", asText, null),
     ignore: read("ignore", "glob の配列（文字列）", globsOf, []),
+    proof: read(
+      "proof",
+      '{"tool": "dafny" か "verus" か "command", "command": "{files} を含む命令"}（tool が command なら command は必須）',
+      proverOf,
+      null,
+    ),
   };
   return { config, warnings };
 }

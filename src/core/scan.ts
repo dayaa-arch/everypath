@@ -23,6 +23,7 @@ import {
 import { type ImportContext, importContext, resolveImports } from "./imports.js";
 import { listed } from "./listing.js";
 import { resolveNext, type VarTable } from "./model.js";
+import { proofOf } from "./proofs.js";
 import { checkProperties, violationsOf } from "./properties.js";
 import { navigationPaths, resolveRoute, routeTable } from "./routes.js";
 import { generateTla, type Unmodeled } from "./tla/generate.js";
@@ -39,6 +40,7 @@ import type {
   HistoryEntry,
   ModelVar,
   ObservedEdge,
+  ProofEntry,
   ScanWarning,
   StateName,
   StateNode,
@@ -192,6 +194,7 @@ function fold(
     tested: testedFiles(facts),
     findings: groupBy([...workspace.findings].sort(compareFindings), (finding) => finding.file),
     approvals: workspace.approvals,
+    proofs: workspace.proofs,
     previous: workspace.previous,
     at,
   });
@@ -225,6 +228,7 @@ function fold(
     generatedAt: at,
     root: workspace.root,
     findingsSource: workspace.findingsSource,
+    ...(workspace.config.proof === null ? {} : { prover: workspace.config.proof }),
     stats: {
       nodes: nodes.length,
       edges: edges.length,
@@ -621,6 +625,7 @@ type NodeContext = {
   readonly tested: ReadonlySet<string>;
   readonly findings: ReadonlyMap<string, readonly Finding[]>;
   readonly approvals: ReadonlyMap<string, string>;
+  readonly proofs: ReadonlyMap<string, ProofEntry>;
   readonly previous: Previous | null;
   readonly at: string;
 };
@@ -658,6 +663,7 @@ function buildNode(
   const findings = files.flatMap((file) => context.findings.get(file.path) ?? []);
   const before = context.previous?.nodes.get(id);
   const descriptions = files.flatMap((file) => file.notes.desc);
+  const proved = proofOf(context.proofs.get(id), hash);
   return {
     id,
     ...(parent === undefined ? {} : { parent }),
@@ -674,11 +680,12 @@ function buildNode(
       wip: files.some((file) => file.notes.wip),
       planned: files.length === 0 && !container,
       requireProof: files.some((file) => file.notes.requireProof),
-      proof: "none",
+      proof: proved.status,
       reviewed: approved === hash,
       changedSinceReview: approved !== undefined && approved !== hash,
     },
     spec: files.flatMap((file) => file.notes.specs),
+    ...(proved.proof === null ? {} : { proof: proved.proof }),
     risks: files.flatMap((file) =>
       file.notes.risks.map((message) => ({ file: file.path, message })),
     ),
