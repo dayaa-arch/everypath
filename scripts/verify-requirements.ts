@@ -49,13 +49,21 @@ async function checkNoDependencies(root: string): Promise<CheckResult> {
   );
 }
 
+/** XML namespace names the SVG markup and its script carry. They identify a vocabulary and are never fetched. */
+const NAMESPACE_URIS: ReadonlySet<string> = new Set([
+  "http://www.w3.org/2000/svg",
+  "http://www.w3.org/1999/xlink",
+]);
+
 const absoluteUrl = /https?:\/\/[^\s"'<>()\\]+/gi;
 const protocolRelativeAttribute = /\b(?:src|href)\s*=\s*["']?\s*(\/\/[^\s"'<>]+)/gi;
 const protocolRelativeUrlFunction = /url\(\s*["']?\s*(\/\/[^\s"')]+)/gi;
 
 function findNetworkReferences(html: string): string[] {
   const found = new Set<string>();
-  for (const match of html.matchAll(absoluteUrl)) found.add(match[0]);
+  for (const match of html.matchAll(absoluteUrl)) {
+    if (!NAMESPACE_URIS.has(match[0])) found.add(match[0]);
+  }
   for (const pattern of [protocolRelativeAttribute, protocolRelativeUrlFunction]) {
     for (const match of html.matchAll(pattern)) {
       if (match[1] !== undefined) found.add(match[1]);
