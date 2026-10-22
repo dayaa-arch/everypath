@@ -93,7 +93,7 @@ npx everypath tla install
 npx everypath check --tlc
 ```
 
-`tla install` は `tla2tools.jar` を `~/.everypath/` に置きます。`check --tlc` は変数とガードを含めてすべての経路を調べ、反例を状態、イベント、変数の値の列で出します。タイムアウトは既定で 120 秒で、`--timeout 300` のように秒で変えられます。
+`tla install` は `tla2tools.jar` を `~/.everypath/` に置きます。`check --tlc` は変数とガードを含めてすべての経路を調べ、反例を状態、イベント、変数の値の列で出します。簡易検査の違反の経路を TLC がガードどおりには通れないと確かめた場合は、その性質を「ガードを無視したときだけの経路」として出し、終了コードに数えません。タイムアウトは既定で 120 秒で、`--timeout 300` のように秒で変えられます。
 
 ## サンプルを動かす
 

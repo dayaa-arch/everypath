@@ -236,7 +236,10 @@ const LABEL_HEIGHT = 18;
 const LABEL_PADDING = 8;
 const LABEL_GAP = 2;
 
-/** The width 13 px text takes: 13 px for a character wider than Latin-1, 7.5 px for the rest, plus 8 px of air. */
+/**
+ * The width 13 px text takes: 13 px for a character wider than Latin-1, 7.5 px for the rest, plus
+ * 8 px of air.
+ */
 export function labelWidth(text: string): number {
   return (
     [...text].reduce((sum, char) => sum + ((char.codePointAt(0) ?? 0) > 0xff ? 13 : 7.5), 0) +
@@ -251,9 +254,9 @@ export function overlaps(a: Box, b: Box): boolean {
 
 /**
  * Where an edge's label may go, best first, as the box the 13 px text takes (`labelWidth` wide).
- * First on the line: the segments of the
- * polyline from the middle one outwards (the one after it, the one before it, and so on), and on
- * each the midpoint, then the point a quarter of the way along, then three quarters. Then beside the
+ * First on the line: the segments of the polyline from the middle one outwards (the one after it,
+ * the one before it, and so on), and on each the midpoint, then the point a quarter of the way
+ * along, then three quarters. Then beside the
  * line at the same points (above or below a horizontal segment, right or left of a vertical one),
  * for a line too short to carry its text clear of the boxes it joins, as a self-loop is.
  */
