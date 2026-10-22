@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>everypath</title>
+<style>
+:root {
+  --ink: #222222;
+  --muted: #6b6b6b;
+  --rule: #d4d4d4;
+  --grid-minor: #ececec;
+  --grid-major: #d9d9d9;
+  --paper: #ffffff;
+  --chrome: #f6f6f6;
+  --font: system-ui, -apple-system, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", Meiryo, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Noto Sans Mono CJK JP", monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) min(380px, 40vw);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas: "header header" "canvas panel" "legend legend";
+  font: 14px/1.5 var(--font);
+  color: var(--ink);
+  background: var(--paper);
+}
+button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+button:disabled { color: var(--muted); border-color: var(--rule); cursor: default; }
+button:not(:disabled):hover { background: var(--chrome); }
+label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+
+#header {
+  grid-area: header;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--chrome);
+}
+#header .project { font-weight: 700; font-size: 15px; }
+#header .counts { color: var(--ink); }
+#header .tools { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-left: auto; }
+#header .status { color: var(--muted); }
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 2px solid var(--rule);
+  border-top-color: var(--ink);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.message {
+  flex-basis: 100%;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 6px 10px;
+  border: 1px solid var(--ink);
+  border-radius: 4px;
+  background: var(--paper);
+  white-space: pre-wrap;
+}
+.message .text { flex: 1; }
+.message button { border: none; padding: 0 4px; font-size: 16px; line-height: 1; }
+
+#canvas {
+  grid-area: canvas;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+#canvas.panning { cursor: grabbing; }
+.grid-minor { fill: none; stroke: var(--grid-minor); stroke-width: 1; }
+.grid-major { fill: none; stroke: var(--grid-major); stroke-width: 1; }
+
+.box { cursor: pointer; }
+.box .title { font-size: 15px; font-weight: 600; text-anchor: middle; }
+.box .caption { font-size: 13px; text-anchor: middle; }
+.box .ring { fill: none; stroke: var(--ink); stroke-width: 2; stroke-dasharray: 5 3; }
+.box .now { fill: none; stroke-width: 4; }
+.box.recent { animation: fade-in 0.6s ease-out both; animation-delay: var(--since); }
+.box.recent .halo { fill: none; stroke-width: 2; animation: pulse 2s ease-out 15 both; animation-delay: var(--since); }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pulse { from { stroke-opacity: 0.9; stroke-width: 2; } to { stroke-opacity: 0; stroke-width: 16; } }
+
+.line path { fill: none; }
+.line .hit { stroke: transparent; stroke-width: 14; }
+.line.flow .stroke { stroke: var(--ink); stroke-width: 1.5; }
+.line.dep .stroke { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.7; }
+.line.trail .stroke { stroke-width: 3; stroke-dasharray: 8 6; }
+.line .label {
+  font-size: 13px;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  paint-order: stroke;
+  stroke: var(--paper);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+  fill: var(--ink);
+}
+.line .label.upright { text-anchor: start; }
+#canvas.labels-on-hover .line .label { opacity: 0; }
+#canvas.labels-on-hover .line:hover .label { opacity: 1; }
+.callout rect { fill: var(--paper); stroke: var(--ink); stroke-width: 1; }
+.callout text { font: 13px/1 var(--mono); fill: var(--ink); }
+
+#panel {
+  grid-area: panel;
+  overflow: auto;
+  padding: 16px;
+  border-left: 1px solid var(--rule);
+  background: var(--paper);
+}
+#panel h2 { margin: 0 0 4px; font-size: 18px; overflow-wrap: anywhere; }
+#panel h3 { margin: 18px 0 6px; font-size: 14px; border-bottom: 1px solid var(--rule); padding-bottom: 2px; }
+#panel p { margin: 4px 0; }
+#panel ul { margin: 4px 0; padding-left: 18px; }
+#panel dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0; }
+#panel dt { color: var(--muted); }
+#panel dd { margin: 0; overflow-wrap: anywhere; }
+#panel code, #panel .mono { font-family: var(--mono); font-size: 13px; }
+#panel .hint { color: var(--muted); }
+#panel .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+#panel .alert { padding: 6px 10px; border: 2px solid var(--ink); border-radius: 4px; margin: 8px 0; }
+#panel .stale { color: var(--muted); }
+#panel .steps { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+#panel .vars { font-family: var(--mono); font-size: 13px; }
+.chip { display: inline-flex; gap: 6px; align-items: center; }
+.chip svg { flex: none; }
+
+#legend {
+  grid-area: legend;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  align-items: center;
+  padding: 6px 16px;
+  border-top: 1px solid var(--rule);
+  background: var(--chrome);
+  font-size: 13px;
+}
+</style>
+</head>
+<body>
+<header id="header"><span class="project">everypath</span><span class="status">● 接続中</span></header>
+<svg id="canvas" role="img" aria-label="ステートチャート">
+  <defs>
+    <pattern id="grid-fine" width="20" height="20" patternUnits="userSpaceOnUse">
+      <path class="grid-minor" d="M 20 0 L 0 0 0 20"/>
+    </pattern>
+    <pattern id="grid" width="100" height="100" patternUnits="userSpaceOnUse">
+      <rect width="100" height="100" fill="url(#grid-fine)"/>
+      <path class="grid-major" d="M 100 0 L 0 0 0 100"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/>
+    </marker>
+  </defs>
+  <g id="world">
+    <rect id="paper" x="-20000" y="-20000" width="40000" height="40000" fill="url(#grid)"/>
+    <g id="base"></g>
+    <g id="live"></g>
+  </g>
+</svg>
+<aside id="panel"></aside>
+<footer id="legend"></footer>
+<!-- everypath:script -->
+</body>
+</html>

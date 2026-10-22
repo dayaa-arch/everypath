@@ -100,6 +100,50 @@ describe("verify-requirements R-02", () => {
     assert.match(result.stdout, /ok/);
   });
 
+  it("passes when ui.html only declares the SVG and xlink namespaces", async () => {
+    const root = await makeRoot({
+      uiHtml:
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"></svg>',
+    });
+    const result = verify(root);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /ok: R-02 ui\.html is offline/);
+  });
+
+  it("passes when a script creates SVG elements in the SVG namespace", async () => {
+    const root = await makeRoot({
+      uiHtml: '<script>var g=document.createElementNS("http://www.w3.org/2000/svg","g")</script>',
+    });
+    const result = verify(root);
+    assert.equal(result.status, 0, result.stderr);
+  });
+
+  it("fails on another URL and does not name the namespace beside it", async () => {
+    const root = await makeRoot({
+      uiHtml:
+        '<svg xmlns="http://www.w3.org/2000/svg"></svg><script src="https://cdn.example.com/a.js"></script>',
+    });
+    const result = verify(root);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /cdn\.example\.com/);
+    assert.doesNotMatch(result.stderr, /2000\/svg/);
+  });
+
+  for (const lookalike of [
+    "http://www.w3.org/2000/svg/evil.js",
+    "http://www.w3.org/2000/svg/",
+    "https://www.w3.org/2000/svg",
+    "http://www.w3.org/1999/xhtml",
+    "http://www.w3.org/2000/svg.example.com/a.js",
+  ]) {
+    it(`fails on ${lookalike}, which is not a namespace the check allows`, async () => {
+      const root = await makeRoot({ uiHtml: `<script src="${lookalike}"></script>` });
+      const result = verify(root);
+      assert.equal(result.status, 1);
+      assert.ok(result.stderr.includes(lookalike), result.stderr);
+    });
+  }
+
   it("skips the ui.html check when it is not built", async () => {
     const root = await makeRoot({});
     const result = verify(root);
