@@ -53,7 +53,7 @@ declare function scan(root: string, options?: { now?: Date; reason?: string }): 
 
 ## 非目標
 - §9 の簡易検査と `properties`・`violations` の計算。`violations` は常に `[]` を書く
-- §8.5 の観測遷移と、Ruby・Go・Rust・Java・Kotlin の import 解決（ファイルはノードになる）
+- §8.5 の観測遷移と、Ruby・Go・Rust・Java・Kotlin の import 解決（ファイルはノードになる）。観測遷移は `docs/specs/drift.md`、Go・Rust・Java・Kotlin は `docs/specs/imports-more.md` で後から足した
 - `everypath.properties.json` の読み込みと、`serve` からの再スキャン
 
 ## 検証方法
