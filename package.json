@@ -34,7 +34,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && tsx scripts/build-ui.ts",
     "dev": "tsx watch src/cli.ts serve example",
-    "test": "tsx --test 'test/**/*.test.ts'",
+    "test": "tsx --test \"test/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.check.json && tsc -p src/ui/tsconfig.json",
     "lint": "biome check .",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build && tsx scripts/verify-requirements.ts"
