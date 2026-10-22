@@ -127,6 +127,19 @@ describe("serve-cli guard: the serve record", () => {
     assert.equal((await request(serve, "GET", "/graph.json")).status, 200);
   });
 
+  it("names the first serve rather than the busy port when the second asks for the same port", async () => {
+    const root = await makeRepo({ "src/a.ts": ts("@state A") });
+    const env = await serveEnv();
+    const serve = await serveRepo(root, env);
+    const port = portOf(serve.url);
+
+    const second = await serveUntilExit({ directory: root, env, port });
+
+    assert.equal(second.status, 1, second.stderr);
+    assert.ok(second.stderr.includes(`127.0.0.1:${port}/`), second.stderr);
+    assert.doesNotMatch(second.stderr, /使用中/);
+  });
+
   it("starts over a record whose pid has exited, and records itself", async () => {
     const root = await makeRepo({ "src/a.ts": ts("@state A") });
     await writeFiles(root, { [`${OUTPUT}/serve.json`]: record(deadPid(), await closedPort()) });

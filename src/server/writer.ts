@@ -36,6 +36,13 @@ export type Job =
 /** What a job or a TLC wait is told once the server is closing. */
 export const STOPPING = "サーバーを止めているので受け付けません";
 
+/** Another running serve holds the directory: its record names where it listens. */
+export function alreadyServed(holder: ServeRecord): Error {
+  return new Error(
+    `everypath serve はこのディレクトリですでに動いています（http://127.0.0.1:${holder.port}/、pid ${holder.pid}）。そちらを使うか、止めてから起動し直してください`,
+  );
+}
+
 /** `missing-node`: no node of that id in the last graph. `stale-hash`: the node changed since. */
 export type JobResult = "done" | "missing-node" | "stale-hash";
 
@@ -68,11 +75,7 @@ export async function openWriter(
 ): Promise<Writer> {
   const record: ServeRecord = { version: 1, pid: process.pid, port };
   const holder = await writeServeRecord(root, record);
-  if (holder !== null) {
-    throw new Error(
-      `everypath serve はこのディレクトリですでに動いています（http://127.0.0.1:${holder.port}/、pid ${holder.pid}）。そちらを使うか、止めてから起動し直してください`,
-    );
-  }
+  if (holder !== null) throw alreadyServed(holder);
   const first = await scanWithHistory(root, { reason: "serve" }).catch(async (error: unknown) => {
     // A record left behind names this process, which the next start finds dead and replaces.
     await removeServeRecord(root, record).catch(() => {});

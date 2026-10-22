@@ -5,9 +5,9 @@ import { parseStateName } from "../core/expr.js";
 import { asText, errorMessage, isMissing, isRecord } from "../core/json.js";
 import { runTlc, summarizeTlc, type TlcOutcome, type TlcSummary } from "../core/tla/run.js";
 import type { Graph, HistoryEntry, Layout, StateName } from "../core/types.js";
-import { readOutput, serializeGraph } from "../core/workspace.js";
+import { isRunning, readOutput, readServeRecord, serializeGraph } from "../core/workspace.js";
 import { watchRepository } from "./watch.js";
-import { type JobResult, openWriter, STOPPING, type Writer } from "./writer.js";
+import { alreadyServed, type JobResult, openWriter, STOPPING, type Writer } from "./writer.js";
 
 /** Every SSE `data:` line. A viewer reads nothing from the server but these and the HTTP bodies. */
 export type ServerEvent =
@@ -70,6 +70,9 @@ export async function startServer({
   let lane: TlcLane = { kind: "idle" };
   let closing: Promise<void> | null = null;
 
+  // The writer's claim decides; this only names the holder before a shared --port fails to listen.
+  const holder = await readServeRecord(root);
+  if (holder !== null && isRunning(holder.pid)) throw alreadyServed(holder);
   const reviewer = await reviewerName(root);
   const http = createServer();
   const listening = await listen(http, port);
