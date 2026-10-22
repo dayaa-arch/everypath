@@ -13,7 +13,8 @@ import {
   exportTla,
   type InstallSource,
   installTla,
-  type TlcOutcome,
+  summarizeTlc,
+  type TlcSummary,
 } from "./core/tla/run.js";
 import type { Counterexample, Graph, PropertyResult, ScanWarning } from "./core/types.js";
 import { serializeGraph } from "./core/workspace.js";
@@ -322,10 +323,10 @@ function reportChecks(
 }
 
 /** What only TLC can say: a variable out of its range, and its error. `null` when TLC did not fail. */
-function tlcFailure(outcome: TlcOutcome | null): string[] | null {
-  if (outcome === null || outcome.kind === "missing") return null;
-  if (outcome.kind === "unmodeled") return [`エラー TLC: ${outcome.reason}`];
-  const { typeOk, error } = outcome.record;
+function tlcFailure(summary: TlcSummary | null): string[] | null {
+  if (summary === null || summary.kind === "missing") return null;
+  if (summary.kind === "unmodeled") return [`エラー TLC: ${summary.reason}`];
+  const { typeOk, error } = summary;
   if (typeOk === null && error === null) return null;
   return [
     ...(typeOk === null
@@ -398,15 +399,15 @@ async function runCheck(
   root: string,
   tlc: { readonly timeoutMs?: number } | null,
 ): Promise<number> {
-  const outcome = tlc === null ? null : await checkTlc(root, tlc);
+  const summary = tlc === null ? null : summarizeTlc(await checkTlc(root, tlc));
   const graph = await scan(root, { reason: "check" });
   const warnings = [
     ...graph.warnings,
-    ...(outcome?.kind === "checked" ? rejectionWarnings(outcome) : []),
+    ...(summary?.kind === "checked" ? rejectionWarnings(summary.rejected) : []),
   ];
   const stderr = warnings.map(describeWarning);
-  const failure = tlcFailure(outcome);
-  if (outcome?.kind === "missing") stderr.push(...outcome.guide);
+  const failure = tlcFailure(summary);
+  if (summary?.kind === "missing") stderr.push(...summary.guide);
   if (stderr.length > 0) process.stderr.write(`${stderr.join("\n")}\n`);
   process.stdout.write(`${reportChecks(graph, warnings, failure ?? []).join("\n")}\n`);
 
