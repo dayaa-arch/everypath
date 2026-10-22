@@ -14,7 +14,7 @@
 - [x] 7. reducer は次を満たす。Shift つきの選択で `many` になり、1 つまで減ると `node` に戻る。`history` は `at` と `reason` と中身が同じ項目を 1 つにまとめ、古い順で最新 200 件を持つ。差分つきの `graph` イベントはその差分を足す。`generate` は今の選択と `templates` から指示文を作って持ち、選択が変わると消える。`templates` が null なら何も変えない（`test/ui-state.test.ts`）
 - [x] 8. `modelSlice` は example から生成した `Model.tla` について、ログインなら `Init`、出ていく 5 本、入ってくる 3 本を返し、Home なら `no-unauth-home` の性質の定義も返す。`Model.tla` に無い状態なら null を返す（`test/ui-model.test.ts`、`src/core/tla/generate.ts` の出力で確かめる）
 - [x] 9. example を `relayout` で置いたとき、flow エッジのラベルの矩形どうしが重ならず、箱とも重ならない（`test/ui-view.test.ts`）
-- [ ] 10. 実物のブラウザで `npx tsx src/cli.ts serve example` を開く。未レビュー一覧が色の優先順に並び、行を押すとその箱が選ばれて画面の中央に来る。example に `@state 設定` のファイルを足すと変更ログに「+ 設定」の行が増える。全探索の後、パスワードリセットで「反例を直す」を押すと §13 相当の文面がクリップボードに入る。Shift+クリックで 2 つ選ぶと「まとめて生成」ができる。モデルタブにその箱のアクションが出て、「このモデルを説明させる」でクリップボードに入る。`signup_done` と `login_fail [retries==3]` のラベルが重ならない（内蔵ブラウザで確認し、画面写しを残す。足したファイルは後で消す）
+- [x] 10. 実物のブラウザで `npx tsx src/cli.ts serve example` を開く。未レビュー一覧が色の優先順に並び、行を押すとその箱が選ばれて画面の中央に来る。example に `@state 設定` のファイルを足すと変更ログに「+ 設定」の行が増える。全探索の後、パスワードリセットで「反例を直す」を押すと §13 相当の文面がクリップボードに入る。Shift+クリックで 2 つ選ぶと「まとめて生成」ができる。モデルタブにその箱のアクションが出て、「このモデルを説明させる」でクリップボードに入る。`signup_done` と `login_fail [retries==3]` のラベルが重ならない（内蔵ブラウザで確認し、画面写しを残す。足したファイルは後で消す）
 
 ## データの形
 ```ts
@@ -58,6 +58,7 @@ type Action = … | { kind: "select"; id: StateName | null; extend: boolean } | 
 - モデルタブの「性質」は、その状態の識別子を式に含む性質すべて。`logout-eventually-login` は行き先のログインにも出る。
 - 変更ログの理由は、serve を起動、scan をスキャン、watch を保存、rescan を再スキャンと書き、ほかはそのまま出す。
 - パネルとドックは、選択とタブが同じ間は再描画してもスクロール位置を保つ。指示文は、選ばれた箱の集合が変わるまで残り、同じ箱を押し直しても消えない。
+- 内蔵ブラウザは `clipboard-write` を拒んだ（`navigator.permissions` が denied）。そのため `writeText` が失敗したら、同じクリックの中で隠した欄を選んで `document.execCommand("copy")` を試し、それも失敗したときだけ手で写すよう案内する。内蔵ブラウザではこの経路でシステムのクリップボードに入った（`pbpaste` で確認）。
 - ビューアが読む `/history.json` と `/templates.json` は `src/ui/parse.ts` で形を確かめ、読めない項目は捨てる。
 
 ## 非目標

@@ -101,15 +101,16 @@ async function main(): Promise<void> {
 
   async function copy(text: string): Promise<void> {
     const count = state.prompt?.text === text ? `（${state.prompt.targets.length} ノード）` : "";
-    try {
-      await navigator.clipboard.writeText(text);
-      dispatch({ kind: "notice", text: `クリップボードにコピーしました${count}` });
-    } catch {
-      dispatch({
-        kind: "notice",
-        text: "クリップボードに書けませんでした。下の欄から写してください",
-      });
-    }
+    const copied = await navigator.clipboard.writeText(text).then(
+      () => true,
+      () => copyBySelection(text),
+    );
+    dispatch({
+      kind: "notice",
+      text: copied
+        ? `クリップボードにコピーしました${count}`
+        : "クリップボードに書けませんでした。下の欄から写してください",
+    });
   }
 
   async function loadHistory(): Promise<void> {
@@ -205,5 +206,26 @@ async function send(
     return text === "" ? `サーバーが ${response.status} を返しました` : text;
   } catch {
     return GET_FAILED;
+  }
+}
+
+/**
+ * Some browsers deny `clipboard-write` to a page they embed while still honouring the older copy
+ * command inside the same click, so that is tried before the person is asked to copy by hand.
+ */
+function copyBySelection(text: string): boolean {
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.append(area);
+  area.select();
+  try {
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    area.remove();
   }
 }
