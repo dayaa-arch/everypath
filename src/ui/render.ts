@@ -4,13 +4,12 @@ import type {
   EdgeRef,
   Graph,
   HistoryEntry,
-  NodeStatus,
   PropertyResult,
   StateName,
   StateNode,
 } from "../core/types.js";
 import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
-import { driftsFrom, fixOf, selectedIds } from "./facts.js";
+import { driftsFrom, fixOf, formatTime, proofSummary, selectedIds } from "./facts.js";
 import { type Box, boxAt, type Point, pointIn } from "./layout.js";
 import { modelSlice } from "./model.js";
 import { type Prompt, promptBlocker, promptLabel, promptTargets } from "./prompt.js";
@@ -94,12 +93,6 @@ const LINE_COLORS: Readonly<Record<Look, string | null>> = {
   trail: DANGER.stroke,
 };
 
-const PROOF: Readonly<Record<NodeStatus["proof"], string>> = {
-  none: "なし",
-  pending: "検証待ち",
-  passed: "成功",
-  failed: "失敗",
-};
 const SEVERITY = { high: "高", medium: "中", low: "低" } as const;
 
 type Attrs = Readonly<Record<string, string | number>>;
@@ -732,11 +725,6 @@ function list(items: readonly Child[]): HTMLElement {
   return html("ul", {}, ...items.map((item) => html("li", {}, item)));
 }
 
-function formatTime(iso: string): string {
-  const time = Date.parse(iso);
-  return Number.isNaN(time) ? iso : new Date(time).toLocaleString("ja-JP");
-}
-
 function panelOf(state: ViewState, commands: Commands): Content[] {
   const { graph, selection } = state;
   if (graph === null) return [html("p", { class: "hint" }, "サーバーから図を受け取っています…")];
@@ -798,6 +786,7 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
   const parent = tree.parentOf(node.id);
   const children = tree.childrenOf(node.id);
   const container = isContainer(node);
+  const proved = proofSummary(node);
   return [
     node.desc === null ? null : html("p", {}, node.desc),
     children.length === 0
@@ -840,11 +829,7 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
         `${live.length === 0 ? "違反なし" : `違反 ${live.length} 件`}${notes.length === 0 ? "" : `（${notes.join("、")}）`}`,
       ),
       html("dt", {}, "証明"),
-      html(
-        "dd",
-        {},
-        `${PROOF[status.proof]}${status.requireProof && status.proof !== "passed" ? "（証明必須）" : ""}`,
-      ),
+      html("dd", {}, proved.summary),
     ),
     container
       ? null
@@ -864,6 +849,9 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
         ? html("p", { class: "hint" }, "@state-spec の記述はありません")
         : list(node.spec.map((line) => html("code", {}, line))),
     ),
+    ...(proved.message === null
+      ? []
+      : section("証明ツールの出力", html("pre", {}, proved.message))),
     ...(touching.length === 0
       ? []
       : section("性質違反と反例", ...touching.flatMap((p) => propertyOf(p, state, commands)))),

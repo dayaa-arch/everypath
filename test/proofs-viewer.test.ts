@@ -16,14 +16,19 @@ import { defaultTemplates } from "./prompts.test.js";
 const sha1 = (text: string): string => createHash("sha1").update(text).digest("hex");
 const AT = "2026-10-22T03:00:00.000Z";
 
-const PAY = ts("@state 決済", "@state-require proof", "@state-spec ensures paid => receipt");
+const PAY = ts(
+  "@state 決済",
+  "@state-tested",
+  "@state-require proof",
+  "@state-spec ensures paid => receipt",
+);
 const ADMIN = ts(
   "@state 権限",
   "@state-require proof",
   "@state-spec requires role == admin",
   "@state-spec ensures granted => audited",
 );
-const ACCOUNT = ts("@state 口座", "@state-require proof");
+const ACCOUNT = ts("@state 口座", "@state-tested", "@state-require proof");
 const HOME = ts("@state Home");
 
 const MESSAGE =

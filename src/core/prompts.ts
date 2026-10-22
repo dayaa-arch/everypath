@@ -5,6 +5,7 @@ export const PROMPT_KINDS = [
   "fix-counterexample",
   "fix-drift",
   "write-tests",
+  "write-proof",
   "draw-model",
   "propose-properties",
   "explain-model",
