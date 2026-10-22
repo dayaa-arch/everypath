@@ -1,0 +1,64 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 13 and seed 2187617837360175530 with 8 workers on 8 cores with 3641MB heap and 64MB offheap memory [pid: 63123] (Mac OS X 15.7.4 aarch64, Eclipse Adoptium 17.0.8.1 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /work/example/.everypath/tla/Model.tla
+Parsing file /tmp/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module Model
+Starting... (2026-10-22 12:14:00)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-22 12:14:00.
+Error: Invariant P4_no_lock is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ state = "S6"
+/\ lastEvent = "tau"
+/\ v2_retries = 0
+/\ H5_reset_home = FALSE
+/\ v1_authed = FALSE
+
+State 2: <Next line 145, col 3 to line 158, col 58 of module Model>
+/\ state = "S6"
+/\ lastEvent = "e4_login_fail"
+/\ v2_retries = 1
+/\ H5_reset_home = FALSE
+/\ v1_authed = FALSE
+
+State 3: <Next line 145, col 3 to line 158, col 58 of module Model>
+/\ state = "S3"
+/\ lastEvent = "tau"
+/\ v2_retries = 1
+/\ H5_reset_home = TRUE
+/\ v1_authed = FALSE
+
+State 4: <Next line 145, col 3 to line 158, col 58 of module Model>
+/\ state = "S6"
+/\ lastEvent = "e2_cancel"
+/\ v2_retries = 1
+/\ H5_reset_home = TRUE
+/\ v1_authed = FALSE
+
+State 5: <Next line 145, col 3 to line 158, col 58 of module Model>
+/\ state = "S6"
+/\ lastEvent = "e4_login_fail"
+/\ v2_retries = 2
+/\ H5_reset_home = TRUE
+/\ v1_authed = FALSE
+
+State 6: <Next line 145, col 3 to line 158, col 58 of module Model>
+/\ state = "S6"
+/\ lastEvent = "e4_login_fail"
+/\ v2_retries = 3
+/\ H5_reset_home = TRUE
+/\ v1_authed = FALSE
+
+State 7: <Next line 145, col 3 to line 158, col 58 of module Model>
+/\ state = "S7"
+/\ lastEvent = "e4_login_fail"
+/\ v2_retries = 3
+/\ H5_reset_home = TRUE
+/\ v1_authed = FALSE
+
+147 states generated, 62 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 11.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 4 and the 95th percentile is 3).
+Finished in 00s at (2026-10-22 12:14:00)

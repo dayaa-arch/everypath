@@ -979,6 +979,250 @@ describe("tla: a stored verdict only fills what the quick check left pending", (
   });
 });
 
+const NO_LOCK = { id: "no-lock", kind: "never-reach", target: ["ロック"] };
+const RESET_HOME = {
+  id: "reset-home",
+  kind: "never-reach",
+  target: ["Home"],
+  avoid: ["パスワードリセット"],
+};
+
+/** What `generateTla` mints for example/ with NO_LOCK and RESET_HOME after its own four properties. */
+const NEVER_REACH_NAMES = names({
+  ...EXAMPLE_NAMES,
+  checks: { ...EXAMPLE_NAMES.checks, P4_no_lock: "no-lock", P5_reset_home: "reset-home" },
+});
+
+/**
+ * Real TLC 2.19 output for that model: P4_no_lock violated, with an H5_reset_home line in each state.
+ * TLC ran with `-workers auto`, so the trace is a real behavior but not the shortest one.
+ */
+const neverReachOutput = () =>
+  readFile(new URL("./fixtures/tlc-output-never-reach.txt", import.meta.url), "utf8");
+
+const NEVER_REACH_PATH = [
+  "ログイン",
+  "ログイン",
+  "パスワードリセット",
+  "ログイン",
+  "ログイン",
+  "ログイン",
+  "ロック",
+];
+
+async function exampleWith(...definitions: readonly unknown[]): Promise<string> {
+  const root = await exampleRepo();
+  for (const definition of definitions) await addProperty(root, definition);
+  return root;
+}
+
+async function exampleModel(...definitions: readonly unknown[]) {
+  const { graph, properties } = await analyze(await exampleWith(...definitions));
+  const generated = generateTla(graph, properties);
+  assert.ok(generated.ok, generated.ok ? "" : generated.reason);
+  return generated.model;
+}
+
+describe("tla: never-reach as a TLA+ invariant", () => {
+  it("checks a never-reach without avoid as the target never being the state", async () => {
+    const model = await exampleModel(NO_LOCK, RESET_HOME);
+
+    assert.deepEqual(model.invariants, [
+      "P1_no_unauth_home",
+      "P2_lock_after_3",
+      "P4_no_lock",
+      "P5_reset_home",
+      "TypeOK",
+    ]);
+    assert.deepEqual(model.temporal, ["P3_logout_eventually_login"]);
+    assert.deepEqual(model.names, NEVER_REACH_NAMES);
+    assert.deepEqual(model.rejected, []);
+    assert.ok(model.tla.split("\n").includes('P4_no_lock == ~(state \\in {"S7"})'), model.tla);
+    assert.ok(!model.tla.includes("H4"), model.tla);
+    assert.equal(
+      model.cfg([...model.invariants, ...model.temporal]),
+      [
+        "SPECIFICATION Spec",
+        "INVARIANT P1_no_unauth_home",
+        "INVARIANT P2_lock_after_3",
+        "INVARIANT P4_no_lock",
+        "INVARIANT P5_reset_home",
+        "INVARIANT TypeOK",
+        "PROPERTY P3_logout_eventually_login",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("remembers in a history variable whether the behavior has passed an avoid state", async () => {
+    const { tla } = await exampleModel(NO_LOCK, RESET_HOME);
+    const lines = tla.split("\n");
+
+    for (const line of [
+      "VARIABLES state, v1_authed, v2_retries, lastEvent, H5_reset_home",
+      "vars == <<state, v1_authed, v2_retries, lastEvent, H5_reset_home>>",
+      "  /\\ H5_reset_home \\in BOOLEAN",
+      '  /\\ H5_reset_home = (state \\in {"S3"})',
+      'P5_reset_home == (state \\in {"S2_Home"} => H5_reset_home)',
+    ]) {
+      assert.ok(lines.includes(line), `${line}\nin\n${tla}`);
+    }
+    const moves = Array.from(
+      { length: 13 },
+      (_, index) => `${index === 0 ? "  /\\ " : "     "}\\/ A${index + 1}`,
+    );
+    const next = [
+      "Next ==",
+      ...moves,
+      `  /\\ H5_reset_home' = (H5_reset_home \\/ state' \\in {"S3"})`,
+    ].join("\n");
+    assert.ok(tla.includes(`\n${next}\n\n`), tla);
+    const lockAction = EXPECTED_EXAMPLE_TLA.slice(
+      EXPECTED_EXAMPLE_TLA.indexOf("\\* src/auth/login.ts: @state-next ロック"),
+      EXPECTED_EXAMPLE_TLA.indexOf("\\* src/auth/login.ts: @state-next 新規登録"),
+    );
+    assert.ok(tla.includes(lockAction), "the actions themselves do not change");
+  });
+
+  it("needs no history variable when no avoid name is a state", async () => {
+    const { tla } = await exampleModel({ ...RESET_HOME, id: "ghost", avoid: ["Ghost"] });
+    const lines = tla.split("\n");
+
+    assert.ok(lines.includes('P4_ghost == ~(state \\in {"S2_Home"})'), tla);
+    assert.ok(lines.includes("VARIABLES state, v1_authed, v2_retries, lastEvent"), tla);
+    assert.ok(!tla.includes("H4"), tla);
+  });
+
+  it("reads TLC's report on a never-reach and leaves the history variable out of the steps", async () => {
+    const report = parseTlcOutput(await neverReachOutput(), NEVER_REACH_NAMES);
+
+    assert.deepEqual(report, {
+      kind: "violated",
+      check: "P4_no_lock",
+      distinctStates: 62,
+      trace: {
+        path: NEVER_REACH_PATH,
+        loopStart: null,
+        steps: [
+          { state: "ログイン", event: null, vars: vars("FALSE", "0") },
+          { state: "ログイン", event: "login_fail", vars: vars("FALSE", "1") },
+          { state: "パスワードリセット", event: null, vars: vars("FALSE", "1") },
+          { state: "ログイン", event: "cancel", vars: vars("FALSE", "1") },
+          { state: "ログイン", event: "login_fail", vars: vars("FALSE", "2") },
+          { state: "ログイン", event: "login_fail", vars: vars("FALSE", "3") },
+          { state: "ロック", event: "login_fail", vars: vars("FALSE", "3") },
+        ],
+      },
+    });
+  });
+});
+
+describe("tla: TLC's verdict beside a quick-check violation", () => {
+  const violatedAt = (graph: Graph, id: string): string[] =>
+    graph.nodes.filter((n) => n.violations.some((v) => v === id)).map((n) => n.id);
+  const allOk = async (): Promise<FakeJavaScript> => ({
+    rules: [],
+    otherwise: { output: await fixture("ok") },
+  });
+
+  it("keeps the quick check's verdict and path and adds TLC's trace with values when TLC confirms it", async () => {
+    const root = await exampleWith(NO_LOCK, RESET_HOME);
+    const java = await fakeJava({
+      rules: [
+        { when: "INVARIANT P4_no_lock", reply: { output: await neverReachOutput(), exit: 12 } },
+      ],
+      otherwise: { output: await fixture("ok") },
+    });
+
+    const checked = runCli(["check", "--tlc", root], root, java.env);
+
+    assert.equal(checked.status, 1, checked.stderr);
+    assert.ok((await java.cfgs())[0]?.includes("INVARIANT P4_no_lock\n"));
+    const graph = await readGraph(root);
+    const noLock = resultOf(graph, "no-lock");
+    assert.deepEqual([noLock.checkedBy, noLock.result], ["bfs", "violated"]);
+    assert.deepEqual(
+      noLock.counterexamples.map((c) => [...c.path]),
+      [["ログイン", "ロック"]],
+    );
+    assert.deepEqual(
+      [noLock.tlc?.result, noLock.tlc?.statesExplored, noLock.tlc?.staleModel],
+      ["violated", 62, undefined],
+    );
+    const trace = noLock.tlc?.counterexamples[0];
+    assert.deepEqual(trace?.path, NEVER_REACH_PATH);
+    assert.deepEqual(
+      trace?.steps.map((step) => step.vars),
+      ["0", "1", "1", "1", "2", "3", "3"].map((retries) => vars("FALSE", retries)),
+    );
+    assert.deepEqual(violatedAt(graph, "no-lock").sort(), ["ロック", "ログイン"].sort());
+    const stored = (await readResult(root)).properties.find(
+      (p: PropertyResult) => p.id === "no-lock",
+    );
+    assert.deepEqual([stored?.checkedBy, stored?.result], ["both", "violated"]);
+  });
+
+  it("keeps the violation and its exit code when TLC finds the path open only with guards ignored", async () => {
+    const root = await exampleWith(NO_LOCK, {
+      id: "no-lock-state",
+      kind: "invariant",
+      expr: "state != ロック",
+    });
+    const java = await fakeJava(await allOk());
+    runCli(["check", "--tlc", root], root, java.env);
+
+    const plain = runCli(["check", root]);
+
+    assert.equal(plain.status, 1, plain.stdout);
+    const graph = await readGraph(root);
+    for (const id of ["no-lock", "no-lock-state"]) {
+      const property = resultOf(graph, id);
+      assert.deepEqual(
+        [property.checkedBy, property.result, property.tlc?.result],
+        ["bfs", "violated", "ok"],
+        id,
+      );
+      assert.deepEqual([property.tlc?.counterexamples, property.tlc?.statesExplored], [[], 47], id);
+      assert.deepEqual(
+        property.counterexamples.map((c) => [...c.path]),
+        [["ログイン", "ロック"]],
+        id,
+      );
+      assert.ok(violatedAt(graph, id).includes("ロック"), id);
+    }
+  });
+
+  it("adds nothing to a quick-check ok, keeps a TLC error and marks a verdict about an older model stale", async () => {
+    const root = await exampleWith(NO_LOCK, {
+      id: "avoid-entry",
+      kind: "never-reach",
+      target: ["ロック"],
+      avoid: ["ログイン"],
+    });
+    const java = await fakeJava({
+      rules: [],
+      otherwise: { output: await fixture("parse-error"), exit: 150 },
+    });
+    runCli(["check", "--tlc", root], root, java.env);
+
+    const checked = await readGraph(root);
+    const avoided = resultOf(checked, "avoid-entry");
+    assert.deepEqual([avoided.result, avoided.tlc], ["ok", undefined]);
+    const failed = resultOf(checked, "no-lock");
+    assert.deepEqual([failed.result, failed.tlc?.result], ["violated", "error"]);
+
+    await addProperty(root, { id: "later", kind: "invariant", expr: "retries <= 2" });
+    const rescanned = await scan(root);
+
+    const stale = resultOf(rescanned, "no-lock");
+    assert.deepEqual(
+      [stale.result, stale.staleModel, stale.tlc?.result, stale.tlc?.staleModel],
+      ["violated", undefined, "error", true],
+    );
+    assert.ok(violatedAt(rescanned, "no-lock").includes("ロック"));
+  });
+});
+
 describe("tla: definitions the model leaves out", () => {
   const rejectedWarning = /typo.*TLA\+ にできません|TLA\+ にできません.*retriez/;
 

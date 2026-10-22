@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { checkProperties, PROPERTIES_FILE, parseProperties } from "../src/core/properties.js";
 import { scan } from "../src/core/scan.js";
 import type { Graph, PropertyResult } from "../src/core/types.js";
-import { makeRepo, node, readGraph, ts } from "./helpers/repo.js";
+import { makeRepo, node, readGraph, runCli, ts } from "./helpers/repo.js";
 
 const T1 = new Date("2026-10-21T00:00:00.000Z");
 
@@ -68,6 +68,7 @@ describe("properties: reading everypath.properties.json", () => {
   it("lists every kind in file order with its checker, and leaves non-BFS ones pending", async () => {
     const root = await makeRepo({
       ...LOGIN,
+      "src/home.ts": ts("@state Home", "@state-group 画面", "@state-next ログアウト on:logout"),
       [PROPERTIES_FILE]: JSON.stringify({
         properties: [
           { id: "inv-states", kind: "invariant", description: "説明", expr: "state != ロック" },
@@ -76,7 +77,13 @@ describe("properties: reading everypath.properties.json", () => {
           { id: "nr", kind: "never-reach", target: ["ログアウト"] },
           { id: "ar", kind: "always-reach", target: ["ログイン"] },
           { id: "nd", kind: "no-dead-end", except: ["ロック"] },
-          { id: "dov", kind: "dep-only-via", from_group: "画面", target: ["DB"], via: ["検証"] },
+          {
+            id: "dov",
+            kind: "dep-only-via",
+            from_group: "画面",
+            target: ["ログイン"],
+            via: ["ログアウト"],
+          },
         ],
       }),
     });
@@ -91,7 +98,7 @@ describe("properties: reading everypath.properties.json", () => {
         ["nr", "never-reach", "bfs", "violated"],
         ["ar", "always-reach", "bfs", "violated"],
         ["nd", "no-dead-end", "bfs", "ok"],
-        ["dov", "dep-only-via", "bfs", "pending"],
+        ["dov", "dep-only-via", "bfs", "ok"],
       ],
     );
     assert.equal(result(graph, "inv-states").description, "説明");
@@ -260,6 +267,138 @@ describe("properties: never-reach", () => {
     assert.equal(result(graph, "via-home").result, "ok");
     assert.equal(result(graph, "unreachable").result, "ok");
     assert.ok(graph.nodes.every((n) => n.violations.length === 0));
+  });
+});
+
+/**
+ * Deps: 一覧 -> 検証 -> DB and 詳細 -> キャッシュ -> DB. A flow edge 一覧 -> DB would be the shortest
+ * way to DB if flows counted. 一覧 sorts before 詳細.
+ */
+const LAYERS = {
+  "src/list.ts": [
+    ts(
+      "@state 一覧",
+      "@state-group 画面",
+      "@state-initial",
+      "@state-next 詳細 on:open",
+      "@state-next DB on:peek",
+    ),
+    'import "./check";',
+    "",
+  ].join("\n"),
+  "src/detail.ts": [ts("@state 詳細", "@state-group 画面"), 'import "./cache";', ""].join("\n"),
+  "src/check.ts": [ts("@state 検証", "@state-group 検証層"), 'import "./db";', ""].join("\n"),
+  "src/cache.ts": [ts("@state キャッシュ", "@state-group データ層"), 'import "./db";', ""].join(
+    "\n",
+  ),
+  "src/db.ts": ts("@state DB", "@state-group データ層"),
+};
+
+describe("properties: dep-only-via", () => {
+  const viaCheck = {
+    id: "db-via-check",
+    kind: "dep-only-via",
+    from_group: "画面",
+    target: ["DB"],
+    via: ["検証"],
+  };
+
+  it("reports the shortest dep path that skips every via state and marks the nodes on it", async () => {
+    const graph = await check(LAYERS, {
+      properties: [viaCheck, { ...viaCheck, id: "db-via-either", via: ["検証", "キャッシュ"] }],
+    });
+
+    const skipped = result(graph, "db-via-check");
+    assert.deepEqual([skipped.checkedBy, skipped.result], ["bfs", "violated"]);
+    assert.deepEqual(paths(skipped), [["詳細", "キャッシュ", "DB"]]);
+    assert.deepEqual(events(skipped), [null, null, null]);
+    assert.equal(skipped.counterexamples[0]?.loopStart, null);
+    assert.ok((skipped.statesExplored ?? 0) > 0);
+    for (const id of ["詳細", "キャッシュ", "DB"]) {
+      assert.deepEqual(node(graph, id).violations, ["db-via-check"], id);
+    }
+    for (const id of ["一覧", "検証"]) assert.deepEqual(node(graph, id).violations, [], id);
+
+    const either = result(graph, "db-via-either");
+    assert.deepEqual([either.result, either.counterexamples], ["ok", []]);
+    assert.deepEqual(propertyWarnings(graph), []);
+  });
+
+  it("counts a from_group state that is itself a target as a path of that state alone", async () => {
+    const graph = await check(LAYERS, {
+      properties: [{ ...viaCheck, id: "data", from_group: "データ層" }],
+    });
+    assert.deepEqual(paths(result(graph, "data")), [["DB"]]);
+  });
+
+  it("warns about a group no state has and names that are no state, and still judges", async () => {
+    const graph = await check(LAYERS, {
+      properties: [
+        { ...viaCheck, id: "typo-group", from_group: "画像" },
+        { ...viaCheck, id: "typo-names", target: ["DBB"], via: ["検証x"] },
+      ],
+    });
+
+    const messages = propertyWarnings(graph).map((w) => w.message);
+    assert.equal(messages.length, 3, messages.join("\n"));
+    for (const [id, name] of [
+      ["typo-group", "画像"],
+      ["typo-names", "DBB"],
+      ["typo-names", "検証x"],
+    ] as const) {
+      assert.ok(
+        messages.some((m) => m.includes(id) && m.includes(name)),
+        `${id} ${name} in ${messages}`,
+      );
+    }
+    assert.deepEqual(
+      graph.properties.map((p) => [p.id, p.result]),
+      [
+        ["typo-group", "ok"],
+        ["typo-names", "ok"],
+      ],
+    );
+  });
+
+  it("drops a definition without a usable from_group, target or via", async () => {
+    const graph = await check(LAYERS, {
+      properties: [
+        { id: "g1", kind: "dep-only-via", target: ["DB"], via: ["検証"] },
+        { ...viaCheck, id: "g2", from_group: "" },
+        { ...viaCheck, id: "g3", from_group: 3 },
+        { ...viaCheck, id: "g4", target: [] },
+        { id: "g5", kind: "dep-only-via", from_group: "画面", target: ["DB"] },
+        { ...viaCheck, id: "g6", via: [] },
+        { ...viaCheck, id: "g7", via: [1] },
+        viaCheck,
+      ],
+    });
+
+    const warnings = propertyWarnings(graph);
+    assert.equal(warnings.length, 7, JSON.stringify(warnings, null, 2));
+    for (const id of ["g1", "g2", "g3", "g4", "g5", "g6", "g7"]) {
+      assert.ok(
+        warnings.some((w) => w.message.includes(id)),
+        id,
+      );
+    }
+    assert.deepEqual(
+      graph.properties.map((p) => p.id),
+      ["db-via-check"],
+    );
+  });
+
+  it("fails everypath check with the dep path written with bare arrows", async () => {
+    const root = await makeRepo({
+      ...LAYERS,
+      [PROPERTIES_FILE]: JSON.stringify({ properties: [viaCheck] }),
+    });
+
+    const checked = runCli(["check", root]);
+
+    assert.equal(checked.status, 1, checked.stdout);
+    assert.match(checked.stdout, /違反 db-via-check \[dep-only-via\]/);
+    assert.match(checked.stdout, /詳細 → キャッシュ → DB/);
   });
 });
 
