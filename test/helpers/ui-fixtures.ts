@@ -86,6 +86,8 @@ export function flow(from: string, to: string, event: string | null = null): Flo
     set: [],
     text: event === null ? "" : `on:${event}`,
     via: [],
+    declared: true,
+    observed: false,
   };
 }
 
@@ -164,6 +166,7 @@ export function graph(parts: {
     edges,
     model: { initial: null, vars: [], events: [] },
     properties,
+    drift: [],
     warnings: [],
   };
 }

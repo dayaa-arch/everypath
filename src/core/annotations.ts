@@ -1,4 +1,5 @@
 import { parseEventName, parseStateName, parseVarDecl } from "./expr.js";
+import { parseRoute, type Route } from "./routes.js";
 import type { EventName, ModelVar, ParseWarning, ScanWarning, StateName } from "./types.js";
 
 /** Lines read for tags (SPEC §5). */
@@ -41,6 +42,7 @@ type Draft = {
   events: Located<EventName>[];
   vars: Located<ModelVar>[];
   nexts: NextDecl[];
+  routes: Located<Route>[];
 };
 
 /** What one file's annotations declare, before any of it is checked against the rest of the repository. */
@@ -147,6 +149,18 @@ const TAGS: ReadonlyMap<string, TagSpec> = new Map<string, TagSpec>([
     },
   ],
   [
+    "@state-route",
+    {
+      repeatable: true,
+      needsValue: true,
+      apply: ({ draft, value, line, report }) => {
+        const route = parseRoute(value);
+        if (route.ok) draft.routes.push({ line, value: route.value });
+        else report(rejected("@state-route", route.warning), route.warning);
+      },
+    },
+  ],
+  [
     "@state-initial",
     flag((draft, line) => {
       draft.initial = line;
@@ -220,6 +234,7 @@ export function readNotes(
     events: [],
     vars: [],
     nexts: [],
+    routes: [],
   };
   const warnings: ScanWarning[] = [];
   const seen = new Set<string>();

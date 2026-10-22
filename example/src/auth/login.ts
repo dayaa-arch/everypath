@@ -10,6 +10,7 @@
 // @state-next パスワードリセット
 // @state-spec ensures authed => session != none
 // @state-desc メールとパスワードで認証する。4 回目の失敗でロックする
+// @state-route /login
 
 import { createSession, findUser } from "../db.js";
 import { navigate, type Transition } from "../router.js";

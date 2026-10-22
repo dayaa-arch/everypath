@@ -2,6 +2,7 @@
 // @state-group 画面
 // @state-desc ログイン後の最初の画面
 // @state-next マイページ on:open_mypage
+// @state-route /home
 
 import { currentSession } from "./db.js";
 import { navigate, type Transition } from "./router.js";
