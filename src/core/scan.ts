@@ -5,9 +5,11 @@ import { sanitizeStateName } from "./expr.js";
 import { type ImportContext, resolveImports } from "./imports.js";
 import { resolveNext, type VarTable } from "./model.js";
 import { checkProperties, violationsOf } from "./properties.js";
+import { navigationPaths, resolveRoute, routeTable } from "./routes.js";
 import { withTlcResults } from "./tla/result.js";
 import type {
   DepEdge,
+  Drift,
   Edge,
   EdgeRef,
   EventName,
@@ -16,6 +18,7 @@ import type {
   Graph,
   HistoryEntry,
   ModelVar,
+  ObservedEdge,
   PropertiesFile,
   ScanWarning,
   StateName,
@@ -47,12 +50,20 @@ type FileFacts = {
   readonly lines: number;
   readonly isTest: boolean;
   readonly imports: readonly string[];
+  /** Route paths the file navigates to with a literal. */
+  readonly navigations: readonly string[];
   readonly notes: Notes;
   readonly warnings: readonly ScanWarning[];
 };
 
 /** A file that becomes part of a node, with that node's id. */
 type Member = { readonly file: FileFacts; readonly id: StateName };
+
+/** A node-to-node link, and the files it comes from. */
+type Link = { readonly from: StateName; readonly to: StateName; readonly via: readonly string[] };
+
+/** A `@state-next` edge before the code is compared with it. */
+type DeclaredFlow = Omit<FlowEdge, "observed">;
 
 /**
  * SPEC §8. Reads the repository and folds it into the graph without writing anything. The TLA+ lane
@@ -139,13 +150,14 @@ function extractFacts({ path, bytes }: Source, context: ImportContext): FileFact
     lines: lines.length,
     isTest: TEST_PATH.test(path),
     imports: resolveImports(path, content, context),
+    navigations: navigationPaths(path, content),
     notes,
     warnings,
   };
 }
 
 /**
- * SPEC §8.6 to 9, 11 and 12: every decision that needs more than one file. Pure, so the disk is read
+ * SPEC §8.5 to 9, 11 and 12: every decision that needs more than one file. Pure, so the disk is read
  * before it and written after it.
  */
 function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Graph {
@@ -156,7 +168,9 @@ function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Gra
   );
   const model = collectModel(members);
   const flows = collectFlows(members, new Map(model.vars.map((decl) => [decl.name, decl])));
-  const edges = [...collectDeps(members), ...flows.edges].sort(compareEdges);
+  const observed = collectObserved(members);
+  const { flowEdges, observedEdges, drift } = checkDrift(flows.edges, observed.links);
+  const edges = [...collectDeps(members), ...flowEdges, ...observedEdges].sort(compareEdges);
   const built = collectNodes(members, flows.edges, {
     tested: testedFiles(facts),
     findings: groupBy([...workspace.findings].sort(compareFindings), (finding) => finding.file),
@@ -195,11 +209,13 @@ function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Gra
     edges,
     model: graphModel,
     properties,
+    drift,
     warnings: [
       ...workspace.warnings,
       ...facts.flatMap((file) => file.warnings),
       ...model.warnings,
       ...flows.warnings,
+      ...observed.warnings,
       ...checked.warnings,
     ].sort(compareWarnings),
   };
@@ -304,7 +320,7 @@ function collectModel(members: readonly Member[]) {
 function collectFlows(members: readonly Member[], vars: VarTable) {
   const warnings: ScanWarning[] = [];
   const events = new Set<EventName>();
-  const merged = new Map<string, { edge: Omit<FlowEdge, "via">; via: Set<string> }>();
+  const merged = new Map<string, { edge: Omit<DeclaredFlow, "via">; via: Set<string> }>();
 
   for (const { file, id } of members) {
     for (const decl of file.notes.nexts) {
@@ -333,6 +349,7 @@ function collectFlows(members: readonly Member[], vars: VarTable) {
             guard: resolved.guard,
             set: resolved.set,
             text: decl.text,
+            declared: true,
           },
           via: new Set([file.path]),
         });
@@ -340,31 +357,82 @@ function collectFlows(members: readonly Member[], vars: VarTable) {
     }
   }
   const edges = [...merged.values()].map(
-    ({ edge, via }): FlowEdge => ({ ...edge, via: [...via].sort(compareText) }),
+    ({ edge, via }): DeclaredFlow => ({ ...edge, via: [...via].sort(compareText) }),
   );
   return { edges, events, warnings };
+}
+
+/** One link per `(from, to)`, in first-seen order. `via` is every file that gave the pair. */
+function mergeLinks(
+  entries: readonly { readonly from: StateName; readonly to: StateName; readonly file: string }[],
+): Link[] {
+  const merged = new Map<string, { from: StateName; to: StateName; via: Set<string> }>();
+  for (const { from, to, file } of entries) {
+    const key = JSON.stringify([from, to]);
+    const known = merged.get(key);
+    if (known !== undefined) known.via.add(file);
+    else merged.set(key, { from, to, via: new Set([file]) });
+  }
+  return [...merged.values()].map(({ from, to, via }) => ({
+    from,
+    to,
+    via: [...via].sort(compareText),
+  }));
 }
 
 /** File-level imports folded into node-level deps. A node never depends on itself. */
 function collectDeps(members: readonly Member[]): DepEdge[] {
   const nodeOf = new Map(members.map(({ file, id }) => [file.path, id]));
-  const merged = new Map<string, { from: StateName; to: StateName; via: Set<string> }>();
-  for (const { file, id } of members) {
-    for (const target of file.imports) {
+  const entries = members.flatMap(({ file, id }) =>
+    file.imports.flatMap((target) => {
       const to = nodeOf.get(target);
-      if (to === undefined || to === id) continue;
-      const key = JSON.stringify([id, to]);
-      const known = merged.get(key);
-      if (known !== undefined) known.via.add(file.path);
-      else merged.set(key, { from: id, to, via: new Set([file.path]) });
-    }
-  }
-  return [...merged.values()].map(({ from, to, via }) => ({
-    type: "dep",
-    from,
-    to,
-    via: [...via].sort(compareText),
-  }));
+      return to === undefined || to === id ? [] : [{ from: id, to, file: file.path }];
+    }),
+  );
+  return mergeLinks(entries).map((link) => ({ type: "dep", ...link }));
+}
+
+/** SPEC §8.5. Literal navigations resolved through `@state-route`, from the node of the calling file. */
+function collectObserved(members: readonly Member[]) {
+  const routes = routeTable(
+    members.flatMap(({ file, id }) =>
+      file.notes.routes.map(({ line, value }) => ({
+        file: file.path,
+        line,
+        route: value,
+        state: id,
+      })),
+    ),
+  );
+  const entries = members.flatMap(({ file, id }) =>
+    file.navigations.flatMap((path) => {
+      const to = resolveRoute(routes.table, path);
+      return to === null ? [] : [{ from: id, to, file: file.path }];
+    }),
+  );
+  return { links: mergeLinks(entries), warnings: routes.warnings };
+}
+
+/**
+ * Compares the code with the declaration by `(from, to)`: code shows no event or guard. A call that
+ * no flow declares is drift. A flow that no call takes is only unobserved, because a missing call
+ * proves nothing.
+ */
+function checkDrift(declared: readonly DeclaredFlow[], observed: readonly Link[]) {
+  const pair = ({ from, to }: { readonly from: StateName; readonly to: StateName }): string =>
+    JSON.stringify([from, to]);
+  const seen = new Set(observed.map(pair));
+  const declaredPairs = new Set(declared.map(pair));
+  const undeclared = observed.filter((link) => !declaredPairs.has(pair(link)));
+  return {
+    flowEdges: declared.map((edge): FlowEdge => ({ ...edge, observed: seen.has(pair(edge)) })),
+    observedEdges: undeclared.map(
+      (link): ObservedEdge => ({ type: "observed", ...link, declared: false, observed: true }),
+    ),
+    drift: undeclared
+      .map((link): Drift => ({ kind: "observed-not-declared", ...link }))
+      .sort((a, b) => compareText(a.from, b.from) || compareText(a.to, b.to)),
+  };
 }
 
 /** Files a test imports, plus files that say `@state-tested`. Test files count whether or not they are nodes. */
@@ -389,7 +457,7 @@ type NodeContext = {
 /** A flow target no file claims becomes a node with no files: `planned`. */
 function collectNodes(
   members: readonly Member[],
-  flows: readonly FlowEdge[],
+  flows: readonly DeclaredFlow[],
   context: NodeContext,
 ): StateNode[] {
   const filesById = new Map(
@@ -482,13 +550,20 @@ function compareWarnings(a: ScanWarning, b: ScanWarning): number {
   return compareText(a.file ?? "", b.file ?? "") || (a.line ?? 0) - (b.line ?? 0);
 }
 
-function edgeRef(edge: Edge): EdgeRef {
-  return {
-    type: edge.type,
-    from: edge.from,
-    to: edge.to,
-    event: edge.type === "flow" ? edge.event : null,
-  };
+/**
+ * History records no drift: the viewer and `readWorkspace` read flow and dep refs only. The file
+ * change that makes or ends a drift is in `updated` already.
+ */
+function edgeRef(edge: Edge): EdgeRef[] {
+  if (edge.type === "observed") return [];
+  return [
+    {
+      type: edge.type,
+      from: edge.from,
+      to: edge.to,
+      event: edge.type === "flow" ? edge.event : null,
+    },
+  ];
 }
 
 /** Flows that differ only in guard or set share a ref, so history records a change of shape, not of text. */
@@ -510,7 +585,7 @@ function diff(previous: Previous | null, graph: Graph, reason: string): HistoryE
   const removed = [...before.keys()].filter((id) => !current.has(id)).sort(compareText);
 
   const oldRefs = refsByKey(previous?.edges ?? []);
-  const newRefs = refsByKey(graph.edges.map(edgeRef));
+  const newRefs = refsByKey(graph.edges.flatMap(edgeRef));
   const addedEdges = [...newRefs].filter(([key]) => !oldRefs.has(key)).map(([, ref]) => ref);
   const removedEdges = [...oldRefs].filter(([key]) => !newRefs.has(key)).map(([, ref]) => ref);
 
