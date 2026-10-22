@@ -629,7 +629,7 @@ describe("tla: running TLC and merging its verdicts", () => {
     );
     assert.ok(
       first.includes(
-        `-XX:+UseParallelGC -jar ${java.jar} -workers auto -deadlock -config Model.cfg -metadir `,
+        `-XX:+UseParallelGC -jar ${java.jar} -workers 1 -deadlock -config Model.cfg -metadir `,
       ),
       first,
     );
@@ -999,7 +999,7 @@ const NEVER_REACH_NAMES = names({
 
 /**
  * Real TLC 2.19 output for that model: P4_no_lock violated, with an H5_reset_home line in each state.
- * TLC ran with `-workers auto`, so the trace is a real behavior but not the shortest one.
+ * TLC ran with `-workers auto` when this was captured, so the trace is a real behavior but not the shortest one.
  */
 const neverReachOutput = () =>
   readFile(new URL("./fixtures/tlc-output-never-reach.txt", import.meta.url), "utf8");

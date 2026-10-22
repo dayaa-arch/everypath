@@ -220,7 +220,9 @@ async function missingTool(jar: string): Promise<Missing | null> {
 }
 
 /**
- * `java -XX:+UseParallelGC -jar <jar> -workers auto -deadlock -config Model.cfg -metadir <tmp> Model.tla`
+ * `java -XX:+UseParallelGC -jar <jar> -workers 1 -deadlock -config Model.cfg -metadir <tmp> Model.tla`
+ * One worker keeps the breadth-first search deterministic, so the same model always yields the same
+ * shortest trace; with several workers the trace and the states explored change from run to run.
  * in `directory`, stdout and stderr interleaved. Killed after `budgetMs` or by `signal`. `-deadlock` keeps a state
  * with no exit (ロック) from counting as an error. TLC writes nothing outside the metadir.
  */
@@ -233,7 +235,7 @@ async function runJava(
   const metadir = await mkdtemp(join(tmpdir(), "everypath-tlc-"));
   try {
     return await new Promise<TlcRun>((resolve) => {
-      const args = ["-XX:+UseParallelGC", "-jar", jar, "-workers", "auto", "-deadlock"];
+      const args = ["-XX:+UseParallelGC", "-jar", jar, "-workers", "1", "-deadlock"];
       const child = spawn(
         "java",
         [...args, "-config", "Model.cfg", "-metadir", metadir, "Model.tla"],
