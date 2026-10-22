@@ -197,7 +197,6 @@ export type GraphStats = {
   readonly unreviewed: number;
 };
 
-/** `dep-only-via` waits for phase 2: its `from_group`, `target` and `via` are not read yet. */
 export type PropertyDef = {
   readonly id: PropertyId;
   readonly description: string | null;
@@ -211,7 +210,13 @@ export type PropertyDef = {
     }
   | { readonly kind: "always-reach"; readonly target: NonEmpty<StateName> }
   | { readonly kind: "no-dead-end"; readonly except: readonly StateName[] }
-  | { readonly kind: "dep-only-via" }
+  | {
+      readonly kind: "dep-only-via";
+      /** `from_group` in the file: a `@state-group` value. Every state of the group is a start. */
+      readonly fromGroup: string;
+      readonly target: NonEmpty<StateName>;
+      readonly via: NonEmpty<StateName>;
+    }
 );
 
 /** `everypath.properties.json` after validation. A `null` entry means "work it out from the graph". */
