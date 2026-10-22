@@ -40,4 +40,5 @@ type Mark = "violated" | "planned"; // 印の表は 1 つ。行の並びが優�
 - 同じ 2 状態を結ぶ遷移は 1 本ずつ 1 行にする（ビューアは ` / ` で 1 本にまとめる）。Mermaid は同じ組の複数の矢印を描ける。
 - ガードの文字列は `src/ui/view.ts` の `printGuard` と二重に持つ。`view.ts` は dagre（devDependency）に届くので CLI から import できず、`src/ui` は触らない。`test/mermaid.test.ts` が全演算子で一致を確かめる。共通の core モジュールに寄せるのは、`src/ui` を触れる別の変更で。
 - 条件 10 は、手元の別プロジェクトにある mermaid 11.17.2 の `dist/mermaid.min.js` を内蔵ブラウザで読んで確かめた。TLC の違反（`example/` の `no-unauth-home`）で `violated` の 3 状態と、`planned` を含む repo の出力の両方で `parse` と `render` が通り、日本語の状態名と `[retries<3]` のガードが欠けなかった。`@mermaid-js/mermaid-cli` は使っていない。
+- 後の変更（`docs/specs/viewer-drift.md`）。ガードの文字列化は `src/core/expr.ts` の `printGuard` と `edgeLabel` 1 つに寄せ、一致テストは消した。`violated` の印は `src/core/verdict.ts` の `isLiveViolation` に従うので、同じモデルの TLC が `ok` とした簡易検査の経路の状態には付かない。
 - 残る端（直さない）。同じ 2 状態を結ぶ矢印が多いと、Mermaid の自動配置でラベルが重なる（`example/` の `ログイン` 周り）。配置は Mermaid 側が決める。
