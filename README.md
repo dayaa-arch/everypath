@@ -6,6 +6,7 @@ AI エージェントがソースファイルの先頭に書いた `@state` ア�
 
 - Node.js 22 以上
 - `check --tlc` を使うときだけ、Java 11 以降
+- `prove` を使うときだけ、設定した検証ツール（Dafny、Verus など）
 
 ## インストール
 
@@ -25,7 +26,7 @@ npx everypath init
 
 | ファイル | 中身 |
 |---|---|
-| `everypath.config.json` | 任意の設定。import の別名（`aliases`）、テストファイルを状態に含めるか（`includeTests`）、無視するパス（`ignore`） |
+| `everypath.config.json` | 任意の設定。import の別名（`aliases`）、テストファイルを状態に含めるか（`includeTests`）、無視するパス（`ignore`）、`prove` が使う検証ツール（`proof`） |
 | `everypath.properties.json` | 性質の定義。最初は空 |
 | `.claude/skills/everypath/SKILL.md` | Claude Code のスキル。エージェントにアノテーションの書き方と守ることを伝える |
 | `.claude/settings.example.json` | Claude Code がファイルを書くたびに `npx everypath scan --quiet` を走らせる hook の例 |
@@ -126,6 +127,29 @@ npx everypath check --tlc
 
 `tla install` は `tla2tools.jar` を `~/.everypath/` に置きます。`check --tlc` は変数とガードを含めてすべての経路を調べ、反例を状態、イベント、変数の値の列で出します。簡易検査の違反の経路を TLC がガードどおりには通れないと確かめた場合は、その性質を「ガードを無視したときだけの経路」として出し、終了コードに数えません。タイムアウトは既定で 120 秒で、`--timeout 300` のように秒で変えられます。
 
+## 関数単位の証明
+
+`@state-require proof` を付けた状態は、検証ツールの証明が通るまで「証明必須」と表示されます。ツールは `everypath.config.json` の `proof` で決めます。
+
+```json
+{ "proof": { "tool": "dafny" } }
+```
+
+| `tool` | 既定の `command` | `{files}` に入るファイル | 結果の読み方 |
+|---|---|---|---|
+| `dafny` | `dafny verify {files}` | その状態の `.dfy` | `Error:` と `Related location:` の行を失敗した条件として残す |
+| `verus` | `verus {files}` | その状態の `.rs` | `error:` の見出し、場所、`failed …` の印が指すコードを残す |
+| `command` | なし（必須） | その状態のすべてのファイル | 終了コード 0 なら成功 |
+
+```bash
+npx everypath prove
+npx everypath check --require-proof
+```
+
+`prove` は状態ごとに `command` を走らせ、結果を `.everypath/proofs.json` に書きます。リポジトリの中で書くのはこのファイルだけで、ツールの作業ディレクトリは毎回消す一時ディレクトリです。命令はシェルを通さずに空白で区切り、1 語目が `./` のような相対パスならリポジトリのルートから探します。命令はリポジトリの設定が決めるので、信頼できるリポジトリでだけ実行してください。1 状態あたり既定で 120 秒で止め、`--timeout 300` のように秒で変えられます。
+
+Dafny の証明は `.dfy` ファイルに書き、先頭に対象と同じ `@state <名前>` を書くとその状態のファイルになります。証明の後にその状態のファイルが変わると、結果は古いものとして扱われ、もう一度 `prove` を走らせるまで「検証待ち」になります。図では、承認済みで証明が通った状態が青、証明が失敗した状態が赤になります。`check` は証明の通っていない状態を一覧に出しますが、終了コードに数えるのは `--require-proof` を付けたときだけです。
+
 ## サンプルを動かす
 
 `example/` はログイン画面の小さなアプリで、`no-unauth-home` が違反するバグをわざと入れてあります。このリポジトリを clone して実行します。
@@ -149,7 +173,8 @@ node dist/cli.js check example --tlc
 |---|---|
 | `everypath init [dir]` | 設定、性質、スキル、hook の例を置き、`.gitignore` に追記する |
 | `everypath scan [dir] [--json] [--quiet]` | 一回スキャンして `.everypath/graph.json` を書く |
-| `everypath check [dir] [--tlc [--timeout 秒]]` | 性質を検査する。違反があれば終了コード 1 |
+| `everypath check [dir] [--tlc [--timeout 秒]] [--require-proof]` | 性質を検査する。違反があれば終了コード 1。`--require-proof` なら、証明の通っていない状態があっても 1 |
+| `everypath prove [dir] [--timeout 秒]` | `@state-require proof` の状態ごとに検証ツールを走らせ、`.everypath/proofs.json` を書く。すべて通れば終了コード 0 |
 | `everypath export [dir] --mermaid` | 状態と遷移を Mermaid の `stateDiagram-v2` にして標準出力に出す。README や PR に貼れる。何も書かない |
 | `everypath tla export [dir]` | `.everypath/tla/Model.tla` と `Model.cfg` を書く |
 | `everypath tla install` | `tla2tools.jar` を `~/.everypath/` に置く |
