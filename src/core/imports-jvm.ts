@@ -6,6 +6,7 @@ import {
   isWord,
   joinPath,
   lexer,
+  pushTo,
   type Syntax,
 } from "./imports-common.js";
 
@@ -51,8 +52,7 @@ export function jvmRoots(files: readonly string[]): JvmRoots {
   const roots = new Map<string, Root>([["", { dir: "", module: null, set: "main" }]]);
   const directories = new Map<string, string[]>();
   for (const file of sources) {
-    const dir = dirOf(file);
-    directories.set(dir, [...(directories.get(dir) ?? []), file]);
+    pushTo(directories, dirOf(file), file);
     const sourceSet = sourceSetOf(file);
     if (sourceSet !== null) roots.set(sourceSet.dir, sourceSet);
   }

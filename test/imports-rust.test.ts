@@ -227,7 +227,7 @@ use crate::b::*;
   it("resolves workspace crates by [package] name or [lib] name, and nothing else", async () => {
     const graph = await graphOf({
       "Cargo.toml": '[workspace]\nmembers = ["crates/*"]\n',
-      "crates/core/Cargo.toml": cargo("shop-core"),
+      "crates/core/Cargo.toml": '\uFEFF[package]\r\nname = "shop-core"\r\n',
       "crates/core/src/lib.rs": rs("Core", "pub mod model;\n"),
       "crates/core/src/model.rs": rs("Model"),
       "crates/api/Cargo.toml": cargo(

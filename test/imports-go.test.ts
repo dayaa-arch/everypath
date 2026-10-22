@@ -248,21 +248,23 @@ describe("imports: Go modules", () => {
     assert.deepEqual(main?.via, ["main.go"]);
   });
 
-  it("reads quoted, block and commented module lines", async () => {
+  it("reads quoted, block, commented and byte-order-marked CRLF module lines", async () => {
     const graph = await graphOf({
       "a/go.mod": '// the first module\nmodule "example.com/quoted" // trailing\n\ngo 1.22\n',
       "a/q/q.go": go("Q", "q"),
       "b/go.mod": "module (\n\texample.com/blocky\n)\n",
       "b/k/k.go": go("K", "k"),
+      "d/go.mod": "\uFEFFmodule example.com/windows\r\n\r\ngo 1.22\r\n",
+      "d/w/w.go": go("W", "w"),
       "c/go.mod": "module example.com/user\n",
       "c/main.go": go(
         "User",
         "main",
-        'import (\n\t"example.com/quoted/q"\n\t"example.com/blocky/k"\n)\n',
+        'import (\n\t"example.com/quoted/q"\n\t"example.com/blocky/k"\n\t"example.com/windows/w"\n)\n',
       ),
     });
 
-    assert.deepEqual(depPairs(graph), ["User->K", "User->Q"]);
+    assert.deepEqual(depPairs(graph), ["User->K", "User->Q", "User->W"]);
   });
 
   it("records nothing for a module path two go.mod files both claim", async () => {

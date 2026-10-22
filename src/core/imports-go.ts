@@ -8,6 +8,7 @@ import {
   lexer,
   type Manifest,
   nameOf,
+  pushTo,
   type Syntax,
 } from "./imports-common.js";
 
@@ -29,7 +30,7 @@ export type GoModules = {
 };
 
 function modulePath(text: string): string | null {
-  const quoted = MODULE_DIRECTIVE.exec(text)?.[1];
+  const quoted = MODULE_DIRECTIVE.exec(text.replace(/^\uFEFF/, ""))?.[1];
   if (quoted === undefined) return null;
   const path = /^["`]/.test(quoted) ? quoted.slice(1, -1) : quoted;
   return path === "" ? null : path;
@@ -41,7 +42,7 @@ export function goModules(files: readonly string[], manifests: readonly Manifest
   for (const { path, text } of gomods) {
     const claimed = modulePath(text);
     if (claimed === null) continue;
-    claims.set(claimed, [...(claims.get(claimed) ?? []), { path: claimed, dir: dirOf(path) }]);
+    pushTo(claims, claimed, { path: claimed, dir: dirOf(path) });
   }
   const modules = [...claims.values()]
     .flatMap((claimants) => (claimants.length === 1 ? claimants : []))
@@ -50,8 +51,7 @@ export function goModules(files: readonly string[], manifests: readonly Manifest
   const packages = new Map<string, string[]>();
   for (const file of files) {
     if (!file.endsWith(".go") || file.endsWith(TEST_SUFFIX)) continue;
-    const dir = dirOf(file);
-    packages.set(dir, [...(packages.get(dir) ?? []), file]);
+    pushTo(packages, dirOf(file), file);
   }
   return { modules, moduleDirs: new Set(gomods.map(({ path }) => dirOf(path))), packages };
 }

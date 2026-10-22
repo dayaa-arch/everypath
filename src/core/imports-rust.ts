@@ -7,6 +7,7 @@ import {
   lexAll,
   type Manifest,
   nameOf,
+  pushTo,
   type Syntax,
   type Token,
 } from "./imports-common.js";
@@ -72,7 +73,7 @@ export function rustCrates(files: readonly string[], manifests: readonly Manifes
     const crate = (names.lib ?? names.package)?.replaceAll("-", "_");
     const root = joinPath(dirOf(path), "src", "lib.rs");
     if (crate === undefined || !rust.has(root)) continue;
-    claims.set(crate, [...(claims.get(crate) ?? []), root]);
+    pushTo(claims, crate, root);
   }
   const libs = new Map<string, string>();
   for (const [crate, roots] of claims) {
