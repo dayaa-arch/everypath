@@ -17,10 +17,14 @@ import { makeRepo, ts, writeFiles } from "./helpers/repo.js";
 
 const SRC = fileURLToPath(new URL("../src", import.meta.url));
 
-/** The only files allowed to write: `.everypath/` output, the TLC run directory and `init`'s templates. */
+/**
+ * The only files allowed to write: `.everypath/` output, the TLC run directory, the prover's working
+ * directory and `init`'s templates.
+ */
 const WRITERS: ReadonlySet<string> = new Set([
   "core/workspace.ts",
   "core/tla/run.ts",
+  "core/prove.ts",
   "core/init.ts",
 ]);
 
@@ -39,8 +43,12 @@ const WRITE_FUNCTIONS: ReadonlySet<string> = new Set([
 /** The one file in `src/server/` that may call a writer: every other one submits a job to it. */
 const SERVER_WRITER = "server/writer.ts";
 /** Writers outside workspace.ts, which run their own writes. workspace.ts's are read from its exports. */
-const OTHER_WRITERS = ["scan", "scanWithHistory", "rescanWithHistory", "checkTlc", "exportTla"];
-const WRITING_MODULE = /(?:^|\/)(?:workspace|scan|tla\/run)\.js$/;
+const OTHER_WRITERS = [
+  ...["scan", "scanWithHistory", "rescanWithHistory", "checkTlc", "exportTla"],
+  /** proofs.json has one writer, `everypath prove`. The server only reads it. */
+  "prove",
+];
+const WRITING_MODULE = /(?:^|\/)(?:workspace|scan|tla\/run|prove)\.js$/;
 
 /** Every function workspace.ts exports whose name starts with write, commit, replace or remove. */
 async function workspaceWriters(): Promise<string[]> {
@@ -154,7 +162,7 @@ async function inspect(directory: string): Promise<{
 }
 
 describe("single writer", () => {
-  it("lets only workspace.ts, tla/run.ts and init.ts in src/core/ write, and keeps src/server/ off the writers", async () => {
+  it("lets only workspace.ts, tla/run.ts, prove.ts and init.ts in src/core/ write, and keeps src/server/ off the writers", async () => {
     const { writers, violations } = await inspect(SRC);
 
     assert.deepEqual(violations, []);
@@ -166,7 +174,7 @@ describe("single writer: the writers it knows", () => {
   it("reads the writers of workspace.ts from its exports, and none of its readers", async () => {
     const names = await workspaceWriters();
 
-    const writers = ["writeWorkspace", "writeApproval", "commitTlc", "replaceFile"];
+    const writers = ["writeWorkspace", "writeApproval", "commitTlc", "replaceFile", "writeProofs"];
     for (const writer of [...writers, "writeServeRecord", "removeServeRecord"]) {
       assert.ok(names.includes(writer), `${writer} in ${names.join(", ")}`);
     }
@@ -210,7 +218,7 @@ describe("single writer: the check fails on a planted violation", () => {
     assert.equal(violations.length, 5, violations.join("\n"));
   });
 
-  it("lets only src/server/writer.ts import a writer of workspace.ts, scan or the TLC lane", async () => {
+  it("lets only src/server/writer.ts import a writer of workspace.ts, scan, the TLC lane or prove", async () => {
     const violations = await inspectTree({
       "server/a.ts": 'import { writeWorkspace } from "../core/workspace.js";\n',
       "server/b.ts": 'import { analyze, scan, scanWithHistory } from "../core/scan.js";\n',
@@ -219,6 +227,7 @@ describe("single writer: the check fails on a planted violation", () => {
       "server/e.ts":
         'import { commitTlc, readOutput, writeApproval } from "../core/workspace.js";\n',
       "server/f.ts": 'import { checkTlc, exportTla, runTlc } from "../core/tla/run.js";\n',
+      "server/g.ts": 'import { prove, readProofOutput } from "../core/prove.js";\n',
       "server/writer.ts":
         'import { scanWithHistory } from "../core/scan.js";\nimport { commitTlc, writeWorkspace } from "../core/workspace.js";\n',
     });
@@ -233,6 +242,7 @@ describe("single writer: the check fails on a planted violation", () => {
       "src/server/e.ts: imports writeApproval from ../core/workspace.js",
       "src/server/f.ts: imports checkTlc from ../core/tla/run.js",
       "src/server/f.ts: imports exportTla from ../core/tla/run.js",
+      "src/server/g.ts: imports prove from ../core/prove.js",
     ]);
   });
 

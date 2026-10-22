@@ -1,0 +1,6 @@
+source: https://github.com/dafny-lang/dafny/blob/5f717bf447b19d38cad1b69b1bf9a9f102feccfb/Source/IntegrationTests/TestFiles/LitTests/LitTest/dafny4/Bug72.dfy.expect
+exit: 0
+note: Bug72.dfy の RUN 行は %verify（dafny verify）で %exits-with が無いので、終了コードは 0
+---
+
+Dafny program verifier finished with 1 verified, 0 errors

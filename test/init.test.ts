@@ -285,6 +285,7 @@ describe("skill/SKILL.md", () => {
       "everypath check --tlc",
       "everypath.properties.json",
       "@state-require proof",
+      "everypath prove",
       "@state-hidden",
       "@state-risk",
       "reviewed",

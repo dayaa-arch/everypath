@@ -1,0 +1,8 @@
+source: https://github.com/dafny-lang/dafny/blob/5f717bf447b19d38cad1b69b1bf9a9f102feccfb/docs/DafnyRef/UserGuide.1.expect
+exit: 4
+note: UserGuide.md 13.7.1.1 の %check-verify。終了コードは出典に無く、UserGuide.md 13.6.3 の「4 -- verification errors」による
+---
+text.dfy(6,4): Error: a postcondition could not be proved on this return path
+text.dfy(2,12): Related location: this is the postcondition that could not be proved
+
+Dafny program verifier finished with 0 verified, 1 error

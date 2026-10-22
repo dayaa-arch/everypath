@@ -720,6 +720,19 @@ describe("serve: what triggers a rescan", () => {
       },
       seen: (graph) => graph.properties.some((p) => p.id === "never-login"),
     },
+    {
+      file: ".everypath/proofs.json",
+      content: {
+        Home: {
+          result: "passed",
+          tool: "dafny",
+          message: "",
+          at: "2026-10-22T03:00:00.000Z",
+          hash: sha1(HOME_SOURCE),
+        },
+      },
+      seen: (graph) => node(graph, "Home").status.proof === "passed",
+    },
   ];
   for (const { file, content, seen } of triggers) {
     it(`rescans and broadcasts when ${file} changes`, async () => {
@@ -1000,6 +1013,7 @@ describe("serve: prompt templates (docs/specs/viewer-panels.md condition 6)", ()
     "fix-counterexample",
     "fix-drift",
     "propose-properties",
+    "write-proof",
     "write-tests",
   ];
 

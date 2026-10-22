@@ -1,0 +1,6 @@
+source: https://github.com/dafny-lang/dafny/blob/5f717bf447b19d38cad1b69b1bf9a9f102feccfb/docs/DafnyRef/Types.5.expect
+exit: 2
+note: 終了コードは出典に無く、UserGuide.md 13.6.3 の「2 -- syntax, parse, or name or type resolution errors」による
+---
+text.dfy(4,14): Error: literal (25) is too large for the bitvector type bv4
+1 resolution/type errors detected in text.dfy

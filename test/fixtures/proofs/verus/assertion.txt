@@ -1,0 +1,15 @@
+source: https://github.com/verus-lang/verus/blob/920ee002ddf3510d096c97deea4c1691c5af6fe2/source/docs/guide/src/getting_started_cmd_line.md?plain=1#L52-L62
+exit: 1
+note: 終了コードは出典に無い。rustc と同じく失敗で 1 とした（推測）
+---
+note: verifying root module
+
+error: assertion failed
+  --> getting_started.rs:19:12
+   |
+19 |     assert(forall|i: int, j: int| min(i, j) == min(i, i));
+   |            ^^^^^^ assertion failed
+
+error: aborting due to previous error
+
+verification results:: 0 verified, 1 errors

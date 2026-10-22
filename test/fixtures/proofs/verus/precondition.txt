@@ -1,0 +1,12 @@
+source: https://github.com/verus-lang/verus/blob/920ee002ddf3510d096c97deea4c1691c5af6fe2/source/vir/src/messages.rs#L115-L122
+exit: 1
+note: doc コメントの例。行頭の /// と、行末の // 以降（例の説明の注記）を消した。終了コードは出典に無く 1 とした（推測）
+---
+error: precondition not satisfied
+  --> filename.rs:18:5
+   |
+14 |     requires(b);
+   |              - failed precondition
+...
+18 |     has_expectations(false);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^

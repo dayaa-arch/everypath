@@ -1,0 +1,7 @@
+source: https://github.com/verus-lang/verus/blob/920ee002ddf3510d096c97deea4c1691c5af6fe2/source/docs/guide/src/getting_started_cmd_line.md?plain=1#L32-L34
+exit: 0
+note: 終了コードは出典に無い。通ったので 0 とした（推測）
+---
+note: verifying root module
+
+verification results:: 1 verified, 0 errors

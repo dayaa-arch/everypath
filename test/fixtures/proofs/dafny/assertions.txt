@@ -1,0 +1,8 @@
+source: https://github.com/dafny-lang/dafny/blob/5f717bf447b19d38cad1b69b1bf9a9f102feccfb/Source/IntegrationTests/TestFiles/LitTests/LitTest/dafny4/Bug73.dfy.expect
+exit: 4
+note: Bug73.dfy の RUN 行が %exits-with 4 %verify
+---
+Bug73.dfy(7,13): Error: assertion could not be proved
+Bug73.dfy(13,13): Error: assertion could not be proved
+
+Dafny program verifier finished with 0 verified, 2 errors
