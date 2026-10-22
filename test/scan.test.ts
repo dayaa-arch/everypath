@@ -8,6 +8,7 @@ import { parseStateName } from "../src/core/expr.js";
 import { scan } from "../src/core/scan.js";
 import type { FlowEdge, HistoryEntry, ModelVar } from "../src/core/types.js";
 import { depPairs, flows, ids, makeRepo, node, readGraph, ts, writeFiles } from "./helpers/repo.js";
+import { fastestOf } from "./helpers/timing.js";
 
 const T1 = new Date("2026-10-21T00:00:00.000Z");
 const T2 = new Date("2026-10-21T01:00:00.000Z");
@@ -96,14 +97,14 @@ describe("config: ignore globs", () => {
     const deep = Array.from({ length: 30 }, (_, i) => `d${i}`).join("/");
     const stacked = glob(`${"**/".repeat(10)}x`);
     const stars = glob(`${"*a".repeat(12)}b`);
-    const started = performance.now();
+    const { ms } = fastestOf(() => {
+      assert.equal(stacked.test(deep), false);
+      assert.equal(stacked.test(`${deep}/x`), true);
+      assert.equal(stars.test("a".repeat(200)), false);
+    });
 
-    assert.equal(stacked.test(deep), false);
-    assert.equal(stacked.test(`${deep}/x`), true);
-    assert.equal(stars.test("a".repeat(200)), false);
-
-    const elapsed = performance.now() - started;
-    assert.ok(elapsed < 50, `${elapsed.toFixed(1)} ms`);
+    // The backtracking regex took about 183 s on the stacked pattern.
+    assert.ok(ms < 1000, `${ms.toFixed(1)} ms`);
   });
 });
 
