@@ -132,6 +132,19 @@ describe("proofs.json: a node's proof", () => {
     assert.deepEqual(pay.files, ["proofs/pay.dfy", "src/pay.ts"]);
     assert.equal(isScanInput("proofs/pay.dfy"), true);
   });
+
+  it("does not count a .dfy file as code a test must import, so a proof never makes a node untested", async () => {
+    const proof = ts("@state 決済");
+    const tested = { "src/pay.ts": PAY, "test/pay.test.ts": 'import "../src/pay";\n' };
+
+    const before = await graphOf(tested);
+    const after = await graphOf({ ...tested, "proofs/pay.dfy": proof });
+    const untested = await graphOf({ "src/pay.ts": PAY, "proofs/pay.dfy": proof });
+
+    assert.equal(node(before, "決済").status.tested, true);
+    assert.equal(node(after, "決済").status.tested, true);
+    assert.equal(node(untested, "決済").status.tested, false);
+  });
 });
 
 describe("everypath.config.json: proof", () => {
