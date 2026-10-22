@@ -50,6 +50,7 @@ type Action = … | { kind: "select"; id: StateName | null; extend: boolean } | 
 - 作る種類は 5 つ。「仕様と証明を書く」（フェーズ 3）と「乖離を直す」（`drift` がまだ無い）は作らない。発動条件は、反例を直すが「今のモデルでの違反がある」、テストを書くが「`!tested` かつ計画のみでない」、モデルを描かせるが「計画のみでなく、出ていく flow が無いか、どれにも `if:` と `set:` が無い」、残り 2 つが「いつでも」。
 - 承認済み隣接ノードは、対象と flow でつながるノードと反例の経路上のノードのうち、`reviewed` で対象でないもの。
 - サーバーに `GET /templates.json` を足す。ブラウザは `.everypath/templates/` を読めず、上書きを効かせるにはサーバーが読むしかないため。既定のテンプレートは `src/cli.ts` が `dist/ui.html` と同じくパッケージからの相対パスで渡す。テンプレートと `Model.tla` は接続のたびに読み直し、`Model.tla` は全探索の終了とモデルタブを開いたときにも読み直す。
+- `src/core/prompts.ts` は import を 1 つも持たない。ビューア（DOM）とサーバー（Node）が同じ `fillTemplate` と `PROMPT_KINDS` を使うために core に置き、`src/ui` に許す core の import を `types` に加えてこの 1 ファイルだけにした。Node が入り込まないことは `test/ui-boundaries.test.ts` で確かめる。
 - クリップボードへの書き込みはクリックの処理の中で同期的に `generate` を流してから行う。書けなかったときは、生成した文面を読み取り専用の欄に出して手で写せるようにする。
 
 ## 非目標

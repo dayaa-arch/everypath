@@ -52,9 +52,12 @@ async function markupFromStrings(dir: string): Promise<Finding[]> {
 
 const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(?\s*)["']([^"']+)["']/g;
 
-/** An import of Node, of the server, or of core code that is not the types file. */
+/**
+ * An import of Node, of the server, or of core code that is neither the types file nor the prompt
+ * filler (which has no imports itself, so allowing it cannot let Node in; see below).
+ */
 async function strayImports(dir: string): Promise<Finding[]> {
-  const typesFile = resolve(dir, "..", "core", "types");
+  const shared = new Set(["types", "prompts"].map((name) => resolve(dir, "..", "core", name)));
   const found: Finding[] = [];
   for (const file of (await filesUnder(dir)).filter((name) => name.endsWith(".ts"))) {
     const text = await readFile(file, "utf8");
@@ -64,7 +67,7 @@ async function strayImports(dir: string): Promise<Finding[]> {
       } else if (specifier.startsWith(".")) {
         const target = resolve(dirname(file), specifier.replace(/\.js$/, ""));
         const inside = !relative(dir, target).startsWith("..");
-        if (!inside && target !== typesFile)
+        if (!inside && !shared.has(target))
           found.push({ file: relative(dir, file), rule: specifier });
       }
     }
@@ -132,7 +135,7 @@ describe("src/ui builds no markup from strings", () => {
   });
 });
 
-describe("src/ui imports only itself, core/types and packages", () => {
+describe("src/ui imports only itself, core/types, core/prompts and packages", () => {
   it("does so today", async () => {
     assert.deepEqual(await strayImports(uiDir), []);
   });
@@ -152,14 +155,41 @@ describe("src/ui imports only itself, core/types and packages", () => {
     });
   }
 
-  it("allows its own modules, the types file and a package", async () => {
+  it("allows its own modules, the types file, the prompt filler and a package", async () => {
     const copy = await copyOfUi({
       "ok.ts": [
         'import type { Graph } from "../core/types.js";',
+        'import { fillTemplate } from "../core/prompts.js";',
         'import { place } from "./layout.js";',
         'import { graphlib } from "@dagrejs/dagre";',
       ].join("\n"),
     });
     assert.deepEqual(await strayImports(copy), []);
   });
+});
+
+/** Any way for a file to load another module: `import … from`, `import("…")`, `export … from`, `require(…)`. */
+function loadsAnything(text: string): boolean {
+  return [...text.matchAll(SPECIFIER)].length > 0 || /\brequire\s*\(/.test(text);
+}
+
+describe("src/core/prompts.ts, which src/ui and src/server both load", () => {
+  it("imports and requires nothing, so allowing it in src/ui cannot let Node in", async () => {
+    const text = await readFile(
+      fileURLToPath(new URL("../src/core/prompts.ts", import.meta.url)),
+      "utf8",
+    );
+    assert.equal(loadsAnything(text), false);
+  });
+
+  for (const line of [
+    'import { readFile } from "node:fs/promises";',
+    'import("node:fs");',
+    'export { x } from "./other.js";',
+    'const fs = require("node:fs");',
+  ]) {
+    it(`finds ${line}`, () => {
+      assert.equal(loadsAnything(`export const x = 1;\n${line}\n`), true);
+    });
+  }
 });
