@@ -607,7 +607,7 @@ async function readReview(root: string) {
  * read, and a serve process reads only the records that arrived since its last scan. Only records it
  * understood are kept: a file caught half-written by a checkout is read again on the next scan.
  */
-const readRecords = new Map<string, ReadonlyMap<string, RecordFile>>();
+const recordCache = new Map<string, ReadonlyMap<string, RecordFile>>();
 
 /** Files opened at once, under the default limit of open files on macOS (256). */
 const READ_BATCH = 128;
@@ -622,7 +622,7 @@ async function readRecordFiles(root: string): Promise<RecordFile[]> {
   if (info.isSymbolicLink() || !info.isDirectory()) {
     return [blindFile(REVIEW_DIRECTORY, "リンクかディレクトリ以外のものなので読みません")];
   }
-  const known = readRecords.get(directory);
+  const known = recordCache.get(directory);
   const entries = (await readdir(directory, { withFileTypes: true })).filter((entry) =>
     entry.name.endsWith(".jsonl"),
   );
@@ -637,7 +637,7 @@ async function readRecordFiles(root: string): Promise<RecordFile[]> {
       }),
     );
   }
-  readRecords.set(directory, new Map([...files].filter(([, file]) => file.kind === "read")));
+  recordCache.set(directory, new Map([...files].filter(([, file]) => file.kind === "read")));
   return [...files.values()];
 }
 
