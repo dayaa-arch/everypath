@@ -31,7 +31,7 @@ declare function initRepository(root: string, packageRoot: string): Promise<read
 - `skill/SKILL.md` には §14.1 の 11 項目に加えて、タグの表、ガードと代入の文法、`check` の出力の読み方、性質の `kind` の表を入れた。対象リポジトリには `SPEC.md` が無く、エージェントが読めるのはスキルだけのため。
 - README のサンプルは clone して `node dist/cli.js` で動かす。`example/` は npm のパッケージに入らないため。
 
-残る端（直さない）。既存の `.gitignore` に `.everypath/` の行があると、git はその下のファイルを `!` で戻せないので、`review.json` は無視されたままになる。`init` は元の行を消さず、警告も出さない。写している途中で落ちると半端なファイルが残り、次の実行はそれを飛ばす。
+既存の `.gitignore` に `.everypath/` のように `.everypath` ディレクトリごと無視する行があると、git はその下のファイルを `!` で戻せず、`review.json` は無視されたままになる。`init` は元の行を消さず、その行と直し方を日本語で警告する（レビューで足した。`test/init.test.ts`）。残る端（直さない）。写している途中で落ちると半端なファイルが残り、次の実行はそれを飛ばす。
 
 ## 非目標
 - `/everypath-fix` スラッシュコマンド（`SPEC.md` §14.2。任意のため後回し）

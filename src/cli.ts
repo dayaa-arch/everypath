@@ -4,7 +4,7 @@ import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { type InitAction, initRepository } from "./core/init.js";
+import { type InitAction, initRepository, linesHidingReview } from "./core/init.js";
 import { errorMessage } from "./core/json.js";
 import { PROPERTIES_FILE } from "./core/properties.js";
 import { scan } from "./core/scan.js";
@@ -460,6 +460,11 @@ const INIT_WORDS: Readonly<Record<InitAction["kind"], string>> = {
 async function runInit(root: string): Promise<number> {
   const actions = await initRepository(root, PACKAGE_ROOT);
   process.stdout.write(actions.map(({ path, kind }) => `${path} ${INIT_WORDS[kind]}\n`).join(""));
+  for (const line of await linesHidingReview(root)) {
+    process.stderr.write(
+      `警告: .gitignore の「${line}」が .everypath/ ごと無視するので、.everypath/review.json を git で管理できません。この行を消すか「.everypath/*」に変えてください\n`,
+    );
+  }
   return 0;
 }
 

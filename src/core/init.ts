@@ -93,3 +93,24 @@ export async function initRepository(
   }
   return actions;
 }
+
+const HIDES_DIRECTORY = /^(?:\/|\*\*\/)?\.everypath\/?$/;
+
+/**
+ * Lines of `root`'s `.gitignore` that ignore the `.everypath` directory itself. Git cannot re-include
+ * a file whose parent directory is excluded, so `!.everypath/review.json` stops working (decision 0003).
+ * `init` reports them and leaves the person's lines as they are.
+ */
+export async function linesHidingReview(root: string): Promise<readonly string[]> {
+  let content: string;
+  try {
+    content = await readFile(join(root, ".gitignore"), "utf8");
+  } catch (error) {
+    if (isMissing(error)) return [];
+    throw error;
+  }
+  return content
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => HIDES_DIRECTORY.test(line));
+}

@@ -382,3 +382,29 @@ describe("README.md", () => {
     assert.deepEqual(graph.warnings, []);
   });
 });
+
+describe("init: a .gitignore line that hides review.json (decision 0003)", () => {
+  for (const line of [".everypath/", ".everypath", "/.everypath/", "**/.everypath"]) {
+    it(`warns about ${line}, which a later !.everypath/review.json cannot undo`, async () => {
+      const original = `node_modules/\n${line}\n`;
+      const root = await makeRepo({ ".gitignore": original });
+
+      const { stderr } = init(root);
+
+      assert.match(stderr, new RegExp(`${line.replaceAll("*", "\\*").replaceAll(".", "\\.")}`));
+      assert.match(stderr, /review\.json/);
+      assert.ok(
+        (await readFile(join(root, ".gitignore"), "utf8")).startsWith(original),
+        "the person's own lines stay as they were",
+      );
+    });
+  }
+
+  it("says nothing about .everypath/* or a commented line", async () => {
+    const root = await makeRepo({ ".gitignore": "# .everypath/\n.everypath/*\n" });
+
+    const { stderr } = init(root);
+
+    assert.doesNotMatch(stderr, /review\.json/);
+  });
+});
