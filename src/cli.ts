@@ -4,6 +4,7 @@ import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { type InitAction, initRepository, linesHidingReview } from "./core/init.js";
 import { errorMessage } from "./core/json.js";
 import { PROPERTIES_FILE } from "./core/properties.js";
 import { scan } from "./core/scan.js";
@@ -29,7 +30,8 @@ import {
 import { startServer } from "./server/server.js";
 
 const USAGE = [
-  "使い方: everypath scan [dir] [--json] [--quiet]",
+  "使い方: everypath init [dir]",
+  "        everypath scan [dir] [--json] [--quiet]",
   "        everypath check [dir] [--tlc [--timeout 秒]]",
   "        everypath tla export [dir]",
   "        everypath tla install",
@@ -40,10 +42,11 @@ const DEFAULT_PORT = 4747;
 /** `dist/ui.html` of this package, from `src/cli.ts` and from the built `dist/cli.js` alike. */
 const UI_PATH = fileURLToPath(new URL("../dist/ui.html", import.meta.url));
 
-type Label = "scan" | "check" | "tla export" | "tla install" | "serve";
+type Label = "init" | "scan" | "check" | "tla export" | "tla install" | "serve";
 
 /** The options each command takes; `--help` goes with every one. */
 const ACCEPTS: Readonly<Record<Label, readonly string[]>> = {
+  init: [],
   scan: ["json", "quiet"],
   check: ["tlc", "timeout"],
   "tla export": [],
@@ -54,6 +57,7 @@ const OPTIONS: ReadonlySet<string> = new Set(["help", ...Object.values(ACCEPTS).
 
 type Command =
   | { readonly kind: "help" }
+  | { readonly kind: "init"; readonly directory: string }
   | {
       readonly kind: "scan";
       readonly directory: string;
@@ -102,6 +106,12 @@ function unaccepted(label: Label, values: Values): Result<never> | null {
   return refused.length === 0
     ? null
     : refuse(`${label} は ${refused.map((key) => `--${key}`).join(" ")} を受け付けません`);
+}
+
+function parseInit(positionals: readonly string[], values: Values): Result<Command> {
+  const [, directory = ".", ...extra] = positionals;
+  if (extra.length > 0) return unknownCommand(positionals);
+  return unaccepted("init", values) ?? accept({ kind: "init", directory });
 }
 
 function parseScan(positionals: readonly string[], values: Values): Result<Command> {
@@ -217,6 +227,8 @@ function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Result<C
     switch (positionals[0]) {
       case undefined:
         return refuse("コマンドがありません");
+      case "init":
+        return parseInit(positionals, values);
       case "scan":
         return parseScan(positionals, values);
       case "check":
@@ -373,6 +385,8 @@ async function main(args: readonly string[]): Promise<number> {
     return USAGE_ERROR;
   }
   switch (command.kind) {
+    case "init":
+      return runInit(root);
     case "scan":
       return runScan(root, command);
     case "check":
@@ -432,6 +446,26 @@ async function checkTlcVia(
 function fail(message: string): number {
   process.stderr.write(`${message}\n`);
   return 1;
+}
+
+/** Where `templates/` and `skill/` are, from `src/cli.ts` and from the built `dist/cli.js` alike. */
+const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+const INIT_WORDS: Readonly<Record<InitAction["kind"], string>> = {
+  created: "を作りました",
+  appended: "に足りない行を足しました",
+  skipped: "は既にあるので飛ばしました",
+};
+
+async function runInit(root: string): Promise<number> {
+  const actions = await initRepository(root, PACKAGE_ROOT);
+  process.stdout.write(actions.map(({ path, kind }) => `${path} ${INIT_WORDS[kind]}\n`).join(""));
+  for (const line of await linesHidingReview(root)) {
+    process.stderr.write(
+      `警告: .gitignore の「${line}」が .everypath/ ごと無視するので、.everypath/review.json を git で管理できません。この行を消すか「.everypath/*」に変えてください\n`,
+    );
+  }
+  return 0;
 }
 
 async function runScan(
