@@ -132,7 +132,9 @@ export type NodeStatus = {
   readonly planned: boolean;
   readonly requireProof: boolean;
   readonly proof: "none" | "pending" | "passed" | "failed";
+  /** `review` is an `approval` of this `hash`. A conflict is not reviewed. */
   readonly reviewed: boolean;
+  /** `review` is an `approval` of another hash: the files changed after it. */
   readonly changedSinceReview: boolean;
 };
 
@@ -199,6 +201,8 @@ export type StateNode = {
   readonly spec: readonly string[];
   /** The node's entry in `.everypath/proofs.json`. Absent when it has none. */
   readonly proof?: NodeProof;
+  /** The approval records about the node. Absent when it has no live approval. */
+  readonly review?: NodeReview;
   readonly risks: readonly Risk[];
   readonly findings: readonly Finding[];
   /** Ids of the violated properties whose counterexample passes through this node, in file order. */
@@ -374,21 +378,36 @@ export type Graph = {
   readonly warnings: readonly ScanWarning[];
 };
 
+/**
+ * One person's approval of a node's content. `by` is a display name (git's `user.name`, else
+ * `$USER`, else empty), never an identity: nothing decides by it.
+ */
 export type Approval = {
+  /** The node `hash` the person approved. */
   readonly hash: string;
   readonly at: string;
   readonly by: string;
   readonly note: string;
 };
 
+/** One live record of a node in conflict. `unreadable` is a record this version cannot read. */
+export type ReviewMark =
+  | ({ readonly kind: "approve" } & Approval)
+  | { readonly kind: "revoke"; readonly at: string; readonly by: string }
+  | { readonly kind: "unreadable"; readonly file: string };
+
+/**
+ * What the approval records say about a node, on `StateNode.review`, written only when a live
+ * approval exists. `approval`: every live approval agrees on one hash, and the newest is shown.
+ * `conflict`: approvals of two hashes, or an approval beside a revocation or an unreadable record,
+ * newest first with unreadable records last. A conflict is never reviewed.
+ */
+export type NodeReview =
+  | { readonly approval: Approval }
+  | { readonly conflict: AtLeastTwo<ReviewMark> };
+
 /** `.everypath/layout.json`: where the viewer drew each node, by node id. No scan reads it. */
 export type Layout = Readonly<Record<string, { readonly x: number; readonly y: number }>>;
-
-/** `.everypath/review.json`. Written by the viewer, read by the scanner. */
-export type ReviewFile = {
-  readonly version: 1;
-  readonly approvals: Readonly<Record<string, Approval>>;
-};
 
 /** An edge as `history.jsonl` identifies it. A dep has no event. History records no drift. */
 export type EdgeRef = {

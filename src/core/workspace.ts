@@ -1,6 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { constants, type Dirent } from "node:fs";
+import {
+  type FileHandle,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join, posix, resolve } from "node:path";
 import { CONFIG_FILE, type Config, DEFAULT_CONFIG, parseConfig } from "./config.js";
 import { parseEventName, parseStateName } from "./expr.js";
@@ -18,9 +28,21 @@ import {
 import type { PromptKind } from "./prompts.js";
 import { mergeProofs, PROOFS_FILE, parseProofs } from "./proofs.js";
 import { NO_PROPERTIES, PROPERTIES_FILE, parseProperties } from "./properties.js";
+import {
+  blindFile,
+  foldReview,
+  LEGACY_REVIEW_FILE,
+  parseRecordFile,
+  planChange,
+  RECORD_BYTE_LIMIT,
+  REVIEW_DIRECTORY,
+  REVIEW_GITIGNORE,
+  type RecordFile,
+  type ReviewChange,
+  type ReviewState,
+} from "./review.js";
 import { parseStoredVerdicts, type StoredVerdicts, type TlcRecord } from "./tla/result.js";
 import type {
-  Approval,
   EdgeRef,
   Finding,
   Graph,
@@ -36,7 +58,6 @@ import type {
 export const OUTPUT_DIRECTORY = ".everypath";
 const TLA_DIRECTORY = `${OUTPUT_DIRECTORY}/tla`;
 const TLC_RESULT_FILE = `${TLA_DIRECTORY}/result.json`;
-const REVIEW_FILE = `${OUTPUT_DIRECTORY}/review.json`;
 const SERVE_FILE = `${OUTPUT_DIRECTORY}/serve.json`;
 
 const IGNORED_DIRECTORIES: ReadonlySet<string> = new Set(
@@ -58,7 +79,7 @@ const FINDINGS_FILES: readonly string[] = [
 ];
 /** The files under `.everypath/` that a scan reads. Everything else there is output. */
 const OUTPUT_INPUTS: ReadonlySet<string> = new Set([
-  REVIEW_FILE,
+  LEGACY_REVIEW_FILE,
   TLC_RESULT_FILE,
   PROOFS_FILE,
   ...FINDINGS_FILES.filter((file) => file.startsWith(`${OUTPUT_DIRECTORY}/`)),
@@ -84,8 +105,8 @@ export type Workspace = {
   readonly manifests: readonly Manifest[];
   readonly findings: readonly Finding[];
   readonly findingsSource: string | null;
-  /** Approved hash by node id, from `review.json`. */
-  readonly approvals: ReadonlyMap<string, string>;
+  /** The approval records of `.everypath/review/` and the legacy `review.json`, folded. */
+  readonly review: ReviewState;
   readonly previous: Previous | null;
   /** TLC's last verdicts, from `result.json`. `null` before any TLC run. */
   readonly tlc: StoredVerdicts | null;
@@ -111,7 +132,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
   const manifests = await readManifests(root, walked.manifests);
   const [findings, review, previous, tlc, proofs] = await Promise.all([
     readFindings(root, configured.config),
-    readApprovals(root),
+    readReview(root),
     readPrevious(root),
     readTlcResult(root),
     readProofs(root),
@@ -124,7 +145,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
     manifests: manifests.manifests,
     findings: findings.list,
     findingsSource: findings.source,
-    approvals: review.approvals,
+    review: review.state,
     previous,
     tlc: tlc.stored,
     proofs: proofs.entries,
@@ -199,35 +220,52 @@ function codeOf(error: unknown): unknown {
 }
 
 /**
- * Sets one node's approval in `review.json`, or removes it with `null`, and keeps every other entry as
- * it was. Keys are sorted, so the git diff of this record shows only the node that changed. A file that
- * is there but does not read as a review file is never overwritten. A file left with no approval is
- * removed: it says what a missing one says, so approving and revoking leave the repository as it was.
+ * Adds the one record an approval or a revocation becomes, or nothing when it would change nothing
+ * (`planChange`). The server's writer queue is its only caller. It never edits or removes a record,
+ * nor the legacy `review.json`. It reads the records again first, so the change replaces what is on
+ * disk now, a record that `git pull` brought a moment ago included.
  */
-export async function writeApproval(
+export async function writeReviewChange(
   root: string,
-  id: StateName,
-  approval: Approval | null,
-): Promise<void> {
-  const file = await readJsonFile(join(root, REVIEW_FILE));
-  if (file.kind === "invalid") {
-    throw new Error(`${REVIEW_FILE} を読めないので書き換えません: ${file.reason}`);
-  }
-  const before = file.kind === "missing" ? {} : isRecord(file.value) ? file.value.approvals : null;
-  if (!isRecord(before)) throw new Error(`${REVIEW_FILE} に approvals が無いので書き換えません`);
-  const entries = Object.entries(before).filter(([key]) => key !== id);
-  if (approval === null && entries.length === Object.keys(before).length) return;
-  const path = join(await outputDirectory(root, OUTPUT_DIRECTORY), "review.json");
-  if (approval !== null) entries.push([id, approval]);
-  if (entries.length === 0) return rm(path, { force: true });
-  entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  const review = { version: 1, approvals: Object.fromEntries(entries) };
-  await replaceFile(path, `${JSON.stringify(review, null, 2)}\n`);
+  change: ReviewChange,
+): Promise<"written" | "unchanged"> {
+  const planned = planChange((await readReview(root)).state, change);
+  if (planned === null) return "unchanged";
+  const directory = await outputDirectory(root, REVIEW_DIRECTORY);
+  await keepReviewTracked(root);
+  await replaceFile(join(directory, planned.name), planned.text);
+  return "written";
 }
 
 /**
- * Sets the entries of `updates` in `proofs.json` and keeps every other id as it was, like
- * `writeApproval`. `everypath prove` is its only caller: the server reads the file and never writes it.
+ * Appends the lines of `REVIEW_GITIGNORE` that `.everypath/.gitignore` lacks, keeping a person's own.
+ * A nested `.gitignore` wins over the root one below it, so `!review/` tracks the records under the
+ * two lines `init` has always written, and a repository needs no second `init`. The file is ignored
+ * itself and never committed: this runs before every write, so a fresh clone has it again in time.
+ */
+async function keepReviewTracked(root: string): Promise<void> {
+  const directory = await outputDirectory(root, OUTPUT_DIRECTORY);
+  const flags = constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW;
+  const file = await open(join(directory, ".gitignore"), flags, 0o666).catch((error: unknown) => {
+    const code = codeOf(error);
+    if (code !== "ELOOP" && code !== "EMLINK") throw error;
+    throw new Error(`${REVIEW_GITIGNORE.path} がリンクなので、書き込みません`);
+  });
+  try {
+    const content = await file.readFile("utf8");
+    const present = new Set(content.split("\n").map((line) => line.trimEnd()));
+    const missing = REVIEW_GITIGNORE.lines.filter((line) => !present.has(line));
+    if (missing.length === 0) return;
+    const separator = content === "" || content.endsWith("\n") ? "" : "\n";
+    await file.appendFile(`${separator}${missing.join("\n")}\n`);
+  } finally {
+    await file.close();
+  }
+}
+
+/**
+ * Sets the entries of `updates` in `proofs.json` and keeps every other id as it was.
+ * `everypath prove` is its only caller: the server reads the file and never writes it.
  * A file that is there but is not a JSON object is never overwritten.
  */
 export async function writeProofs(
@@ -266,9 +304,10 @@ export async function readOutput(
 /**
  * Whether a change at `path` (root-relative, `/`) can change what a scan reads: the server's watcher
  * asks only this. Under `.everypath/` only the scan's inputs count, so `graph.json`, `history.jsonl`,
- * the layout and every temporary file never start a scan. `review.json` and `tla/result.json` do,
- * though the server writes them too: that rescan finds the graph it already sent and writes nothing.
- * So does `proofs.json`, which only `everypath prove` writes.
+ * the layout and every temporary file never start a scan. An approval record in `review/` and
+ * `tla/result.json` do, though the server writes them too: that rescan finds the graph it already
+ * sent and writes nothing. So do the legacy `review.json`, the `review/` directory itself appearing
+ * or going away, and `proofs.json`, which only `everypath prove` writes. `.gitignore` does not.
  * Elsewhere, outside the walk's ignored directories, a source file counts, and so does any JSON file
  * (the config, the properties, every findings file wherever `findings` points), a package manifest
  * (`go.mod`, `Cargo.toml`: they decide what an import resolves to) and any name without an extension,
@@ -276,6 +315,8 @@ export async function readOutput(
  * a poller should look inside.
  */
 export function isScanInput(path: string, isDirectory = false): boolean {
+  if (path === REVIEW_DIRECTORY) return true;
+  if (posix.dirname(path) === REVIEW_DIRECTORY) return !isDirectory && path.endsWith(".jsonl");
   if (path === OUTPUT_DIRECTORY || path.startsWith(`${OUTPUT_DIRECTORY}/`)) {
     return isDirectory
       ? [...OUTPUT_INPUTS].some((input) => input.startsWith(`${path}/`))
@@ -553,18 +594,89 @@ async function readFindings(root: string, config: Config) {
   return { source: null, list: [], warnings };
 }
 
-async function readApprovals(root: string) {
-  const file = await readJsonFile(join(root, REVIEW_FILE));
-  const approvals = new Map<string, string>();
-  if (file.kind === "invalid")
-    return { approvals, warnings: [unreadable(REVIEW_FILE, file.reason)] };
-  if (file.kind === "ok" && isRecord(file.value) && isRecord(file.value.approvals)) {
-    for (const [id, approval] of Object.entries(file.value.approvals)) {
-      const hash = isRecord(approval) ? asText(approval.hash) : null;
-      if (hash !== null) approvals.set(id, hash);
-    }
+/** The records of `.everypath/review/` and the legacy `review.json`, folded. Never throws on content. */
+async function readReview(root: string) {
+  const [files, legacy] = await Promise.all([readRecordFiles(root), readLegacyReview(root)]);
+  const folded = foldReview({ files, legacy: legacy.text });
+  return { state: folded.state, warnings: [...legacy.warnings, ...folded.warnings] };
+}
+
+/**
+ * Records already read, by absolute directory, then by file name (graft 3 of decision 0004). A
+ * record's name is the hash of its line and nothing rewrites one, so a name read once needs no second
+ * read, and a serve process reads only the records that arrived since its last scan. Only records it
+ * understood are kept: a file caught half-written by a checkout is read again on the next scan.
+ */
+const readRecords = new Map<string, ReadonlyMap<string, RecordFile>>();
+
+/** Files opened at once, under the default limit of open files on macOS (256). */
+const READ_BATCH = 128;
+
+async function readRecordFiles(root: string): Promise<RecordFile[]> {
+  const directory = join(root, REVIEW_DIRECTORY);
+  const info = await lstat(directory).catch((error: unknown) => {
+    if (isMissing(error)) return null;
+    throw error;
+  });
+  if (info === null) return [];
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    return [blindFile(REVIEW_DIRECTORY, "リンクかディレクトリ以外のものなので読みません")];
   }
-  return { approvals, warnings: [] };
+  const known = readRecords.get(directory);
+  const entries = (await readdir(directory, { withFileTypes: true })).filter((entry) =>
+    entry.name.endsWith(".jsonl"),
+  );
+  const files = new Map<string, RecordFile>();
+  for (let start = 0; start < entries.length; start += READ_BATCH) {
+    const batch = entries.slice(start, start + READ_BATCH);
+    await Promise.all(
+      batch.map(async (entry) => {
+        const cached = entry.isFile() ? known?.get(entry.name) : undefined;
+        const file = cached ?? (await readRecordFile(directory, entry));
+        if (file !== null) files.set(entry.name, file);
+      }),
+    );
+  }
+  readRecords.set(directory, new Map([...files].filter(([, file]) => file.kind === "read")));
+  return [...files.values()];
+}
+
+/** `null` for a file that went away since the directory was listed: it is no record any more. */
+async function readRecordFile(directory: string, entry: Dirent): Promise<RecordFile | null> {
+  const file = `${REVIEW_DIRECTORY}/${entry.name}`;
+  if (!entry.isFile()) return blindFile(file, "リンクかファイル以外のものなので読みません");
+  let handle: FileHandle;
+  try {
+    handle = await open(join(directory, entry.name), constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    return isMissing(error) ? null : blindFile(file, errorMessage(error));
+  }
+  try {
+    const buffer = Buffer.alloc(RECORD_BYTE_LIMIT + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const { bytesRead: got } = await handle.read(buffer, bytesRead, buffer.length - bytesRead);
+      if (got === 0) break;
+      bytesRead += got;
+    }
+    if (bytesRead > RECORD_BYTE_LIMIT) {
+      return blindFile(file, `${RECORD_BYTE_LIMIT / 1024} KiB を超えるので読みません`);
+    }
+    return parseRecordFile(entry.name, buffer.toString("utf8", 0, bytesRead));
+  } catch (error) {
+    return blindFile(file, errorMessage(error));
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readLegacyReview(root: string) {
+  try {
+    return { text: await readFile(join(root, LEGACY_REVIEW_FILE), "utf8"), warnings: [] };
+  } catch (error) {
+    if (isMissing(error)) return { text: null, warnings: [] };
+    return { text: null, warnings: [unreadable(LEGACY_REVIEW_FILE, errorMessage(error))] };
+  }
 }
 
 /** A missing file is no TLC run yet. A damaged one is a warning and counts as absent. */
