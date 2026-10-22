@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { flatten } from "../src/core/flatten.js";
 import { checkProperties, PROPERTIES_FILE, parseProperties } from "../src/core/properties.js";
 import { scan } from "../src/core/scan.js";
 import type { Graph, PropertyResult } from "../src/core/types.js";
@@ -483,7 +484,7 @@ describe("properties: speed", () => {
     assert.deepEqual(warnings, []);
 
     const started = performance.now();
-    const checked = checkProperties(graph, file, graph.generatedAt);
+    const checked = checkProperties(flatten(graph, file), graph.generatedAt);
     const elapsed = performance.now() - started;
 
     assert.equal(checked.properties.length, 4);

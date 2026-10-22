@@ -1,13 +1,12 @@
 import { parseProperty, parseStateName } from "./expr.js";
+import type { Flat, FlatModel, FlatPropertyDef, LeafPred, UnknownName } from "./flatten.js";
 import { asItems, isRecord } from "./json.js";
 import type { Problem } from "./model.js";
 import type {
   Counterexample,
   EventName,
-  FlowEdge,
-  Graph,
+  Leaf,
   NonEmpty,
-  PropExpr,
   PropertiesFile,
   PropertyDef,
   PropertyExpr,
@@ -15,7 +14,6 @@ import type {
   PropertyResult,
   ScanWarning,
   StateName,
-  StatePred,
   Step,
 } from "./types.js";
 
@@ -208,29 +206,29 @@ export function parseProperties(raw: unknown): {
 }
 
 /** One way out of a state. A dep edge has no event. */
-type Arc = { readonly to: StateName; readonly event: EventName | null };
+type Arc<S extends StateName> = { readonly to: S; readonly event: EventName | null };
 /** By source state, in `graph.edges` order, so a search takes the same path on every run. */
-type Arcs = ReadonlyMap<StateName, readonly Arc[]>;
+type Arcs<S extends StateName> = ReadonlyMap<S, readonly Arc<S>[]>;
 
-/** The flow edges of the graph, indexed once per check. Dep edges play no part. */
+/** The arcs of the flat model, indexed once per check. Dep edges play no part. */
 type Flow = {
-  /** Every node, planned ones included. */
-  readonly states: ReadonlySet<StateName>;
-  /** The nodes with code behind them, in id order. */
-  readonly real: readonly StateName[];
-  readonly outgoing: Arcs;
-  readonly incoming: ReadonlyMap<StateName, readonly StateName[]>;
+  /** Every leaf, planned ones included. */
+  readonly states: ReadonlySet<Leaf>;
+  /** The leaves with code behind them, in id order. */
+  readonly real: readonly Leaf[];
+  readonly outgoing: Arcs<Leaf>;
+  readonly incoming: ReadonlyMap<Leaf, readonly Leaf[]>;
 };
 
-/** The dep edges and the groups, which only `dep-only-via` reads. */
+/** The dep edges and the groups, which only `dep-only-via` reads. They are between declared nodes. */
 type Deps = {
-  readonly outgoing: Arcs;
+  readonly outgoing: Arcs<StateName>;
   /** The states of each `@state-group`, in id order. */
   readonly groups: ReadonlyMap<string, readonly StateName[]>;
 };
 
 const NONE: readonly never[] = [];
-const NO_STATES: ReadonlySet<StateName> = new Set();
+const NO_STATES: ReadonlySet<never> = new Set();
 
 function append<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   const list = map.get(key);
@@ -238,71 +236,43 @@ function append<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   else list.push(value);
 }
 
-function depsOf({ nodes, edges }: Pick<Graph, "nodes" | "edges">): Deps {
-  const outgoing = new Map<StateName, Arc[]>();
-  for (const edge of edges) {
-    if (edge.type === "dep") append(outgoing, edge.from, { to: edge.to, event: null });
-  }
-  const groups = new Map<string, StateName[]>();
-  for (const node of nodes) {
-    if (node.group !== null) append(groups, node.group, node.id);
-  }
+function depsOf({ deps, groups }: FlatModel): Deps {
+  const outgoing = new Map<StateName, Arc<StateName>[]>();
+  for (const edge of deps) append(outgoing, edge.from, { to: edge.to, event: null });
   return { outgoing, groups };
 }
 
-function flowOf({ nodes, edges }: Pick<Graph, "nodes" | "edges">): Flow {
-  const outgoing = new Map<StateName, FlowEdge[]>();
-  const incoming = new Map<StateName, StateName[]>();
-  for (const edge of edges) {
-    if (edge.type !== "flow") continue;
-    append(outgoing, edge.from, edge);
-    append(incoming, edge.to, edge.from);
+function flowOf({ states, real, arcs }: FlatModel): Flow {
+  const outgoing = new Map<Leaf, Arc<Leaf>[]>();
+  const incoming = new Map<Leaf, Leaf[]>();
+  for (const arc of arcs) {
+    append(outgoing, arc.from, { to: arc.to, event: arc.event });
+    append(incoming, arc.to, arc.from);
   }
-  return {
-    states: new Set(nodes.map((node) => node.id)),
-    real: nodes.filter((node) => !node.status.planned).map((node) => node.id),
-    outgoing,
-    incoming,
-  };
+  return { states: new Set(states), real, outgoing, incoming };
 }
 
-function isDeadEnd(flow: Flow, state: StateName): boolean {
+function isDeadEnd(flow: Flow, state: Leaf): boolean {
   return (flow.outgoing.get(state) ?? NONE).length === 0;
 }
 
-/**
- * `entry`, else the model's initial state, else the states nothing else leads to. The TLA+ lane
- * starts from the same states, so it asks here.
- */
-export function entryOf(
-  graph: Pick<Graph, "nodes" | "edges" | "model">,
-  { entry }: PropertiesFile,
-  flow: Flow = flowOf(graph),
-): readonly StateName[] {
-  if (entry !== null) return entry.filter((state) => flow.states.has(state));
-  if (graph.model.initial !== null) return [graph.model.initial];
-  return flow.real.filter(
-    (state) => !(flow.incoming.get(state) ?? NONE).some((from) => from !== state),
-  );
-}
-
 /** How a state was first reached. `null` for a start. */
-type Arrival = { readonly from: StateName; readonly event: EventName | null } | null;
-type Reached = ReadonlyMap<StateName, Arrival>;
+type Arrival<S extends StateName> = { readonly from: S; readonly event: EventName | null } | null;
+type Reached<S extends StateName> = ReadonlyMap<S, Arrival<S>>;
 
 /**
  * Breadth first from all `starts` at once, so the first state that satisfies `isGoal` is a shortest
  * path away from the nearest start, and the order of `starts` and of the edges breaks ties.
  */
-function search(
-  starts: readonly StateName[],
-  outgoing: Arcs,
-  isGoal: (state: StateName) => boolean,
-  blocked: ReadonlySet<StateName> = NO_STATES,
-): { readonly goal: StateName | null; readonly reached: Reached } {
-  const reached = new Map<StateName, Arrival>();
-  const queue: StateName[] = [];
-  const enter = (state: StateName, arrival: Arrival): void => {
+function search<S extends StateName>(
+  starts: readonly S[],
+  outgoing: Arcs<S>,
+  isGoal: (state: S) => boolean,
+  blocked: ReadonlySet<S> = NO_STATES,
+): { readonly goal: S | null; readonly reached: Reached<S> } {
+  const reached = new Map<S, Arrival<S>>();
+  const queue: S[] = [];
+  const enter = (state: S, arrival: Arrival<S>): void => {
     if (blocked.has(state) || reached.has(state)) return;
     reached.set(state, arrival);
     queue.push(state);
@@ -318,7 +288,7 @@ function search(
   return { goal: null, reached };
 }
 
-function stepAt(state: StateName, reached: Reached): Step {
+function stepAt<S extends StateName>(state: S, reached: Reached<S>): Step {
   return { state, event: reached.get(state)?.event ?? null, vars: {} };
 }
 
@@ -328,7 +298,7 @@ function counterexampleOf(steps: NonEmpty<Step>): Counterexample {
 }
 
 /** The path from the start that reached `goal`, ending at `goal`. */
-function pathTo(goal: StateName, reached: Reached): Counterexample {
+function pathTo<S extends StateName>(goal: S, reached: Reached<S>): Counterexample {
   const steps: [Step, ...Step[]] = [stepAt(goal, reached)];
   for (let arrival = reached.get(goal); arrival; arrival = reached.get(arrival.from)) {
     steps.unshift(stepAt(arrival.from, reached));
@@ -336,7 +306,7 @@ function pathTo(goal: StateName, reached: Reached): Counterexample {
   return counterexampleOf(steps);
 }
 
-function holds(expr: StatePred, state: StateName): boolean {
+function holds(expr: LeafPred, state: Leaf): boolean {
   switch (expr.kind) {
     case "state-in":
       return expr.states.includes(state);
@@ -356,7 +326,7 @@ type Verdict = Pick<PropertyResult, "checkedBy" | "result" | "counterexamples" |
 
 type Context = {
   readonly flow: Flow;
-  readonly entry: readonly StateName[];
+  readonly entry: readonly Leaf[];
   readonly deps: Deps;
 };
 
@@ -379,17 +349,17 @@ function settledBySearch({ goal, reached }: ReturnType<typeof search>): Verdict 
 }
 
 /** Whether the judgment searches outward from the entry states. */
-function needsEntry(def: PropertyDef): boolean {
+function needsEntry(def: FlatPropertyDef): boolean {
   return def.kind === "never-reach" || (def.kind === "invariant" && !def.expr.mentionsVars);
 }
 
-function invariant(expr: StatePred, { flow, entry }: Context): Verdict {
+function invariant(expr: LeafPred, { flow, entry }: Context): Verdict {
   return settledBySearch(search(entry, flow.outgoing, (state) => !holds(expr, state)));
 }
 
 function neverReach(
-  target: NonEmpty<StateName>,
-  avoid: readonly StateName[],
+  target: readonly Leaf[],
+  avoid: readonly Leaf[],
   { flow, entry }: Context,
 ): Verdict {
   return settledBySearch(
@@ -397,7 +367,7 @@ function neverReach(
   );
 }
 
-type DepOnlyVia = Extract<PropertyDef, { readonly kind: "dep-only-via" }>;
+type DepOnlyVia = Extract<FlatPropertyDef, { readonly kind: "dep-only-via" }>;
 
 /**
  * never-reach's search on the dep edges: from every state of the group at once, with the via states
@@ -411,10 +381,7 @@ function depOnlyVia({ fromGroup, target, via }: DepOnlyVia, { deps }: Context): 
 }
 
 /** Every state that has a path to one of `targets`, found by walking the edges backwards. */
-function reaching(
-  targets: readonly StateName[],
-  incoming: Flow["incoming"],
-): ReadonlySet<StateName> {
+function reaching(targets: readonly Leaf[], incoming: Flow["incoming"]): ReadonlySet<Leaf> {
   const seen = new Set(targets);
   // A set iterator also visits what is added while it runs.
   for (const state of seen) {
@@ -424,7 +391,7 @@ function reaching(
 }
 
 /** One counterexample per stuck state: its way to the nearest dead end, or the state alone. */
-function alwaysReach(target: NonEmpty<StateName>, { flow }: Context): Verdict {
+function alwaysReach(target: readonly Leaf[], { flow }: Context): Verdict {
   const canReach = reaching(target, flow.incoming);
   const counterexamples = flow.real
     .filter((state) => !canReach.has(state))
@@ -435,7 +402,7 @@ function alwaysReach(target: NonEmpty<StateName>, { flow }: Context): Verdict {
   return settled(counterexamples, flow.real.length);
 }
 
-function noDeadEnd(except: readonly StateName[], { flow }: Context): Verdict {
+function noDeadEnd(except: readonly Leaf[], { flow }: Context): Verdict {
   const counterexamples = flow.real
     .filter((state) => !except.includes(state) && isDeadEnd(flow, state))
     .map((state) => counterexampleOf([{ state, event: null, vars: {} }]));
@@ -443,7 +410,7 @@ function noDeadEnd(except: readonly StateName[], { flow }: Context): Verdict {
 }
 
 /** One function per `kind`; the switch is exhaustive, so a new kind fails to compile until it is judged. */
-function judge(def: PropertyDef, context: Context): Verdict {
+function judge(def: FlatPropertyDef, context: Context): Verdict {
   switch (def.kind) {
     case "invariant":
       return def.expr.mentionsVars ? AWAITS_TLC : invariant(def.expr.expr, context);
@@ -460,64 +427,16 @@ function judge(def: PropertyDef, context: Context): Verdict {
   }
 }
 
-function statesIn(expr: PropExpr): StateName[] {
-  switch (expr.kind) {
-    case "cmp":
-      return [];
-    case "state-in":
-      return [...expr.states];
-    case "not":
-      return statesIn(expr.operand);
-    case "and":
-    case "or":
-      return expr.operands.flatMap(statesIn);
-    case "implies":
-      return [...statesIn(expr.antecedent), ...statesIn(expr.consequent)];
-  }
+/** A name that is no state is a typo more often than a deliberate choice, but the property is still judged. */
+function unknownNameWarning({ in: where, name }: UnknownName): ScanWarning {
+  return warn(
+    where === "entry"
+      ? `${PROPERTIES_FILE} の entry にある ${name} は、どの状態にもありません。入口に使いません`
+      : `性質 ${where.property} の ${where.field} にある ${name} は、どの状態にもありません`,
+  );
 }
 
-/** The states a definition names, by the field that names them. */
-function references(def: PropertyDef): readonly (readonly [string, readonly StateName[]])[] {
-  switch (def.kind) {
-    case "invariant":
-      return [["expr", statesIn(def.expr.expr)]];
-    case "leads-to":
-      return [
-        ["from", statesIn(def.from.expr)],
-        ["to", statesIn(def.to.expr)],
-      ];
-    case "never-reach":
-      return [
-        ["target", def.target],
-        ["avoid", def.avoid],
-      ];
-    case "always-reach":
-      return [["target", def.target]];
-    case "no-dead-end":
-      return [["except", def.except]];
-    case "dep-only-via":
-      return [
-        ["target", def.target],
-        ["via", def.via],
-      ];
-  }
-}
-
-/** A name that is no node is a typo more often than a deliberate choice, but the property is still judged. */
-function unknownStateWarnings(def: PropertyDef, flow: Flow): ScanWarning[] {
-  const reported = new Set<StateName>();
-  const warnings: ScanWarning[] = [];
-  for (const [field, names] of references(def)) {
-    for (const name of names) {
-      if (flow.states.has(name) || reported.has(name)) continue;
-      reported.add(name);
-      warnings.push(warn(`性質 ${def.id} の ${field} にある ${name} は、どの状態にもありません`));
-    }
-  }
-  return warnings;
-}
-
-function unknownGroupWarnings(def: PropertyDef, deps: Deps): ScanWarning[] {
+function unknownGroupWarnings(def: FlatPropertyDef, deps: Deps): ScanWarning[] {
   if (def.kind !== "dep-only-via" || deps.groups.has(def.fromGroup)) return [];
   return [
     warn(
@@ -527,24 +446,17 @@ function unknownGroupWarnings(def: PropertyDef, deps: Deps): ScanWarning[] {
 }
 
 function entryWarnings(
-  { entry, properties }: PropertiesFile,
-  resolved: readonly StateName[],
-  flow: Flow,
+  properties: readonly FlatPropertyDef[],
+  entry: readonly Leaf[],
 ): ScanWarning[] {
-  const unknown = new Set((entry ?? NONE).filter((name) => !flow.states.has(name)));
-  const warnings = [...unknown].map((name) =>
-    warn(`${PROPERTIES_FILE} の entry にある ${name} は、どの状態にもありません。入口に使いません`),
-  );
   const needing = properties.filter(needsEntry);
-  if (resolved.length === 0 && needing.length > 0) {
-    const ids = needing.map((def) => def.id).join("、");
-    warnings.push(
-      warn(
-        `入口にする状態がありません（entry も @state-initial も入エッジの無い状態も無い）。${ids} は何も探索せずに判定しました`,
-      ),
-    );
-  }
-  return warnings;
+  if (entry.length > 0 || needing.length === 0) return [];
+  const ids = needing.map((def) => def.id).join("、");
+  return [
+    warn(
+      `入口にする状態がありません（entry も @state-initial も入エッジの無い状態も無い）。${ids} は何も探索せずに判定しました`,
+    ),
+  ];
 }
 
 /**
@@ -563,29 +475,26 @@ export function violationsOf(results: readonly PropertyResult[]): Map<StateName,
 }
 
 /**
- * The quick lane of SPEC §9: every property is judged on the flow edges alone, guards taken as always
- * true, except `dep-only-via`, which is judged on the dep edges alone. `graph.nodes` is in id order,
- * as `scan` builds it. A property that needs a variable or a time-ordered argument stays `pending`
- * for TLC.
+ * The quick lane of SPEC §9: every property is judged on the arcs of the flat model alone, guards
+ * taken as always true, except `dep-only-via`, which is judged on the dep edges alone. A property that
+ * needs a variable or a time-ordered argument stays `pending` for TLC.
  */
 export function checkProperties(
-  graph: Pick<Graph, "nodes" | "edges" | "model">,
-  file: PropertiesFile,
+  flat: Flat,
   checkedAt: string,
 ): {
   properties: PropertyResult[];
   violations: ReadonlyMap<StateName, readonly PropertyId[]>;
   warnings: ScanWarning[];
 } {
-  const flow = flowOf(graph);
-  const entry = entryOf(graph, file, flow);
-  const deps = depsOf(graph);
-  const properties = file.properties.map(
+  const flow = flowOf(flat.model);
+  const deps = depsOf(flat.model);
+  const properties = flat.properties.map(
     (def): PropertyResult => ({
       id: def.id,
       kind: def.kind,
       description: def.description,
-      ...judge(def, { flow, entry, deps }),
+      ...judge(def, { flow, entry: flat.entry, deps }),
       checkedAt,
     }),
   );
@@ -593,10 +502,13 @@ export function checkProperties(
     properties,
     violations: violationsOf(properties),
     warnings: [
-      ...entryWarnings(file, entry, flow),
-      ...file.properties.flatMap((def) => [
+      ...flat.unknown.filter(({ in: where }) => where === "entry").map(unknownNameWarning),
+      ...entryWarnings(flat.properties, flat.entry),
+      ...flat.properties.flatMap((def) => [
         ...unknownGroupWarnings(def, deps),
-        ...unknownStateWarnings(def, flow),
+        ...flat.unknown
+          .filter(({ in: where }) => where !== "entry" && where.property === def.id)
+          .map(unknownNameWarning),
       ]),
     ],
   };

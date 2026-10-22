@@ -43,6 +43,8 @@ type Draft = {
   vars: Located<ModelVar>[];
   nexts: NextDecl[];
   routes: Located<Route>[];
+  /** `@state-parent`: the state this file's state is inside. Checked against the rest by `scan`. */
+  parent: Located<StateName> | null;
 };
 
 /** What one file's annotations declare, before any of it is checked against the rest of the repository. */
@@ -161,6 +163,18 @@ const TAGS: ReadonlyMap<string, TagSpec> = new Map<string, TagSpec>([
     },
   ],
   [
+    "@state-parent",
+    {
+      repeatable: false,
+      needsValue: true,
+      apply: ({ draft, value, line, report }) => {
+        const parent = parseStateName(value);
+        if (parent.ok) draft.parent = { line, value: parent.value };
+        else report(rejected("@state-parent", parent.warning), parent.warning);
+      },
+    },
+  ],
+  [
     "@state-initial",
     flag((draft, line) => {
       draft.initial = line;
@@ -235,6 +249,7 @@ export function readNotes(
     vars: [],
     nexts: [],
     routes: [],
+    parent: null,
   };
   const warnings: ScanWarning[] = [];
   const seen = new Set<string>();

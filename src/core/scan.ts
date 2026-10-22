@@ -2,6 +2,16 @@ import { createHash } from "node:crypto";
 import { basename, posix, resolve } from "node:path";
 import { type Notes, readNotes } from "./annotations.js";
 import { sanitizeStateName } from "./expr.js";
+import { type Flat, flatten } from "./flatten.js";
+import {
+  type Hierarchy,
+  type HierarchyProblem,
+  hierarchyOf,
+  MAX_DEPTH,
+  type ParentClaim,
+  resolveHierarchy,
+  type TreeNode,
+} from "./hierarchy.js";
 import { type ImportContext, resolveImports } from "./imports.js";
 import { resolveNext, type VarTable } from "./model.js";
 import { checkProperties, violationsOf } from "./properties.js";
@@ -19,7 +29,6 @@ import type {
   HistoryEntry,
   ModelVar,
   ObservedEdge,
-  PropertiesFile,
   ScanWarning,
   StateName,
   StateNode,
@@ -66,16 +75,17 @@ type DeclaredFlow = Omit<FlowEdge, "observed">;
 
 /**
  * SPEC §8. Reads the repository and folds it into the graph without writing anything. The TLA+ lane
- * starts here because `graph.json` holds property results but not the definitions they came from.
- * `history` is the line a scan would append; it does not depend on property results. TLC's last
- * verdicts (`result.json`) are an input like any other, so every graph carries them.
+ * starts here because `graph.json` holds property results but not the definitions they came from:
+ * `flat` is the statechart with its properties as the checking lanes read it. `history` is the line a
+ * scan would append; it does not depend on property results. TLC's last verdicts (`result.json`) are
+ * an input like any other, so every graph carries them.
  */
 export async function analyze(
   root: string,
   options: ScanOptions = {},
 ): Promise<{
   readonly graph: Graph;
-  readonly properties: PropertiesFile;
+  readonly flat: Flat;
   readonly history: HistoryEntry | null;
 }> {
   const workspace = await readWorkspace(resolve(root));
@@ -84,12 +94,8 @@ export async function analyze(
     aliases: workspace.config.aliases,
   };
   const facts = workspace.sources.map((source) => extractFacts(source, context));
-  const graph = fold(workspace, facts, options.now ?? new Date());
-  return {
-    graph,
-    properties: workspace.properties,
-    history: diff(workspace.previous, graph, options.reason ?? "scan"),
-  };
+  const { graph, flat } = fold(workspace, facts, options.now ?? new Date());
+  return { graph, flat, history: diff(workspace.previous, graph, options.reason ?? "scan") };
 }
 
 /** SPEC §8. `analyze`, then writes `.everypath/graph.json` and, if something changed, `history.jsonl`. */
@@ -159,7 +165,11 @@ function extractFacts({ path, bytes }: Source, context: ImportContext): FileFact
  * SPEC §8.5 to 9, 11 and 12: every decision that needs more than one file. Pure, so the disk is read
  * before it and written after it.
  */
-function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Graph {
+function fold(
+  workspace: Workspace,
+  facts: readonly FileFacts[],
+  now: Date,
+): { readonly graph: Graph; readonly flat: Flat } {
   const at = now.toISOString();
   const members = assignIds(
     facts.filter((file) => !file.notes.hidden && (workspace.config.includeTests || !file.isTest)),
@@ -167,10 +177,12 @@ function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Gra
   );
   const model = collectModel(members);
   const flows = collectFlows(members, new Map(model.vars.map((decl) => [decl.name, decl])));
+  const tree = collectTree(members, flows.edges);
+  const hierarchy = hierarchyOf(tree.nodes);
   const observed = collectObserved(members);
-  const { flowEdges, observedEdges, drift } = checkDrift(flows.edges, observed.links);
+  const { flowEdges, observedEdges, drift } = checkDrift(flows.edges, observed.links, hierarchy);
   const edges = [...collectDeps(members), ...flowEdges, ...observedEdges].sort(compareEdges);
-  const built = collectNodes(members, flows.edges, {
+  const built = collectNodes(members, tree.nodes, hierarchy, {
     tested: testedFiles(facts),
     findings: groupBy([...workspace.findings].sort(compareFindings), (finding) => finding.file),
     approvals: workspace.approvals,
@@ -178,18 +190,18 @@ function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Gra
     at,
   });
   const graphModel = {
-    initial: model.initial,
+    initial: tree.rootInitial,
     vars: model.vars,
     events: [...new Set([...model.events, ...flows.events])].sort(compareText),
   };
-  const shape = { nodes: built, edges, model: graphModel };
-  const checked = checkProperties(shape, workspace.properties, at);
-  const properties = withTlcResults(shape, workspace.properties, checked.properties, workspace.tlc);
+  const flat = flatten({ nodes: built, edges, model: graphModel }, workspace.properties);
+  const checked = checkProperties(flat, at);
+  const properties = withTlcResults(flat, checked.properties, workspace.tlc);
   const violations = violationsOf(properties);
   const nodes = built.map((node) => ({ ...node, violations: violations.get(node.id) ?? [] }));
-  const real = nodes.filter((node) => !node.status.planned);
+  const real = nodes.filter((node) => !node.status.planned && node.container !== true);
 
-  return {
+  const graph: Graph = {
     version: 1,
     generatedAt: at,
     root: workspace.root,
@@ -201,7 +213,7 @@ function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Gra
       untested: real.filter((node) => !node.status.tested).length,
       vuln: nodes.filter((node) => node.status.vuln).length,
       wip: nodes.filter((node) => node.status.wip).length,
-      planned: nodes.length - real.length,
+      planned: nodes.filter((node) => node.status.planned).length,
       unreviewed: real.filter((node) => !node.status.reviewed).length,
     },
     nodes,
@@ -215,9 +227,12 @@ function fold(workspace: Workspace, facts: readonly FileFacts[], now: Date): Gra
       ...model.warnings,
       ...flows.warnings,
       ...observed.warnings,
+      ...tree.warnings,
+      ...flat.ambiguous.map((id) => ambiguityWarning(id, hierarchy, tree.locate)),
       ...checked.warnings,
     ].sort(compareWarnings),
   };
+  return { graph, flat };
 }
 
 function stemOf(path: string): string {
@@ -275,9 +290,8 @@ function collectModel(members: readonly Member[]) {
   const warnings: ScanWarning[] = [];
   const declared = new Map<VarName, { file: string; line: number; decl: ModelVar }>();
   const events = new Set<EventName>();
-  let initial: { id: StateName; file: string } | null = null;
 
-  for (const { file, id } of members) {
+  for (const { file } of members) {
     for (const { line, value } of file.notes.vars) {
       const first = declared.get(value.name);
       if (first === undefined) {
@@ -293,25 +307,105 @@ function collectModel(members: readonly Member[]) {
       }
     }
     for (const event of file.notes.events) events.add(event.value);
+  }
+  return { vars: [...declared.values()].map(({ decl }) => decl), events, warnings };
+}
 
-    if (file.notes.initial === null) continue;
-    if (initial === null) {
-      initial = { id, file: file.path };
-    } else if (initial.id !== id) {
-      warnings.push(
-        warningAt(
-          file.path,
-          file.notes.initial,
-          `@state-initial が複数の状態にあります。先の ${initial.file} の ${initial.id} を使います`,
-        ),
+/** Where a warning about a parent points: its own file, else the first `@state-parent` that names it. */
+type Locate = (id: StateName) => { readonly file: string | null; readonly line: number | null };
+
+/**
+ * SPEC §5 `@state-parent` and `@state-initial`. Every state a file or a transition names, with the
+ * parent and entry it ended up with. The rules are all in `resolveHierarchy`; this feeds it the claims
+ * in file order and words what it did not use.
+ */
+function collectTree(members: readonly Member[], flows: readonly DeclaredFlow[]) {
+  const claims = members.flatMap(({ file, id }): ParentClaim[] => {
+    const claimed = file.notes.parent;
+    return claimed === null
+      ? []
+      : [{ node: id, parent: claimed.value, file: file.path, line: claimed.line }];
+  });
+  const resolved = resolveHierarchy({
+    nodes: [...members.map(({ id }) => id), ...flows.map(({ to }) => to)],
+    parents: claims,
+    initials: members.flatMap(({ file, id }) =>
+      file.notes.initial === null ? [] : [{ node: id, file: file.path, line: file.notes.initial }],
+    ),
+  });
+  const owned = new Set(members.map(({ id }) => id));
+  const locate: Locate = (id) => {
+    const own = members.find((member) => member.id === id);
+    if (own !== undefined) return { file: own.file.path, line: null };
+    const claim = claims.find((candidate) => candidate.parent === id);
+    return { file: claim?.file ?? null, line: claim?.line ?? null };
+  };
+  const unclaimed = [...new Set(resolved.nodes.flatMap(({ parent }) => parent ?? []))]
+    .filter((id) => !owned.has(id))
+    .sort(compareText);
+  return {
+    nodes: resolved.nodes,
+    rootInitial: resolved.rootInitial,
+    locate,
+    warnings: [
+      ...resolved.problems.map(describeProblem),
+      ...unclaimed.map((id) => {
+        const { file, line } = locate(id);
+        return {
+          file,
+          line,
+          message: `${id} を @state で名乗るファイルがありません。中の状態を囲む枠だけを描きます。${id} に遷移を書くなら、そのファイルに @state ${id} を書いてください`,
+          detail: null,
+        };
+      }),
+    ],
+  };
+}
+
+function describeProblem(problem: HierarchyProblem): ScanWarning {
+  switch (problem.kind) {
+    case "parent-conflict": {
+      const { kept, dropped } = problem;
+      return warningAt(
+        dropped.file,
+        dropped.line,
+        `${dropped.node} の @state-parent が ${kept.file}:${kept.line} の ${kept.parent} と食い違います。先の ${kept.parent} を使います`,
+      );
+    }
+    case "parent-cycle": {
+      const [claim] = problem.claims;
+      return warningAt(
+        claim.file,
+        claim.line,
+        `@state-parent が輪になっています（${problem.members.join(" → ")}）。この輪の親は使いません`,
+      );
+    }
+    case "parent-too-deep":
+      return warningAt(
+        problem.claim.file,
+        problem.claim.line,
+        `${problem.claim.node} の入れ子が深すぎます（親は ${MAX_DEPTH} 段まで）。この @state-parent は使いません`,
+      );
+    case "initial-conflict": {
+      const { kept, dropped, level } = problem;
+      return warningAt(
+        dropped.file,
+        dropped.line,
+        level === null
+          ? `@state-initial が複数の状態にあります。先の ${kept.file} の ${kept.node} を使います`
+          : `${level} の中に @state-initial が複数あります。先の ${kept.file} の ${kept.node} を使います`,
       );
     }
   }
+}
+
+/** A parent something enters, with several children and none marked: `flatten` enters them all. */
+function ambiguityWarning(id: StateName, hierarchy: Hierarchy, locate: Locate): ScanWarning {
+  const children = hierarchy.childrenOf(id).join("、");
   return {
-    vars: [...declared.values()].map(({ decl }) => decl),
-    events,
-    initial: initial?.id ?? null,
-    warnings,
+    ...locate(id),
+    message: `${id} の子（${children}）のどれにも @state-initial がありません。${id} への遷移はすべての子に入るとみなします。入る子に @state-initial を書いてください`,
+    detail: null,
   };
 }
 
@@ -415,16 +509,30 @@ function collectObserved(members: readonly Member[]) {
 /**
  * Compares the code with the declaration by `(from, to)`: code shows no event or guard. A call that
  * no flow declares is drift. A flow that no call takes is only unobserved, because a missing call
- * proves nothing.
+ * proves nothing. A flow covers a call when its source holds the caller (a parent's `@state-next`
+ * holds for every state inside it) and its target holds the callee; without `@state-parent` both are
+ * equality.
  */
-function checkDrift(declared: readonly DeclaredFlow[], observed: readonly Link[]) {
-  const pair = ({ from, to }: { readonly from: StateName; readonly to: StateName }): string =>
-    JSON.stringify([from, to]);
-  const seen = new Set(observed.map(pair));
-  const declaredPairs = new Set(declared.map(pair));
-  const undeclared = observed.filter((link) => !declaredPairs.has(pair(link)));
+function checkDrift(
+  declared: readonly DeclaredFlow[],
+  observed: readonly Link[],
+  hierarchy: Hierarchy,
+) {
+  const pair = (from: StateName, to: StateName): string => JSON.stringify([from, to]);
+  const declaredPairs = new Set(declared.map(({ from, to }) => pair(from, to)));
+  /** Every pair a flow could be declared on to cover the call: an ancestor-or-self of each end. */
+  const covering = ({ from, to }: Link): string[] =>
+    [from, ...hierarchy.ancestorsOf(from)].flatMap((source) =>
+      [to, ...hierarchy.ancestorsOf(to)].map((target) => pair(source, target)),
+    );
+  const seen = new Set(observed.flatMap(covering));
+  const undeclared = observed.filter(
+    (link) => !covering(link).some((key) => declaredPairs.has(key)),
+  );
   return {
-    flowEdges: declared.map((edge): FlowEdge => ({ ...edge, observed: seen.has(pair(edge)) })),
+    flowEdges: declared.map(
+      (edge): FlowEdge => ({ ...edge, observed: seen.has(pair(edge.from, edge.to)) }),
+    ),
     observedEdges: undeclared.map(
       (link): ObservedEdge => ({ type: "observed", ...link, declared: false, observed: true }),
     ),
@@ -453,24 +561,34 @@ type NodeContext = {
   readonly at: string;
 };
 
-/** A flow target no file claims becomes a node with no files: `planned`. */
+/**
+ * Every state of the tree. One no file claims has no files: a container when it has children, else a
+ * flow target not written yet (`planned`).
+ */
 function collectNodes(
   members: readonly Member[],
-  flows: readonly DeclaredFlow[],
+  tree: readonly TreeNode[],
+  hierarchy: Hierarchy,
   context: NodeContext,
 ): StateNode[] {
   const filesById = new Map(
     [...groupBy(members, ({ id }) => id)].map(([id, group]) => [id, group.map(({ file }) => file)]),
   );
-  for (const { to } of flows) {
-    if (!filesById.has(to)) filesById.set(to, []);
-  }
-  return [...filesById]
-    .map(([id, files]) => buildNode(id, files, context))
+  return tree
+    .map((place) => {
+      const files = filesById.get(place.id) ?? [];
+      const container = files.length === 0 && hierarchy.childrenOf(place.id).length > 0;
+      return buildNode(place, files, container, context);
+    })
     .sort((a, b) => compareText(a.id, b.id));
 }
 
-function buildNode(id: StateName, files: readonly FileFacts[], context: NodeContext): StateNode {
+function buildNode(
+  { id, parent, initialChild }: TreeNode,
+  files: readonly FileFacts[],
+  container: boolean,
+  context: NodeContext,
+): StateNode {
   const hash = sha1(files.map((file) => file.bytes));
   const approved = context.approvals.get(id);
   const findings = files.flatMap((file) => context.findings.get(file.path) ?? []);
@@ -478,6 +596,9 @@ function buildNode(id: StateName, files: readonly FileFacts[], context: NodeCont
   const descriptions = files.flatMap((file) => file.notes.desc);
   return {
     id,
+    ...(parent === undefined ? {} : { parent }),
+    ...(initialChild === undefined ? {} : { initialChild }),
+    ...(container ? { container } : {}),
     group: files.find((file) => file.notes.group !== null)?.notes.group ?? null,
     desc: descriptions.length > 0 ? descriptions.join(" ") : null,
     files: files.map((file) => file.path),
@@ -487,7 +608,7 @@ function buildNode(id: StateName, files: readonly FileFacts[], context: NodeCont
       tested: files.length > 0 && files.every((file) => context.tested.has(file.path)),
       vuln: findings.length > 0,
       wip: files.some((file) => file.notes.wip),
-      planned: files.length === 0,
+      planned: files.length === 0 && !container,
       requireProof: files.some((file) => file.notes.requireProof),
       proof: "none",
       reviewed: approved === hash,

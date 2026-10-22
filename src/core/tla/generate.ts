@@ -1,16 +1,12 @@
 import { createHash } from "node:crypto";
+import type { Flat, FlatArc, FlatModel, FlatPropertyDef, LeafExpr } from "../flatten.js";
 import { checkComparison, type VarTable } from "../model.js";
-import { entryOf } from "../properties.js";
 import type {
   Assignment,
   EventName,
-  FlowEdge,
-  Graph,
+  Leaf,
   MemberName,
   ModelVar,
-  PropExpr,
-  PropertiesFile,
-  PropertyDef,
   PropertyId,
   StateName,
   Value,
@@ -46,7 +42,7 @@ export type TlaModel = {
   readonly rejected: readonly { readonly id: PropertyId; readonly reason: string }[];
 };
 
-type Kind = PropertyDef["kind"];
+type Kind = FlatPropertyDef["kind"];
 
 /**
  * The kinds SPEC §6.3 gives to TLC, and so the kinds a verdict in `result.json` may be about. The
@@ -58,10 +54,10 @@ export const TLC_KINDS = [
   "never-reach",
 ] as const satisfies readonly Kind[];
 
-type TlcDef = Extract<PropertyDef, { readonly kind: (typeof TLC_KINDS)[number] }>;
-type NeverReach = Extract<PropertyDef, { readonly kind: "never-reach" }>;
+type TlcDef = Extract<FlatPropertyDef, { readonly kind: (typeof TLC_KINDS)[number] }>;
+type NeverReach = Extract<FlatPropertyDef, { readonly kind: "never-reach" }>;
 
-function isTlcDef(def: PropertyDef): def is TlcDef {
+function isTlcDef(def: FlatPropertyDef): def is TlcDef {
   return TLC_KINDS.some((kind) => kind === def.kind);
 }
 
@@ -96,12 +92,12 @@ function tableOf<T extends string>(prefix: Prefix, displays: readonly T[]): Tabl
 
 /**
  * A variable that says whether the behavior has been in one of a never-reach's `avoid` states. Only a
- * never-reach with an avoid state that is a node has one.
+ * never-reach whose `avoid` names a state of the graph has one.
  */
-type History = { readonly name: string; readonly avoid: readonly StateName[] };
+type History = { readonly name: string; readonly avoid: readonly Leaf[] };
 
 type Naming = {
-  readonly states: Table<StateName>;
+  readonly states: Table<Leaf>;
   readonly vars: Table<VarName>;
   readonly events: Table<EventName>;
   readonly members: Table<MemberName>;
@@ -111,25 +107,22 @@ type Naming = {
 };
 
 /** The only place names are minted. `H` takes its check's position, so `H5_x` belongs to `P5_x`. */
-function allocate(graph: Pick<Graph, "nodes" | "model">, accepted: readonly TlcDef[]): Naming {
-  const members = graph.model.vars.flatMap((decl) => (decl.kind === "enum" ? decl.members : []));
-  const states = tableOf(
-    "S",
-    graph.nodes.map((node) => node.id),
-  );
+function allocate(model: FlatModel, accepted: readonly TlcDef[]): Naming {
+  const members = model.vars.flatMap((decl) => (decl.kind === "enum" ? decl.members : []));
+  const states = tableOf("S", model.states);
   const history = new Map<PropertyId, History>();
   for (const [index, def] of accepted.entries()) {
     if (def.kind !== "never-reach") continue;
-    const avoid = def.avoid.filter((state) => states.id.has(state));
+    const { avoid } = def;
     if (avoid.length > 0) history.set(def.id, { name: identifier("H", index + 1, def.id), avoid });
   }
   return {
     states,
     vars: tableOf(
       "v",
-      graph.model.vars.map((decl) => decl.name),
+      model.vars.map((decl) => decl.name),
     ),
-    events: tableOf("e", graph.model.events),
+    events: tableOf("e", model.events),
     members: tableOf("m", [...new Set(members)]),
     checks: tableOf(
       "P",
@@ -154,7 +147,7 @@ const OPERATORS = {
   "<=": "<=",
   ">": ">",
   ">=": ">=",
-} as const satisfies Record<Extract<PropExpr, { readonly kind: "cmp" }>["op"], string>;
+} as const satisfies Record<Extract<LeafExpr, { readonly kind: "cmp" }>["op"], string>;
 
 function literal(value: Value, naming: Naming): string {
   switch (value.kind) {
@@ -167,7 +160,7 @@ function literal(value: Value, naming: Naming): string {
   }
 }
 
-function problemIn(expr: PropExpr, vars: VarTable): string | null {
+function problemIn(expr: LeafExpr, vars: VarTable): string | null {
   switch (expr.kind) {
     case "cmp":
       return checkComparison(expr, vars);
@@ -183,7 +176,7 @@ function problemIn(expr: PropExpr, vars: VarTable): string | null {
   }
 }
 
-function firstOf(exprs: readonly PropExpr[], vars: VarTable): string | null {
+function firstOf(exprs: readonly LeafExpr[], vars: VarTable): string | null {
   for (const expr of exprs) {
     const problem = problemIn(expr, vars);
     if (problem !== null) return problem;
@@ -193,10 +186,10 @@ function firstOf(exprs: readonly PropExpr[], vars: VarTable): string | null {
 
 /**
  * Guards and property expressions share this one switch: `GuardExpr` is assignable to `PropExpr`.
- * Every compound is parenthesized and atoms are bare, so TLA+ precedence never matters. A state that
- * is no node is dropped from its set. Callers pass only expressions whose variables are declared.
+ * Every compound is parenthesized and atoms are bare, so TLA+ precedence never matters. Callers pass
+ * only expressions whose variables are declared.
  */
-function formula(expr: PropExpr, naming: Naming): string {
+function formula(expr: LeafExpr, naming: Naming): string {
   switch (expr.kind) {
     case "cmp":
       return `${nameOf(naming.vars, expr.name)} ${OPERATORS[expr.op]} ${literal(expr.value, naming)}`;
@@ -219,10 +212,9 @@ function formula(expr: PropExpr, naming: Naming): string {
   }
 }
 
-/** A state that is no node is left out. */
-function stateSet(states: readonly StateName[], naming: Naming): string {
-  const known = states.filter((state) => naming.states.id.has(state));
-  return setOf(known.map((state) => quoted(nameOf(naming.states, state))));
+/** Leaves only: `flatten` has already turned a state with children into the leaves inside it. */
+function stateSet(states: readonly Leaf[], naming: Naming): string {
+  return setOf(states.map((state) => quoted(nameOf(naming.states, state))));
 }
 
 function assignedValue(value: Assignment["value"], naming: Naming): string {
@@ -267,15 +259,16 @@ function conjuncts(items: readonly string[]): string[] {
   return items.map((item) => `  /\\ ${item}`);
 }
 
-function action(edge: FlowEdge, name: string, graph: Pick<Graph, "model">, naming: Naming): string {
-  const assigned = new Map(edge.set.map(({ target, value }) => [target, value]));
-  const unchanged = graph.model.vars.filter((decl) => !assigned.has(decl.name));
-  const event = edge.event === null ? "tau" : nameOf(naming.events, edge.event);
+/** One action per arc. An arc a parent's `@state-next` gave a leaf says so in its comment. */
+function action(arc: FlatArc, name: string, model: FlatModel, naming: Naming): string {
+  const assigned = new Map(arc.set.map(({ target, value }) => [target, value]));
+  const unchanged = model.vars.filter((decl) => !assigned.has(decl.name));
+  const event = arc.event === null ? "tau" : nameOf(naming.events, arc.event);
   const lines = [
-    `state = ${quoted(nameOf(naming.states, edge.from))}`,
-    ...(edge.guard === null ? [] : [formula(edge.guard, naming)]),
-    `state' = ${quoted(nameOf(naming.states, edge.to))}`,
-    ...graph.model.vars.flatMap(({ name: target }) => {
+    `state = ${quoted(nameOf(naming.states, arc.from))}`,
+    ...(arc.guard === null ? [] : [formula(arc.guard, naming)]),
+    `state' = ${quoted(nameOf(naming.states, arc.to))}`,
+    ...model.vars.flatMap(({ name: target }) => {
       const value = assigned.get(target);
       return value === undefined
         ? []
@@ -286,8 +279,10 @@ function action(edge: FlowEdge, name: string, graph: Pick<Graph, "model">, namin
       ? []
       : [`UNCHANGED <<${unchanged.map((decl) => nameOf(naming.vars, decl.name)).join(", ")}>>`]),
   ];
+  const { declared } = arc;
+  const inherited = declared.from === arc.from ? "" : `（${declared.from} から継承）`;
   return [
-    comment(`${edge.via.join(", ")}: @state-next ${edge.text}`),
+    comment(`${declared.via.join(", ")}: @state-next ${declared.text}${inherited}`),
     `${name} ==`,
     ...conjuncts(lines),
   ].join("\n");
@@ -351,13 +346,12 @@ function nextOf(actions: readonly string[], history: readonly History[], naming:
 }
 
 function render(
-  graph: Pick<Graph, "nodes" | "edges" | "model">,
-  entry: readonly StateName[],
+  model: FlatModel,
+  entry: readonly Leaf[],
   accepted: readonly TlcDef[],
   naming: Naming,
 ): string {
-  const { vars } = graph.model;
-  const flows = graph.edges.filter((edge): edge is FlowEdge => edge.type === "flow");
+  const { vars } = model;
   const names = (table: Table<string>) => [...table.id.values()];
   const history = [...naming.history.values()];
   const variables = [
@@ -366,7 +360,7 @@ function render(
     "lastEvent",
     ...history.map(({ name }) => name),
   ].join(", ");
-  const actions = flows.map((edge, index) => ({ edge, name: `A${index + 1}` }));
+  const actions = model.arcs.map((arc, index) => ({ arc, name: `A${index + 1}` }));
   const blocks = [
     [
       "---- MODULE Model ----",
@@ -374,12 +368,12 @@ function render(
       "EXTENDS Naturals",
     ],
     [
-      ...graph.nodes.map((node) => comment(`${nameOf(naming.states, node.id)} = ${node.id}`)),
-      `States == ${setOf(graph.nodes.map((node) => quoted(nameOf(naming.states, node.id))))}`,
+      ...model.states.map((state) => comment(`${nameOf(naming.states, state)} = ${state}`)),
+      `States == ${setOf(model.states.map((state) => quoted(nameOf(naming.states, state))))}`,
     ],
     [
       comment("tau = イベント無しの遷移"),
-      ...graph.model.events.map((event) => comment(`${nameOf(naming.events, event)} = ${event}`)),
+      ...model.events.map((event) => comment(`${nameOf(naming.events, event)} = ${event}`)),
       `Events == ${setOf(["tau", ...names(naming.events)].map(quoted))}`,
     ],
     [
@@ -410,7 +404,7 @@ function render(
         ...history.map(({ name, avoid }) => `${name} = (state \\in ${stateSet(avoid, naming)})`),
       ]),
     ],
-    ...actions.map(({ edge, name }) => [action(edge, name, graph, naming)]),
+    ...actions.map(({ arc, name }) => [action(arc, name, model, naming)]),
     nextOf(
       actions.map(({ name }) => name),
       history,
@@ -439,12 +433,11 @@ export function modelKey({ tla, names }: Pick<TlaModel, "tla" | "names">): strin
  * a success.
  */
 export function generateTla(
-  graph: Pick<Graph, "nodes" | "edges" | "model">,
-  file: PropertiesFile,
+  flat: Flat,
 ):
   | { readonly ok: true; readonly model: TlaModel }
   | { readonly ok: false; readonly reason: string } {
-  const entry = entryOf(graph, file);
+  const entry = flat.entry;
   if (entry.length === 0) {
     return {
       ok: false,
@@ -452,17 +445,17 @@ export function generateTla(
         "入口にする状態がありません（entry も @state-initial も入エッジの無い状態も無い）。TLA+ の Init を作れません",
     };
   }
-  const vars: VarTable = new Map(graph.model.vars.map((decl) => [decl.name, decl]));
+  const vars: VarTable = new Map(flat.model.vars.map((decl) => [decl.name, decl]));
   const accepted: TlcDef[] = [];
   const rejected: { id: PropertyId; reason: string }[] = [];
-  for (const def of file.properties.filter(isTlcDef)) {
+  for (const def of flat.properties.filter(isTlcDef)) {
     const problem = problemOfDef(def, vars);
     if (problem === null) accepted.push(def);
     else
       rejected.push({ id: def.id, reason: `性質 ${def.id} の式を TLA+ にできません: ${problem}` });
   }
 
-  const naming = allocate(graph, accepted);
+  const naming = allocate(flat.model, accepted);
   const checkName = (def: TlcDef) => nameOf(naming.checks, def.id);
   const invariants = [...accepted.filter((def) => def.kind !== "leads-to").map(checkName), TYPE_OK];
   const temporal = accepted.filter((def) => def.kind === "leads-to").map(checkName);
@@ -471,7 +464,7 @@ export function generateTla(
   return {
     ok: true,
     model: {
-      tla: render(graph, entry, accepted, naming),
+      tla: render(flat.model, entry, accepted, naming),
       cfg: (checks) => {
         const invariant = checks.filter((check) => invariants.includes(check));
         return `${[

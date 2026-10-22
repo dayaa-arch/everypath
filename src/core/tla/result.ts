@@ -1,10 +1,9 @@
 import { parseEventName, parseStateName, parseVarName } from "../expr.js";
+import type { Flat } from "../flatten.js";
 import { asInteger, asItems, asText, isRecord } from "../json.js";
 import { PROPERTIES_FILE } from "../properties.js";
 import type {
   Counterexample,
-  Graph,
-  PropertiesFile,
   PropertyResult,
   ScanWarning,
   StateName,
@@ -191,13 +190,12 @@ function awaitsTlc({ checkedBy, result }: PropertyResult): boolean {
  * than the one TLC checked, the verdict is marked `staleModel`. `checkedBy` stays the quick lane's.
  */
 export function withTlcResults(
-  graph: Pick<Graph, "nodes" | "edges" | "model">,
-  file: PropertiesFile,
+  flat: Flat,
   quick: readonly PropertyResult[],
   stored: StoredVerdicts | null,
 ): readonly PropertyResult[] {
   if (stored === null) return quick;
-  const generated = generateTla(graph, file);
+  const generated = generateTla(flat);
   const fresh = generated.ok && modelKey(generated.model) === stored.key;
   const stale: { readonly staleModel?: true } = fresh ? {} : { staleModel: true };
   return quick.map((result): PropertyResult => {

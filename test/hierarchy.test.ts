@@ -584,8 +584,9 @@ describe("hierarchy: Mermaid", () => {
     assert.match(text, new RegExp(`class ${id("C1")},${id("S")} violated\n`));
     assert.match(text, new RegExp(`class ${id("Later")} planned\n`));
     assert.ok(!new RegExp(`class [^\n]*${id("P")}\\b`).test(text));
-    const block = text.slice(text.indexOf(`state ${id("P")} {`), text.indexOf("}"));
-    assert.ok(!block.includes("[*]"));
+    const start = text.indexOf(`state ${id("P")} {`);
+    assert.ok(start > 0, "P is a composite state");
+    assert.ok(!text.slice(start, text.indexOf("}", start)).includes("[*]"));
   });
 });
 
