@@ -46,7 +46,7 @@ declare function startServer(o: { root: string; port: number; uiPath?: string; e
 - `.everypath` か `.everypath/tla` がシンボリックリンクなら書き込みを拒む。悪意あるリポジトリにリポジトリの外を書かせないため（R-01）。
 - `GET /history.json` は `history.jsonl` の最新 200 件を古い順の配列で返す（`SPEC.md` §11。ビューアの変更ログ用）。
 
-敵対的レビュー（正しさ、保守性、性能、セキュリティの 4 視点）を経た。直した 12 件は上の決定に反映した。直さずに残したもの: サーバー稼働中の CLI の `scan` は列の外から書く（hook と併用すると履歴が二重になりうる。次の作業）、TypeOK の違反は `result.json` に残すがグラフには出ない、監視の判定は `config.ignore` を見ない（余分なスキャンだけで、配信はしない）、TLC の `-Xmx` と worker 数の上限、Windows での実行ファイル探索。
+敵対的レビュー（正しさ、保守性、性能、セキュリティの 4 視点）を経た。直した 12 件は上の決定に反映した。直さずに残したもの: サーバー稼働中の CLI の `scan` は列の外から書く（`docs/specs/serve-cli-guard.md` で直した。CLI は書かずにサーバーへ渡す）、TypeOK の違反は `result.json` に残すがグラフには出ない、監視の判定は `config.ignore` を見ない（余分なスキャンだけで、配信はしない）、TLC の `-Xmx` と worker 数の上限、Windows での実行ファイル探索。
 
 ## 非目標
 - ビューアの画面（`dist/ui.html` の中身）。`GET /` は配るだけ

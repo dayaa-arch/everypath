@@ -5,15 +5,15 @@
 満たす: R-01（`serve.json` も `.everypath/` 配下）、R-03（Java が無くても渡した先で案内して続行する）
 
 ## 完了条件
-- [ ] 1. `npm run typecheck`、`npm run lint`、`npm test` がすべて exit 0（実行して確認）
-- [ ] 2. `serve` の稼働中に、新しい状態を書いたファイルの追加と `scan --quiet` の同時 2 回を 5 周くり返す。追加した状態はそれぞれ `history.jsonl` のちょうど 1 行の `added` に載る。サーバーが落ち着いたあと、`.everypath/graph.json` は `GET /graph.json` とバイト単位で同じ（`test/serve-cli-guard.test.ts`。修正前は失敗する）
-- [ ] 3. `serve` が URL を出した時点で `.everypath/serve.json` は `{version:1, pid, port}` を持ち、pid は生きていて port は URL と同じ。SIGTERM で止めると消える（同上）
-- [ ] 4. 稼働中のサーバーがあると、`scan --json` は `GET /graph.json` と同じ文字列を出し、`check` はサーバー無しのときと同じ標準出力と終了コードを返す。どちらも `graph.json` を書き換えない（同上）
-- [ ] 5. 稼働中のサーバーがあると、`check --tlc` の TLC はサーバーで走る。`/events` の購読者に `tlc` の `running` と `done` が届き、CLI はサーバー無しのときと同じ反例を出して exit 1。`--timeout` もサーバーでの実行に効く（同上）
-- [ ] 6. サーバーの環境に Java が無いとき、`check --tlc` は導入手順を出し、簡易検査の結果で exit 0 か 1 になる（同上。R-03）
-- [ ] 7. `serve.json` の pid が終了済みか、port が接続を拒むとき、CLI は今までどおり自分で書いて exit 0（同上）
-- [ ] 8. 同じディレクトリで 2 つ目の `serve` を起動すると、1 つ目の URL を含む日本語のエラーで exit 1。1 つ目の `serve.json` は変わらない。終了済みの pid の `serve.json` は起動を妨げない（同上）
-- [ ] 9. `single-writer.test.ts` が `remove` で始まる `workspace.ts` の関数も書き手として数え、`src/server/` からは `writer.ts` だけが呼べる（`test/single-writer.test.ts`）
+- [x] 1. `npm run typecheck`、`npm run lint`、`npm test` がすべて exit 0（実行して確認）
+- [x] 2. `serve` の稼働中に、新しい状態を書いたファイルの追加と `scan --quiet` の同時 2 回を 5 周くり返す。追加した状態はそれぞれ `history.jsonl` のちょうど 1 行の `added` に載る。サーバーが落ち着いたあと、`.everypath/graph.json` は `GET /graph.json` とバイト単位で同じ（`test/serve-cli-guard.test.ts`。修正前は失敗する）
+- [x] 3. `serve` が URL を出した時点で `.everypath/serve.json` は `{version:1, pid, port}` を持ち、pid は生きていて port は URL と同じ。SIGTERM で止めると消える（同上）
+- [x] 4. 稼働中のサーバーがあると、`scan --json` は `GET /graph.json` と同じ文字列を出し、`check` はサーバー無しのときと同じ標準出力と終了コードを返す。どちらも `graph.json` を書き換えない（同上）
+- [x] 5. 稼働中のサーバーがあると、`check --tlc` の TLC はサーバーで走る。`/events` の購読者に `tlc` の `running` と `done` が届き、CLI はサーバー無しのときと同じ反例を出して exit 1。`--timeout` もサーバーでの実行に効く（同上）
+- [x] 6. サーバーの環境に Java が無いとき、`check --tlc` は導入手順を出し、簡易検査の結果で exit 0 か 1 になる（同上。R-03）
+- [x] 7. `serve.json` の pid が終了済みか、port が接続を拒むとき、CLI は今までどおり自分で書いて exit 0（同上）
+- [x] 8. 同じディレクトリで 2 つ目の `serve` を起動すると、1 つ目と同じ `--port` を指定しても「使用中」ではなく、1 つ目の URL を含む日本語のエラーで exit 1。1 つ目の `serve.json` は変わらない。終了済みの pid の `serve.json` は起動を妨げない（同上）
+- [x] 9. `single-writer.test.ts` が `remove` で始まる `workspace.ts` の関数も書き手として数え、`src/server/` からは `writer.ts` だけが呼べる（`test/single-writer.test.ts`）
 
 ## データの形
 ```ts
@@ -37,6 +37,13 @@ type TlcSummary =
 - `check --tlc` を渡したとき、Java と jar はサーバーの環境で探す。TLC を 1 本に保ち、ビューアにも実行中が見えるため。
 - CLI からの要求は `node:http` で送り、待ち時間の上限を置かない。TLC の待ちは数分になりうるため。
 - `POST /rescan` は今のまま本文を見ない。渡した再スキャンの履歴は `reason: "rescan"` になる。サーバーの監視がほぼ先に同じ変更を拾うので、`scan` や `check` と書き分けても見える違いが無い。
+
+実装で決めたこと。
+- `serve` は待ち受けの前にも `serve.json` を読み、生きている持ち主がいれば名前を出して止まる。決めるのは列が開くときの排他作成で、前の確認は同じ `--port` で「使用中」になる前に持ち主を示すためだけにある。
+- `POST /check/tlc` の本文は、空、JSON でないもの、`{}` なら今までどおり。`{"wait": true, "timeoutMs"?}` 以外の形は 400。停止中の待ちは 503。
+- 取り込みのあとの再スキャンが失敗しても、待ちには 200 で結果を返す。走らせた TLC 自体は成功しているため。再スキャンの失敗は今までどおり stderr に出す。
+
+残る端（直さない）。`serve.json` の pid が無関係のプロセスに使い回されると、`serve` は死んだ URL を名指しして止まる。CLI は接続を拒まれるので自分で書く。`serve.json` を消せば起動できる。同じ古い記録を 2 つの `serve` が同時に引き継ぐと、両方が起動しうる。
 
 ## 非目標
 - `tla export` の受け渡し。書くのは `Model.tla` と `Model.cfg` の置き換えだけで、`graph.json` と履歴には触れない
