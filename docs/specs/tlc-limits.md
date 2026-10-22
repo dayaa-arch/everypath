@@ -8,7 +8,7 @@
 - [ ] 1. `npm run typecheck`、`npm run lint`、`npm test`、`npm run build` が exit 0 で、`scripts/verify-requirements.ts` が ok（実行して確認）
 - [ ] 2. 既定値。設定の無いリポジトリの TLC は、毎回 `java -Xmx3g -XX:+UseParallelGC -jar …` で動く（偽の `java` の引数の記録。`test/tlc-limits.test.ts`）
 - [ ] 3. 設定。`{"tla": {"maxHeap": "6g"}}` なら `-Xmx6g`、`"512m"` なら `-Xmx512m` で動く。`"3"`、`"3gb"`、`3`、`"0g"`、`"4m"`（8m 未満）、`"tla": "x"` は `tla.maxHeap` を名指す警告を 1 件出して既定の `3g` で動き、`scan` は exit 0（同上）
-- [ ] 4. 出力の上限。TLC の出力は最後の 16 Mi 文字だけを持つ。偽の `java` が 600 MB の途中経過の行のあとに違反を出しても、`check --tlc` は落ちずに反例 3 歩と状態数 25 を読む（同上。上限が無いと Node の文字列の上限を超える）。上限を超えて反例の先頭まで捨てたときは、出力を捨てたことを言う `error` になる（`test/tla.test.ts` のパースの単体）
+- [ ] 4. 出力の上限。TLC の出力は最後の 16 Mi 文字だけを持つ。偽の `java` が 600 MB の途中経過の行のあとに違反を出しても、`check --tlc` は落ちずに反例 3 歩と状態数 25 を読む（同上。上限が無いと Node の文字列の上限を超える）。上限を超えて反例の先頭まで捨てたときは、出力の先頭を捨てたことを言う `error` になる（同上）
 - [ ] 5. メモリ不足。TLC が「Java ran out of memory」か `java.lang.OutOfMemoryError` で終わると、残りの性質は TLC を走らせ直さずに `error` になり、`check --tlc` は「TLC のメモリが足りませんでした（Java のヒープの上限 3g）」と `tla.maxHeap` の上げ方を出して exit 1（偽の `java` と実物の出力の fixture。同上）
 - [ ] 6. 実機。実物の TLC で `example/` のコピーと 19,740 本の遷移のモデルが既定値で通り、後者に `"maxHeap": "256m"` を書くと 5 の日本語のエラーになる（手で実行し、返答に貼る）
 
@@ -48,4 +48,4 @@ type TlcReport = … | { kind: "out-of-memory"; distinctStates: number | null };
 - `tla.jar` の設定（`docs/specs/tla.md` の非目標のまま）
 
 ## 検証方法
-`test/tlc-limits.test.ts`（偽の `java` で引数、設定、600 MB の出力、メモリ不足を確かめる）、`test/fixtures/tlc-output-out-of-memory.txt`（実物の TLC を `-Xmx128m` で動かした出力）、`test/tla.test.ts`（パースの単体）を実装より先に作る。既定値は `scripts/bench-tlc-heap.ts` で測る。条件 6 は手で実行する。
+`test/tlc-limits.test.ts`（偽の `java` で引数、設定、600 MB の出力、メモリ不足を確かめる）、`test/fixtures/tlc-output-out-of-memory.txt`（実物の TLC を `-Xmx128m` で動かした出力）を実装より先に作る。既定値は `scripts/bench-tlc-heap.ts` で測る。条件 6 は手で実行する。

@@ -17,7 +17,14 @@ export async function exampleRepo(): Promise<string> {
 
 /** A real TLC 2.19 output captured from a hand-written model of `example/`. */
 export function fixture(
-  name: "violation" | "ok" | "liveness" | "stuttering" | "parse-error" | "initial",
+  name:
+    | "violation"
+    | "ok"
+    | "liveness"
+    | "stuttering"
+    | "parse-error"
+    | "initial"
+    | "out-of-memory",
 ) {
   return readFile(join(repoRoot, "test", "fixtures", `tlc-output-${name}.txt`), "utf8");
 }
@@ -83,6 +90,12 @@ export type Reply = {
   readonly hang?: boolean;
   /** Wait (at most 30 s) until this file exists before answering, so a test can hold a run open. */
   readonly until?: string;
+  /** `line` repeated up to `bytes`, printed before or after `output`: a long TLC output. */
+  readonly noise?: {
+    readonly line: string;
+    readonly bytes: number;
+    readonly where: "before" | "after";
+  };
 };
 
 /** The first rule whose `when` appears in Model.cfg answers; `otherwise` answers the rest. */
@@ -107,7 +120,11 @@ function answer(reply: Reply, file: string): string {
     reply.until === undefined
       ? ""
       : `n=0; while [ ! -e '${reply.until}' ] && [ $n -lt 600 ]; do sleep 0.05; n=$((n+1)); done\n`;
-  return `${gate}cat '${file}'\n${reply.hang === true ? "exec sleep 60" : exit}`;
+  const noise =
+    reply.noise === undefined ? "" : `yes '${reply.noise.line}' | head -c ${reply.noise.bytes}\n`;
+  const print =
+    reply.noise?.where === "after" ? `cat '${file}'\n${noise}` : `${noise}cat '${file}'\n`;
+  return `${gate}${print}${reply.hang === true ? "exec sleep 60" : exit}`;
 }
 
 /** A shell script named `java`: `-version` succeeds, anything else logs its cfg and replies. */

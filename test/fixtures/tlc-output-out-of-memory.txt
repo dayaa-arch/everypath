@@ -1,0 +1,7 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 119 and seed -9109397956009962250 with 1 worker on 8 cores with 123MB heap and 64MB offheap memory [pid: 53071] (Mac OS X 15.7.4 aarch64, Eclipse Adoptium 17.0.8.1 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /work/parent/.everypath/tla/Model.tla
+Error: Java ran out of memory.  Running Java with a larger memory allocation
+pool (heap) may fix this.  But it won't help if some state has an enormous
+number of successor states, or if TLC must compute the value of a huge set.
+Finished in 04s at (2026-10-23 00:50:06)
