@@ -1,0 +1,8 @@
+source: https://github.com/verus-lang/verus/blob/920ee002ddf3510d096c97deea4c1691c5af6fe2/source/docs/guide/src/assert_assume.md?plain=1#L23-L26
+exit: 1
+note: ガイドが場所の行（-->）を省いた抜き書き。終了コードは出典に無く 1 とした（推測）
+---
+error: postcondition not satisfied
+   |
+   |           s1.intersect(s2).len() <= s1.len(),
+   |           ---------------------------------- failed this postcondition

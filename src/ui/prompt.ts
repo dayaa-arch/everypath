@@ -10,7 +10,7 @@ import type {
   StateNode,
 } from "../core/types.js";
 import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
-import { driftsFrom, fixOf, liveViolations, selectedIds } from "./facts.js";
+import { driftsFrom, fixOf, liveViolations, proofSummary, selectedIds } from "./facts.js";
 import type { DriftDecision, ReplayRef, ViewState } from "./state.js";
 
 /** An instruction ready to paste: the nodes it is about (those its kind applies to) and its text. */
@@ -62,6 +62,11 @@ const KINDS: Readonly<Record<PromptKind, KindRow>> = {
   "write-tests": {
     label: "テストを書く",
     applies: (node) => !node.status.tested && hasCode(node),
+    blocker: READY,
+  },
+  "write-proof": {
+    label: "仕様と証明を書く",
+    applies: (node) => node.status.requireProof && node.status.proof !== "passed" && hasCode(node),
     blocker: READY,
   },
   "draw-model": {
@@ -158,6 +163,8 @@ function scopeOf(
       : "everypath check",
     APPROVED: fixing ? approvedAround(graph, nodes, replay).join("・") : "",
     FOCUS: focusOf(graph, nodes, replay),
+    TOOL: graph.prover?.tool ?? "",
+    TOOL_COMMAND: graph.prover?.command ?? "",
     NODES: nodes.map((node) => nodeScope(graph, node, { replay, decisions })),
   };
 }
@@ -186,6 +193,8 @@ function nodeScope(
     }),
     DESC: node.desc ?? "",
     SPEC: node.spec.join(" / "),
+    SPECS: node.spec.map((line) => ({ LINE: line })),
+    PROOF: proofText(node),
     FINDINGS: node.findings
       .map((f) => `- ${f.message}（${f.file}${f.line === null ? "" : `:${f.line}`}, ${f.rule}）`)
       .join("\n"),
@@ -197,6 +206,13 @@ function nodeScope(
       .map((property) => violationBlock(property, replay))
       .join("\n\n"),
   };
+}
+
+/** The last proof as the panel shows it, with the tool's message under it. Empty without one. */
+function proofText(node: StateNode): string {
+  if (node.proof === undefined) return "";
+  const { summary, message } = proofSummary(node);
+  return message === null ? summary : `${summary}\n${message}`;
 }
 
 function describeVar(decl: ModelVar): string {

@@ -99,10 +99,11 @@ describe("templates/prompts (condition 3)", () => {
     assert.ok(first !== undefined && second !== undefined);
     state = { ...state, selection: { kind: "many", ids: [first, second, ...rest] } };
 
-    // example/ has no violation before TLC runs and no drift; test/ui-prompt.test.ts and
-    // test/viewer-drift-prompt.test.ts fill those two.
+    // example/ has no violation before TLC runs, no drift and no node that requires a proof;
+    // test/ui-prompt.test.ts, test/viewer-drift-prompt.test.ts and test/proofs-viewer.test.ts fill those.
+    const elsewhere: readonly string[] = ["fix-counterexample", "fix-drift", "write-proof"];
     for (const kind of PROMPT_KINDS) {
-      if (kind === "fix-counterexample" || kind === "fix-drift") continue;
+      if (elsewhere.includes(kind)) continue;
       const prompt = buildPrompt(kind, state);
       assert.ok(prompt !== null, `${kind} applies to some example node`);
       assert.doesNotMatch(prompt.text, /\{\{|\}\}/, kind);

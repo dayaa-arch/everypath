@@ -147,6 +147,31 @@ export type Finding = {
 /** A `@state-risk` the agent declared about itself. Kept apart from scanner findings. */
 export type Risk = { readonly file: string; readonly message: string };
 
+/** `proof.tool` in `everypath.config.json`: how `everypath prove` reads the prover's output. */
+export type ProofTool = "dafny" | "verus" | "command";
+
+/** `proof` in `everypath.config.json`, with the tool's default command filled in. */
+export type Prover = {
+  readonly tool: ProofTool;
+  /** Split on spaces and run without a shell. The word `{files}` becomes the node's files. */
+  readonly command: string;
+};
+
+/** One value of `.everypath/proofs.json`, keyed by node id. `everypath prove` writes it. */
+export type ProofEntry = {
+  readonly result: "passed" | "failed" | "pending";
+  /** Any name: a tool outside `ProofTool` may write the file too. */
+  readonly tool: string;
+  /** What the tool said: the obligations that failed, or its summary. May be empty. */
+  readonly message: string;
+  readonly at: string;
+  /** The node's `hash` when the tool ran. Another hash means its files changed since. */
+  readonly hash: string;
+};
+
+/** A node's entry as the graph shows it. `stale`: the node's files changed after the tool ran. */
+export type NodeProof = Omit<ProofEntry, "hash"> & { readonly stale: boolean };
+
 /**
  * The three fields of `@state-parent` are written only when they are set, so the graph.json of a
  * repository without it is what it was before it existed.
@@ -169,8 +194,11 @@ export type StateNode = {
   readonly lines: number;
   /** sha1 of the node's file contents concatenated in `files` order. Approvals match against it. */
   readonly hash: string;
+  /** `proof` is `none` with no entry, `pending` for a stale one, else the entry's result. */
   readonly status: NodeStatus;
   readonly spec: readonly string[];
+  /** The node's entry in `.everypath/proofs.json`. Absent when it has none. */
+  readonly proof?: NodeProof;
   readonly risks: readonly Risk[];
   readonly findings: readonly Finding[];
   /** Ids of the violated properties whose counterexample passes through this node, in file order. */
@@ -335,6 +363,8 @@ export type Graph = {
   readonly generatedAt: string;
   readonly root: string;
   readonly findingsSource: string | null;
+  /** What `everypath prove` runs. Absent when the config has no usable `proof`. */
+  readonly prover?: Prover;
   readonly stats: GraphStats;
   readonly nodes: readonly StateNode[];
   readonly edges: readonly Edge[];

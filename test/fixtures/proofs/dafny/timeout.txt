@@ -1,0 +1,11 @@
+source: https://github.com/dafny-lang/dafny/blob/5f717bf447b19d38cad1b69b1bf9a9f102feccfb/Source/IntegrationTests/TestFiles/LitTests/LitTest/cli/defaultTimeLimit.dfy.expect
+exit: 4
+note: RUN 行は ! %baredafny verify（0 以外）。4 は UserGuide.md 13.6.3 の検証エラーの値で推測。秒数は RUN 行の sed が <redacted> に置き換えたもの。--show-snippets:false を付けない既定の出力なのでコードの抜き書きが付く
+---
+defaultTimeLimit.dfy(5,7): Error: Verification of 'Foo' timed out after <redacted> seconds. (the limit can be increased using --verification-time-limit)
+  |
+5 | method Foo() {
+  |        ^^^
+
+
+Dafny program verifier finished with 1 verified, 0 errors, 1 time out

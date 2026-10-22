@@ -50,7 +50,7 @@ const INK = "#222222";
 const RULES: readonly Rule[] = [
   {
     tone: "danger",
-    label: "脆弱性・性質違反",
+    label: "脆弱性・性質違反・証明失敗",
     fill: "#f8cecc",
     stroke: "#c62828",
     width: 3,

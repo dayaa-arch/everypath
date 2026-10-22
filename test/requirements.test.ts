@@ -70,6 +70,29 @@ describe("R-01: scan writes only under .everypath/", () => {
   });
 });
 
+describe("R-01: prove writes only .everypath/proofs.json", () => {
+  it("leaves every other file byte-identical, though the prover writes into its working directory", async () => {
+    const root = await makeRepo({
+      "everypath.config.json": JSON.stringify({
+        proof: { tool: "command", command: "./prove.sh {files}" },
+      }),
+      "prove.sh": "#!/bin/sh\necho made > artifact.out\nmkdir -p out && echo made > out/x\n",
+      "src/pay.ts": ts("@state 決済", "@state-require proof"),
+      "src/home.ts": ts("@state Home"),
+      ".everypath/review.json": JSON.stringify({ version: 1, approvals: {} }),
+    });
+    await chmod(join(root, "prove.sh"), 0o755);
+    const before = await snapshot(root);
+
+    const result = runCli(["prove", root]);
+
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.deepEqual(await snapshot(root), before);
+    const everypath = (await readdir(join(root, ".everypath"))).sort();
+    assert.deepEqual(everypath, ["proofs.json", "review.json"]);
+  });
+});
+
 describe("R-04: out-of-grammar annotations never stop the scan", () => {
   it("records 10 warnings, keeps the edges without guard or set, and exits 0", async () => {
     const lines = [

@@ -1,0 +1,5 @@
+source: https://github.com/verus-lang/verus/blob/920ee002ddf3510d096c97deea4c1691c5af6fe2/source/docs/guide/src/assert_assume.md?plain=1#L51
+exit: 0
+note: 古い版の要約行の形。終了コードは出典に無く、通ったので 0 とした（推測）
+---
+verification results:: verified: 1 errors: 0
