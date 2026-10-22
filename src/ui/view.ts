@@ -236,6 +236,15 @@ function compare(a: string, b: string): number {
 /** A box being dragged and where it is now (world coordinates, unsnapped). */
 export type Drag = { readonly id: StateName; readonly at: Point };
 
+/**
+ * SPEC §7.3's line kinds. A declared flow is black whether or not a call was observed, because a
+ * missing call is no evidence (docs/specs/drift.md); `observed` is a call no `@state-next` declares.
+ */
+export type Look = "flow" | "dep" | "observed" | "trail";
+
+/** How a drift line looks: orange, labelled 宣言なし (SPEC §7.3). */
+export const DRIFT = { stroke: "#ef6c00", label: "宣言なし" } as const;
+
 export type SceneItem =
   | {
       readonly kind: "box";
@@ -253,7 +262,7 @@ export type SceneItem =
     }
   | {
       readonly kind: "line";
-      readonly look: "flow" | "dep" | "trail";
+      readonly look: Look;
       readonly points: readonly Point[];
       /**
        * Parallel flow edges between one pair are one line; their labels join with " / ". `box` is
@@ -273,7 +282,7 @@ export type SceneItem =
 /**
  * The canvas as data. `live` is everything that moves with the dragged box (the box, its edges, trail
  * segments and callout touching it); `base` is the rest. With no drag, `live` is empty. Each list is
- * in paint order: dep lines, flow lines, trail, boxes, callout.
+ * in paint order: dep lines, flow lines, drift lines, trail, boxes, callout.
  */
 export type Scene = {
   readonly base: readonly SceneItem[];
@@ -351,7 +360,7 @@ export function sceneOf(
   /** What a label may not cover: every node, then each label as it is placed. */
   const taken = graph.nodes.flatMap(({ id }) => boxOf(id) ?? []);
 
-  const lines = (look: "flow" | "dep" | "trail", pairs: readonly Pair[], lane: number): void => {
+  const lines = (look: Look, pairs: readonly Pair[], lane: number): void => {
     for (const { from, to, labels } of pairs) {
       const a = boxOf(from);
       const b = boxOf(to);
@@ -372,6 +381,14 @@ export function sceneOf(
   lines(
     "flow",
     pairsOf(graph.edges.flatMap((e) => (e.type === "flow" ? [{ ...e, label: edgeLabel(e) }] : []))),
+    0,
+  );
+  // Lane 0 is free: scan makes an observed edge only for a pair no flow declares.
+  lines(
+    "observed",
+    pairsOf(
+      graph.edges.flatMap((e) => (e.type === "observed" ? [{ ...e, label: DRIFT.label }] : [])),
+    ),
     0,
   );
   if (replay !== null) lines("trail", pairsOf(trailOf(replay.trace)), 0);

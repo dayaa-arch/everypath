@@ -16,7 +16,9 @@ import { type Prompt, promptLabel, promptTargets } from "./prompt.js";
 import { type Action, type Replay, replayOf, type TlcView, type ViewState } from "./state.js";
 import {
   checkedByLabel,
+  DRIFT,
   headerCounts,
+  type Look,
   reviewQueue,
   rowOf,
   type SceneItem,
@@ -73,6 +75,13 @@ const SLOP = 4;
 const ZOOM_MIN = 0.2;
 const ZOOM_MAX = 3;
 const DANGER = rowOf("danger");
+/** The lines whose color means something; `null` leaves it to the stylesheet's ink and grey. */
+const LINE_COLORS: Readonly<Record<Look, string | null>> = {
+  flow: null,
+  dep: null,
+  observed: DRIFT.stroke,
+  trail: DANGER.stroke,
+};
 
 const PROOF: Readonly<Record<NodeStatus["proof"], string>> = {
   none: "なし",
@@ -358,6 +367,7 @@ function draw(item: SceneItem): SVGElement {
       return drawBox(item);
     case "line": {
       const d = `M ${item.points.map((p) => `${p.x} ${p.y}`).join(" L ")}`;
+      const color = LINE_COLORS[item.look];
       return svg(
         "g",
         { class: `line ${item.look}` },
@@ -366,7 +376,7 @@ function draw(item: SceneItem): SVGElement {
           class: "stroke",
           d,
           "marker-end": "url(#arrow)",
-          ...(item.look === "trail" ? { stroke: DANGER.stroke } : {}),
+          ...(color === null ? {} : { stroke: color }),
         }),
         item.label === null
           ? null
@@ -376,6 +386,7 @@ function draw(item: SceneItem): SVGElement {
                 class: "label",
                 x: item.label.box.x + item.label.box.width / 2,
                 y: item.label.box.y + item.label.box.height / 2,
+                ...(color === null ? {} : { fill: color }),
               },
               item.label.text,
             ),
@@ -455,8 +466,9 @@ function chip(row: ToneRow): HTMLElement {
 }
 
 function legend(): Node[] {
-  const sample = (look: "flow" | "dep" | "trail", text: string): HTMLElement =>
-    html(
+  const sample = (look: Look, text: string): HTMLElement => {
+    const color = LINE_COLORS[look];
+    return html(
       "span",
       { class: "chip" },
       svg(
@@ -472,15 +484,17 @@ function legend(): Node[] {
           class: "stroke",
           d: "M 2 6 L 30 6",
           "marker-end": "url(#arrow)",
-          ...(look === "trail" ? { stroke: DANGER.stroke } : {}),
+          ...(color === null ? {} : { stroke: color }),
         }),
       ),
       text,
     );
+  };
   return [
     html("strong", {}, "凡例"),
     ...TONES.map(chip),
     sample("flow", "遷移"),
+    sample("observed", `${DRIFT.label}（コードにだけある遷移）`),
     sample("dep", "依存"),
     sample("trail", "反例の経路"),
   ];
