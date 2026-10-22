@@ -39,21 +39,33 @@ export type TlaModel = {
    */
   readonly cfg: (checks: readonly string[]) => string;
   readonly names: TlaNames;
-  /** Every `invariant` in file order, then `TypeOK`. */
+  /** Every `invariant` and `never-reach` in file order, then `TypeOK`. */
   readonly invariants: readonly string[];
   readonly temporal: readonly string[];
   /** Definitions left out of the model, with the reason. They fail the check without stopping the rest. */
   readonly rejected: readonly { readonly id: PropertyId; readonly reason: string }[];
 };
 
-/** The kinds TLC checks. The rest stay with the BFS lane. */
-type TlcDef = Extract<PropertyDef, { readonly kind: "invariant" | "leads-to" }>;
+type Kind = PropertyDef["kind"];
+
+/**
+ * The kinds SPEC §6.3 gives to TLC, and so the kinds a verdict in `result.json` may be about. The
+ * BFS lane alone judges the rest.
+ */
+export const TLC_KINDS = [
+  "invariant",
+  "leads-to",
+  "never-reach",
+] as const satisfies readonly Kind[];
+
+type TlcDef = Extract<PropertyDef, { readonly kind: (typeof TLC_KINDS)[number] }>;
+type NeverReach = Extract<PropertyDef, { readonly kind: "never-reach" }>;
 
 function isTlcDef(def: PropertyDef): def is TlcDef {
-  return def.kind === "invariant" || def.kind === "leads-to";
+  return TLC_KINDS.some((kind) => kind === def.kind);
 }
 
-type Prefix = "S" | "v" | "e" | "m" | "P";
+type Prefix = "S" | "v" | "e" | "m" | "P" | "H";
 
 /**
  * A prefix, the 1-based position, and for an ASCII display name `_` plus the name. The position makes
@@ -82,29 +94,48 @@ function tableOf<T extends string>(prefix: Prefix, displays: readonly T[]): Tabl
   return { id, back };
 }
 
+/**
+ * A variable that says whether the behavior has been in one of a never-reach's `avoid` states. Only a
+ * never-reach with an avoid state that is a node has one.
+ */
+type History = { readonly name: string; readonly avoid: readonly StateName[] };
+
 type Naming = {
   readonly states: Table<StateName>;
   readonly vars: Table<VarName>;
   readonly events: Table<EventName>;
   readonly members: Table<MemberName>;
   readonly checks: Table<PropertyId>;
+  /** By property id, in file order. */
+  readonly history: ReadonlyMap<PropertyId, History>;
 };
 
-/** The only place names are minted. */
-function allocate(graph: Pick<Graph, "nodes" | "model">, checked: readonly PropertyId[]): Naming {
+/** The only place names are minted. `H` takes its check's position, so `H5_x` belongs to `P5_x`. */
+function allocate(graph: Pick<Graph, "nodes" | "model">, accepted: readonly TlcDef[]): Naming {
   const members = graph.model.vars.flatMap((decl) => (decl.kind === "enum" ? decl.members : []));
+  const states = tableOf(
+    "S",
+    graph.nodes.map((node) => node.id),
+  );
+  const history = new Map<PropertyId, History>();
+  for (const [index, def] of accepted.entries()) {
+    if (def.kind !== "never-reach") continue;
+    const avoid = def.avoid.filter((state) => states.id.has(state));
+    if (avoid.length > 0) history.set(def.id, { name: identifier("H", index + 1, def.id), avoid });
+  }
   return {
-    states: tableOf(
-      "S",
-      graph.nodes.map((node) => node.id),
-    ),
+    states,
     vars: tableOf(
       "v",
       graph.model.vars.map((decl) => decl.name),
     ),
     events: tableOf("e", graph.model.events),
     members: tableOf("m", [...new Set(members)]),
-    checks: tableOf("P", checked),
+    checks: tableOf(
+      "P",
+      accepted.map((def) => def.id),
+    ),
+    history,
   };
 }
 
@@ -169,10 +200,8 @@ function formula(expr: PropExpr, naming: Naming): string {
   switch (expr.kind) {
     case "cmp":
       return `${nameOf(naming.vars, expr.name)} ${OPERATORS[expr.op]} ${literal(expr.value, naming)}`;
-    case "state-in": {
-      const known = expr.states.filter((state) => naming.states.id.has(state));
-      return `state \\in {${known.map((state) => quoted(nameOf(naming.states, state))).join(", ")}}`;
-    }
+    case "state-in":
+      return `state \\in ${stateSet(expr.states, naming)}`;
     case "not": {
       const inner = formula(expr.operand, naming);
       const wrapped =
@@ -188,6 +217,12 @@ function formula(expr: PropExpr, naming: Naming): string {
     case "implies":
       return `(${formula(expr.antecedent, naming)} => ${formula(expr.consequent, naming)})`;
   }
+}
+
+/** A state that is no node is left out. */
+function stateSet(states: readonly StateName[], naming: Naming): string {
+  const known = states.filter((state) => naming.states.id.has(state));
+  return setOf(known.map((state) => quoted(nameOf(naming.states, state))));
 }
 
 function assignedValue(value: Assignment["value"], naming: Naming): string {
@@ -258,19 +293,61 @@ function action(edge: FlowEdge, name: string, graph: Pick<Graph, "model">, namin
   ].join("\n");
 }
 
-function definition(def: TlcDef, name: string, naming: Naming): string {
-  const what = def.description === null ? def.id : `${def.id}（${def.description}）`;
-  const body =
-    def.kind === "invariant"
-      ? formula(def.expr.expr, naming)
-      : `${formula(def.from.expr, naming)} ~> ${formula(def.to.expr, naming)}`;
-  return [comment(`everypath.properties.json: ${what}`), `${name} == ${body}`].join("\n");
+/**
+ * A never-reach is an invariant: in a target state, the behavior has passed an avoid state. With no
+ * avoid state to remember, it is that no target is ever the state.
+ */
+function neverReach(def: NeverReach, naming: Naming): string {
+  const target = `state \\in ${stateSet(def.target, naming)}`;
+  const history = naming.history.get(def.id);
+  return history === undefined ? `~(${target})` : `(${target} => ${history.name})`;
 }
 
+function bodyOf(def: TlcDef, naming: Naming): string {
+  switch (def.kind) {
+    case "invariant":
+      return formula(def.expr.expr, naming);
+    case "leads-to":
+      return `${formula(def.from.expr, naming)} ~> ${formula(def.to.expr, naming)}`;
+    case "never-reach":
+      return neverReach(def, naming);
+  }
+}
+
+function definition(def: TlcDef, name: string, naming: Naming): string {
+  const what = def.description === null ? def.id : `${def.id}（${def.description}）`;
+  return [comment(`everypath.properties.json: ${what}`), `${name} == ${bodyOf(def, naming)}`].join(
+    "\n",
+  );
+}
+
+/** A never-reach names states only, so nothing in it can fail to translate. */
 function problemOfDef(def: TlcDef, vars: VarTable): string | null {
-  return def.kind === "invariant"
-    ? problemIn(def.expr.expr, vars)
-    : firstOf([def.from.expr, def.to.expr], vars);
+  switch (def.kind) {
+    case "invariant":
+      return problemIn(def.expr.expr, vars);
+    case "leads-to":
+      return firstOf([def.from.expr, def.to.expr], vars);
+    case "never-reach":
+      return null;
+  }
+}
+
+/**
+ * The user's transitions as one disjunction. With history variables, every step also records whether
+ * it entered an avoid state; the actions themselves stay as the annotations wrote them.
+ */
+function nextOf(actions: readonly string[], history: readonly History[], naming: Naming): string[] {
+  if (actions.length === 0) return ["Next == FALSE"];
+  if (history.length === 0) return ["Next ==", ...actions.map((name) => `  \\/ ${name}`)];
+  return [
+    comment("H で始まる変数は、never-reach の avoid の状態をこれまでに通ったかを覚える"),
+    "Next ==",
+    ...actions.map((name, index) => `${index === 0 ? "  /\\ " : "     "}\\/ ${name}`),
+    ...history.map(
+      ({ name, avoid }) => `  /\\ ${name}' = (${name} \\/ state' \\in ${stateSet(avoid, naming)})`,
+    ),
+  ];
 }
 
 function render(
@@ -282,7 +359,13 @@ function render(
   const { vars } = graph.model;
   const flows = graph.edges.filter((edge): edge is FlowEdge => edge.type === "flow");
   const names = (table: Table<string>) => [...table.id.values()];
-  const variables = ["state", ...names(naming.vars), "lastEvent"].join(", ");
+  const history = [...naming.history.values()];
+  const variables = [
+    "state",
+    ...names(naming.vars),
+    "lastEvent",
+    ...history.map(({ name }) => name),
+  ].join(", ");
   const actions = flows.map((edge, index) => ({ edge, name: `A${index + 1}` }));
   const blocks = [
     [
@@ -302,6 +385,9 @@ function render(
     [
       ...vars.map((decl) => comment(`${nameOf(naming.vars, decl.name)} = ${decl.name}`)),
       ...[...naming.members.id].map(([member, name]) => comment(`${name} = ${member}`)),
+      ...[...naming.history].map(([id, { name, avoid }]) =>
+        comment(`${name} = ${id} の avoid（${avoid.join("、")}）を通ったか`),
+      ),
       `VARIABLES ${variables}`,
       `vars == <<${variables}>>`,
     ],
@@ -311,6 +397,7 @@ function render(
         "state \\in States",
         ...vars.map((decl) => `${nameOf(naming.vars, decl.name)} \\in ${domainOf(decl, naming)}`),
         "lastEvent \\in Events",
+        ...history.map(({ name }) => `${name} \\in BOOLEAN`),
       ]),
     ],
     [
@@ -320,12 +407,15 @@ function render(
         `state \\in ${setOf(entry.map((state) => quoted(nameOf(naming.states, state))))}`,
         ...vars.map((decl) => `${nameOf(naming.vars, decl.name)} = ${initialOf(decl, naming)}`),
         'lastEvent = "tau"',
+        ...history.map(({ name, avoid }) => `${name} = (state \\in ${stateSet(avoid, naming)})`),
       ]),
     ],
     ...actions.map(({ edge, name }) => [action(edge, name, graph, naming)]),
-    actions.length === 0
-      ? ["Next == FALSE"]
-      : ["Next ==", ...actions.map(({ name }) => `  \\/ ${name}`)],
+    nextOf(
+      actions.map(({ name }) => name),
+      history,
+      naming,
+    ),
     ["Spec == Init /\\ [][Next]_vars /\\ WF_vars(Next)"],
     ...accepted.map((def) => [definition(def, nameOf(naming.checks, def.id), naming)]),
   ];
@@ -343,8 +433,10 @@ export function modelKey({ tla, names }: Pick<TlaModel, "tla" | "names">): strin
 }
 
 /**
- * SPEC §10.1. `invariant` and `leads-to` become TLA+; every other kind stays with the BFS lane.
- * Fails as a whole only without an entry state: Init would be empty and TLC would call that a success.
+ * SPEC §10.1. `invariant`, `leads-to` and `never-reach` become TLA+; every other kind stays with the
+ * BFS lane. A never-reach is checked with the invariants, where TLC follows the guards the BFS lane
+ * ignores. Fails as a whole only without an entry state: Init would be empty and TLC would call that
+ * a success.
  */
 export function generateTla(
   graph: Pick<Graph, "nodes" | "edges" | "model">,
@@ -370,15 +462,9 @@ export function generateTla(
       rejected.push({ id: def.id, reason: `性質 ${def.id} の式を TLA+ にできません: ${problem}` });
   }
 
-  const naming = allocate(
-    graph,
-    accepted.map((def) => def.id),
-  );
+  const naming = allocate(graph, accepted);
   const checkName = (def: TlcDef) => nameOf(naming.checks, def.id);
-  const invariants = [
-    ...accepted.filter((def) => def.kind === "invariant").map(checkName),
-    TYPE_OK,
-  ];
+  const invariants = [...accepted.filter((def) => def.kind !== "leads-to").map(checkName), TYPE_OK];
   const temporal = accepted.filter((def) => def.kind === "leads-to").map(checkName);
   const events: Record<string, EventName | null> = { tau: null, ...naming.events.back };
 

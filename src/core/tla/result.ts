@@ -11,7 +11,7 @@ import type {
   Step,
   VarName,
 } from "../types.js";
-import { generateTla, modelKey, type TlaNames } from "./generate.js";
+import { generateTla, modelKey, TLC_KINDS, type TlaNames } from "./generate.js";
 import type { TlcSummary } from "./run.js";
 
 /**
@@ -50,8 +50,6 @@ type StoredVerdict = Pick<
 >;
 
 const RESULTS = ["ok", "violated", "error", "pending"] as const;
-/** The kinds TLC checks. */
-const TLC_KINDS = ["invariant", "leads-to"] as const;
 
 function parseStep(raw: unknown): Step | null {
   if (!isRecord(raw) || !isRecord(raw.vars)) return null;
