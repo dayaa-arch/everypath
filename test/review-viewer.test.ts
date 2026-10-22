@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import { parseStateName } from "../src/core/expr.js";
-import { foldReview, planChange, type ReviewChange } from "../src/core/review.js";
+import { foldReview, parseRecordFile, planChange, type ReviewChange } from "../src/core/review.js";
 import { analyze } from "../src/core/scan.js";
 import type { Graph } from "../src/core/types.js";
 import { reviewSummary } from "../src/ui/facts.js";
@@ -27,11 +27,18 @@ const SOURCES = {
   proven: ts("@state 証明済み", "@state-tested", "@state-require proof"),
 };
 
-function record(change: ReviewChange): Record<string, string> {
-  const planned = planChange(foldReview({ files: [], legacy: null }).state, change);
+type Written = { readonly name: string; readonly text: string };
+
+/** A record as written on its own branch, by someone who saw only the records `seen`. */
+function record(change: ReviewChange, ...seen: readonly Written[]): Written {
+  const read = seen.map(({ name, text }) => parseRecordFile(name, text));
+  const planned = planChange(foldReview({ files: read, legacy: null }).state, change);
   assert.ok(planned !== null);
-  return { [`.everypath/review/${planned.name}`]: planned.text };
+  return planned;
 }
+
+const placed = (...records: readonly Written[]): Record<string, string> =>
+  Object.fromEntries(records.map(({ name, text }) => [`.everypath/review/${name}`, text]));
 
 function approve(id: string, hash: string, by: string, at: string, note = ""): ReviewChange {
   const parsed = parseStateName(id);
@@ -46,6 +53,7 @@ function revoke(id: string, by: string, at: string): ReviewChange {
 }
 
 async function panelGraph(): Promise<Graph> {
+  const base = record(approve("食い違い", "1".repeat(40), "base", AT1));
   const root = await makeRepo({
     "everypath.config.json": JSON.stringify({ proof: { tool: "dafny" } }),
     "src/approved.ts": SOURCES.approved,
@@ -63,14 +71,17 @@ async function panelGraph(): Promise<Graph> {
         hash: sha1(SOURCES.proven),
       },
     }),
-    ...record(approve("承認済み", sha1(SOURCES.approved), "taro", AT1, "仕様確認済み")),
-    ...record(approve("変更後", sha1("before the edit"), "hanako", AT2)),
-    ...record(approve("食い違い", sha1(SOURCES.conflict), "taro", AT1)),
-    ...record(approve("食い違い", sha1("another text"), "hanako", AT2)),
-    ...record(revoke("食い違い", "jiro", AT3)),
-    ...record(approve("名無し", sha1(SOURCES.nameless), "", AT1)),
-    ...record(approve("証明済み", sha1(SOURCES.proven), "taro", AT1)),
-    ...record(approve("証明済み", sha1("another proof"), "hanako", AT2)),
+    ...placed(
+      record(approve("承認済み", sha1(SOURCES.approved), "taro", AT1, "仕様確認済み")),
+      record(approve("変更後", sha1("before the edit"), "hanako", AT2)),
+      base,
+      record(approve("食い違い", sha1(SOURCES.conflict), "taro", AT1), base),
+      record(approve("食い違い", sha1("another text"), "hanako", AT2), base),
+      record(revoke("食い違い", "jiro", AT3), base),
+      record(approve("名無し", sha1(SOURCES.nameless), "", AT1)),
+      record(approve("証明済み", sha1(SOURCES.proven), "taro", AT1)),
+      record(approve("証明済み", sha1("another proof"), "hanako", AT2)),
+    ),
   });
   return (await analyze(root)).graph;
 }

@@ -4,7 +4,7 @@ import { mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { parseStateName } from "../src/core/expr.js";
-import { foldReview, planChange, type ReviewChange } from "../src/core/review.js";
+import { foldReview, parseRecordFile, planChange, type ReviewChange } from "../src/core/review.js";
 import { analyze } from "../src/core/scan.js";
 import type { Graph, ScanWarning, StateName } from "../src/core/types.js";
 import { serializeGraph, writeReviewChange } from "../src/core/workspace.js";
@@ -47,10 +47,16 @@ const revoke = (id: string, by: string, at = AT2): ReviewChange => ({
   at,
 });
 
-/** A record written as on another branch: its author saw no other record. Path to content. */
-function concurrent(change: ReviewChange): { readonly path: string; readonly text: string } {
-  const planned = planChange(foldReview({ files: [], legacy: null }).state, change);
-  assert.ok(planned !== null, "a first record is always written");
+type Written = { readonly path: string; readonly text: string };
+
+/**
+ * A record written as on another branch, whose author saw only the records `seen` and none written
+ * beside it. Path to content.
+ */
+function concurrent(change: ReviewChange, ...seen: readonly Written[]): Written {
+  const read = seen.map(({ path, text }) => parseRecordFile(path.slice(REVIEW.length + 1), text));
+  const planned = planChange(foldReview({ files: read, legacy: null }).state, change);
+  assert.ok(planned !== null, "the change writes a record");
   return { path: `${REVIEW}/${planned.name}`, text: planned.text };
 }
 
@@ -394,7 +400,7 @@ describe("review: records this version cannot read close the node (graft 2)", ()
       what: "a .jsonl whose name is not a record id",
       file: `${REVIEW}/copy.jsonl`,
       make: (root) =>
-        writeFiles(root, { [`${REVIEW}/copy.jsonl`]: concurrent(revoke("B", "x")).text }),
+        writeFiles(root, { [`${REVIEW}/copy.jsonl`]: concurrent(approve("B", sha1(B), "x")).text }),
     },
     {
       what: "a record that is a link",
@@ -420,7 +426,7 @@ describe("review: records this version cannot read close the node (graft 2)", ()
   ];
   for (const { what, file, make } of blinds) {
     it(`blocks the legacy approval of B for ${what}, with one warning`, async () => {
-      const outside = await makeRepo({ "x.jsonl": concurrent(revoke("B", "x")).text });
+      const outside = await makeRepo({ "x.jsonl": concurrent(approve("B", sha1(B), "x")).text });
       const root = await makeRepo({
         "src/b.ts": B,
         ".everypath/review.json": legacy({ B: { hash: sha1(B), by: "taro", at: AT1 } }),
@@ -437,7 +443,8 @@ describe("review: records this version cannot read close the node (graft 2)", ()
           { kind: "unreadable", file },
         ],
       });
-      assert.equal(warningsAbout(graph, file).length, 1, JSON.stringify(graph.warnings));
+      const unread = warningsAbout(graph, file).filter((w) => !w.message.includes("食い違って"));
+      assert.equal(unread.length, 1, JSON.stringify(graph.warnings));
     });
   }
 
@@ -474,12 +481,14 @@ describe("review: agreeing, disagreeing and resolving", () => {
   });
 
   it("ends a conflict by approving the current text, or by revoking", async () => {
+    const base = concurrent(approve("A", "1".repeat(40), "base", AT1));
     const root = await makeRepo({
       "src/a.ts": A,
       ...files(
-        concurrent(approve("A", "0".repeat(40), "taro", AT1)),
-        concurrent(approve("A", sha1(A), "hanako", AT2)),
-        concurrent(revoke("A", "jiro", AT3)),
+        base,
+        concurrent(approve("A", "0".repeat(40), "taro", AT1), base),
+        concurrent(approve("A", sha1(A), "hanako", AT2), base),
+        concurrent(revoke("A", "jiro", AT3), base),
       ),
     });
     const before = node(await graphOf(root), "A");
