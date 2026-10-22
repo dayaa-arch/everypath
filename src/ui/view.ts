@@ -1,8 +1,19 @@
 import { edgeLabel } from "../core/expr.js";
+import { hierarchyOf } from "../core/hierarchy.js";
 import type { Counterexample, Graph, PropertyResult, StateName, StateNode } from "../core/types.js";
 import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
 import { selectedIds } from "./facts.js";
-import { type Box, boxAt, labelBoxes, labelWidth, overlaps, type Point, route } from "./layout.js";
+import {
+  type Box,
+  boxAt,
+  enclose,
+  labelBoxes,
+  labelWidth,
+  overlaps,
+  type Point,
+  parentFrames,
+  route,
+} from "./layout.js";
 import { replayOf, type ViewState } from "./state.js";
 
 export type Tone =
@@ -156,12 +167,16 @@ export function violated(graph: Graph): readonly PropertyResult[] {
   return graph.properties.filter(isLiveViolation);
 }
 
-/** Nodes whose tone is not settled, in `TONES` order, then id. The header's "未レビュー N" is its length. */
+/**
+ * Nodes whose tone is not settled, in `TONES` order, then id. The header's "未レビュー N" is its length.
+ * A container has no file to review, so it is never in it.
+ */
 export function reviewQueue(
   graph: Graph,
 ): readonly { readonly node: StateNode; readonly tone: Tone }[] {
   const rank = (tone: Tone): number => TONES.findIndex((row) => row.tone === tone);
   return graph.nodes
+    .filter((node) => node.container !== true)
     .map((node) => ({ node, tone: toneOf(node, graph.properties) }))
     .filter(({ tone }) => !rowOf(tone).settled)
     .sort((a, b) => rank(a.tone) - rank(b.tone) || compare(a.node.id, b.node.id));
@@ -255,6 +270,20 @@ export type SceneItem =
       readonly label: Box;
     }
   | {
+      /**
+       * A parent (`@state-parent`): a frame round its children's boxes and frames, where its own
+       * transitions start and end. Measured from the boxes on every frame, never stored.
+       */
+      readonly kind: "parent";
+      readonly id: StateName;
+      readonly box: Box;
+      /** Where the name is written, inside the frame's top-left corner, above every member. */
+      readonly label: Box;
+      /** The parent's own tone, as its box would have; null for a container, which has no file. */
+      readonly tone: Tone | null;
+      readonly selected: boolean;
+    }
+  | {
       readonly kind: "box";
       readonly id: StateName;
       readonly box: Box;
@@ -306,7 +335,8 @@ export type FileRow = { readonly file: string; readonly tested: boolean | null }
 /**
  * The canvas as data. `live` is everything that moves with the dragged box (the box, its edges, trail
  * segments and callout touching it); `base` is the rest. With no drag, `live` is empty. Each list is
- * in paint order: group frames, dep lines, flow lines, drift lines, trail, boxes, callout, files.
+ * in paint order: group frames, parent frames (outer first), dep lines, flow lines, drift lines,
+ * trail, boxes, callout, files.
  */
 export type Scene = {
   readonly base: readonly SceneItem[];
@@ -374,20 +404,46 @@ export function sceneOf(
   const { graph } = state;
   if (graph === null) return { base: [], live: [], bounds: null };
   const { drag, now } = frame;
-  const boxOf = (id: StateName): Box | undefined => {
+  const hierarchy = hierarchyOf(graph.nodes);
+  /** A leaf's box. A parent has none: it is a frame round what is inside it. */
+  const leafBox = (id: StateName): Box | undefined => {
+    if (!hierarchy.isLeaf(id)) return undefined;
     const point = drag?.id === id ? drag.at : state.layout[id];
     return point === undefined ? undefined : boxAt(point);
   };
+  const parents = parentFrames(hierarchy, leafBox);
+  const frameOf = new Map(parents.map((parent) => [parent.id, parent]));
+  /** Where a line to `id` ends: its box, or for a parent its frame. */
+  const boxOf = (id: StateName): Box | undefined => leafBox(id) ?? frameOf.get(id)?.box;
+  /** The boxes whose drag moves what `id` is drawn as: itself, or every leaf in a parent's frame. */
+  const movers = (id: StateName): readonly StateName[] => [id, ...(frameOf.get(id)?.members ?? [])];
   const replay = replayOf(state);
   const selected = new Set(selectedIds(state.selection));
   const items: { readonly item: SceneItem; readonly touches: readonly StateName[] }[] = [];
-  const frames = framesOf(graph, boxOf);
-  /** What a label may not cover: every node and group name, then each label as it is placed. */
+  const groups = framesOf(graph, boxOf, movers);
+  const nested = parents.map((parent) => {
+    const node = graph.nodes.find((n) => n.id === parent.id);
+    const tone =
+      node === undefined || node.container === true ? null : toneOf(node, graph.properties);
+    return {
+      item: {
+        kind: "parent",
+        id: parent.id,
+        box: parent.box,
+        label: nameStrip(parent.box, parent.id),
+        tone,
+        selected: selected.has(parent.id),
+      } satisfies SceneItem,
+      touches: movers(parent.id),
+    };
+  });
+  /** What a label may not cover: every box, group name and parent name, then each label as placed. */
   const taken = [
-    ...graph.nodes.flatMap(({ id }) => boxOf(id) ?? []),
-    ...frames.map(({ item }) => item.label),
+    ...graph.nodes.flatMap(({ id }) => leafBox(id) ?? []),
+    ...groups.map(({ item }) => item.label),
+    ...nested.map(({ item }) => item.label),
   ];
-  items.push(...frames);
+  items.push(...groups, ...nested);
 
   const lines = (look: Look, pairs: readonly Pair[], lane: number): void => {
     for (const { from, to, labels } of pairs) {
@@ -397,7 +453,10 @@ export function sceneOf(
       const points = route(a, b, lane);
       const label = labels.length === 0 ? null : placeLabel(labels.join(" / "), points, taken);
       if (label !== null) taken.push(label.box);
-      items.push({ item: { kind: "line", look, points, label }, touches: [from, to] });
+      items.push({
+        item: { kind: "line", look, points, label },
+        touches: [...movers(from), ...movers(to)],
+      });
     }
   };
   if (state.showDeps) {
@@ -423,7 +482,7 @@ export function sceneOf(
   if (replay !== null) lines("trail", pairsOf(trailOf(replay.trace)), 0);
 
   for (const node of graph.nodes) {
-    const box = boxOf(node.id);
+    const box = leafBox(node.id);
     if (box === undefined) continue;
     const tone = toneOf(node, graph.properties);
     const age = now - Date.parse(node.lastChangedAt);
@@ -462,16 +521,17 @@ export function sceneOf(
     });
   }
 
-  const zoomed = graph.nodes.find((node) => node.id === state.zoom);
+  // A container has no files to list, and its frame is not a planned box.
+  const zoomed = graph.nodes.find((node) => node.id === state.zoom && node.container !== true);
   const corner = zoomed === undefined ? undefined : boxOf(zoomed.id);
   if (zoomed !== undefined && corner !== undefined) {
-    items.push({ item: filesOf(zoomed, corner), touches: [zoomed.id] });
+    items.push({ item: filesOf(zoomed, corner), touches: movers(zoomed.id) });
   }
 
   const moving = (touches: readonly StateName[]): boolean =>
     drag !== null && touches.includes(drag.id);
   const boxes = items.flatMap(({ item }) =>
-    item.kind === "box" || item.kind === "group" ? [item.box] : [],
+    item.kind === "box" || item.kind === "group" || item.kind === "parent" ? [item.box] : [],
   );
   return {
     base: items.filter(({ touches }) => !moving(touches)).map(({ item }) => item),
@@ -518,17 +578,20 @@ function filesOf(node: StateNode, corner: Box): Extract<SceneItem, { readonly ki
   return { kind: "files", id: node.id, box, rows };
 }
 
-/** Air round a group's boxes, and the height of the row its name takes above them. */
-const FRAME_PAD = 16;
-const FRAME_NAME = 24;
+/** Where a frame's name is written: inside its top-left corner, in the strip above what it holds. */
+function nameStrip(frame: Box, name: string): Box {
+  return { x: frame.x + 6, y: frame.y + 4, width: labelWidth(name), height: 18 };
+}
 
 /**
- * One frame per group with two or more drawn boxes, in name order. A group of one box would only
- * double that box's border; its name is in the detail panel.
+ * One frame per group with two or more drawn members, in name order, measured like a parent's frame
+ * (`enclose`). A group of one would only double that member's border; its name is in the detail
+ * panel. A parent in a group takes part by its frame.
  */
 function framesOf(
   graph: Graph,
   boxOf: (id: StateName) => Box | undefined,
+  movers: (id: StateName) => readonly StateName[],
 ): readonly {
   readonly item: Extract<SceneItem, { readonly kind: "group" }>;
   readonly touches: readonly StateName[];
@@ -545,16 +608,10 @@ function framesOf(
   return [...members.entries()]
     .sort(([a], [b]) => compare(a, b))
     .flatMap(([name, { ids, boxes }]) => {
-      const around = boundsOf(boxes);
-      if (ids.length < 2 || around === null) return [];
-      const box = {
-        x: around.x - FRAME_PAD,
-        y: around.y - FRAME_PAD - FRAME_NAME,
-        width: around.width + 2 * FRAME_PAD,
-        height: around.height + 2 * FRAME_PAD + FRAME_NAME,
-      };
-      const label = { x: box.x + 6, y: box.y + 4, width: labelWidth(name), height: 18 };
-      return [{ item: { kind: "group", name, box, label }, touches: ids }];
+      const box = enclose(boxes);
+      if (ids.length < 2 || box === null) return [];
+      const item = { kind: "group", name, box, label: nameStrip(box, name) } as const;
+      return [{ item, touches: ids.flatMap(movers) }];
     });
 }
 

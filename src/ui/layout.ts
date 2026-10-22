@@ -1,5 +1,6 @@
 import { Graph, layout } from "@dagrejs/dagre";
-import type { Edge, StateName } from "../core/types.js";
+import { type Hierarchy, hierarchyOf, type TreeNode } from "../core/hierarchy.js";
+import type { Edge, Leaf, StateName } from "../core/types.js";
 import type { Layout } from "./wire.js";
 
 export type Point = { readonly x: number; readonly y: number };
@@ -26,13 +27,94 @@ const LANE = 8;
 
 /** What `place` and `relayout` read. `Graph` satisfies it. */
 export type Shape = {
-  readonly nodes: readonly { readonly id: StateName }[];
+  readonly nodes: readonly TreeNode[];
   readonly edges: readonly Pick<Edge, "type" | "from" | "to">[];
   readonly model?: { readonly initial: StateName | null };
 };
 
 export function boxAt(point: Point): Box {
   return { x: point.x, y: point.y, ...BOX };
+}
+
+/**
+ * A frame's air round what it holds, and the height of the strip its name takes above it. One size
+ * for `@state-group` frames and `@state-parent` frames, so a frame in a frame is `pad` inside it.
+ */
+export const FRAME = { pad: 16, name: 24 } as const;
+
+/** The rectangle round `boxes` with `FRAME.pad` of air and `FRAME.name` more on top, or null for none. */
+export function enclose(boxes: readonly Box[]): Box | null {
+  if (boxes.length === 0) return null;
+  const left = Math.min(...boxes.map((b) => b.x));
+  const top = Math.min(...boxes.map((b) => b.y));
+  const right = Math.max(...boxes.map((b) => b.x + b.width));
+  const bottom = Math.max(...boxes.map((b) => b.y + b.height));
+  return {
+    x: left - FRAME.pad,
+    y: top - FRAME.pad - FRAME.name,
+    width: right - left + 2 * FRAME.pad,
+    height: bottom - top + 2 * FRAME.pad + FRAME.name,
+  };
+}
+
+/** A parent (`@state-parent`), drawn round what is inside it. Never stored: its leaves' points are. */
+export type ParentFrame = {
+  readonly id: StateName;
+  readonly box: Box;
+  /** 0 at the top level. Outer frames are painted first. */
+  readonly depth: number;
+  /** The leaves inside that have a box: what moves the frame. */
+  readonly members: readonly Leaf[];
+};
+
+/**
+ * Every parent with a box inside it, outer first, then by id. A frame encloses its children's boxes
+ * and frames, so frames nest with `FRAME.pad` between them and no frame is stored.
+ */
+export function parentFrames(
+  hierarchy: Hierarchy,
+  leafBox: (leaf: Leaf) => Box | undefined,
+): readonly ParentFrame[] {
+  const made: ParentFrame[] = [];
+  const build = (id: StateName): Box | null => {
+    if (hierarchy.isLeaf(id)) return leafBox(id) ?? null;
+    const box = enclose(hierarchy.childrenOf(id).flatMap((child) => build(child) ?? []));
+    if (box !== null) {
+      const members = hierarchy.within(id).filter((leaf) => leafBox(leaf) !== undefined);
+      made.push({ id, box, depth: hierarchy.ancestorsOf(id).length, members });
+    }
+    return box;
+  };
+  for (const root of hierarchy.roots) build(root);
+  return made.sort((a, b) => a.depth - b.depth || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/**
+ * No frame overlaps a box that is not inside its parent, and no two frames overlap unless one is
+ * inside the other. What `place` asks of a spot before it takes it, and what `relayout` delivers.
+ */
+function framesAreClean(
+  hierarchy: Hierarchy,
+  frames: readonly ParentFrame[],
+  leafBox: (leaf: Leaf) => Box | undefined,
+): boolean {
+  for (const frame of frames) {
+    const inside = new Set(frame.members);
+    for (const leaf of hierarchy.leaves) {
+      const box = leafBox(leaf);
+      if (box !== undefined && !inside.has(leaf) && overlaps(frame.box, box)) return false;
+    }
+  }
+  return frames.every((a, index) =>
+    frames
+      .slice(index + 1)
+      .every(
+        (b) =>
+          hierarchy.contains(a.id, b.id) ||
+          hierarchy.contains(b.id, a.id) ||
+          !overlaps(a.box, b.box),
+      ),
+  );
 }
 
 /**
@@ -59,26 +141,54 @@ export function parseLayout(value: unknown): Layout {
 }
 
 /**
- * Condition 3. Returns `previous` plus a point for each node of `shape` that has none. Every entry
- * of `previous` comes back unchanged, including ids that are not in `shape`: a node that went away
- * keeps its spot reserved, so it gets the same spot when it returns and no new node takes it.
+ * Condition 3. Returns `previous` plus a point for each leaf of `shape` that has none. Every entry
+ * of `previous` comes back unchanged, including ids that are not in `shape` and states that now have
+ * children: a node that went away keeps its spot reserved, so it gets the same spot when it returns
+ * and no new node takes it. A parent gets no point: it is drawn as a frame round its leaves.
  *
- * An empty `previous` places everything with `relayout`. Otherwise a new node goes next to a node it
- * shares a flow edge with (a dep edge never anchors), at the first free spot in this order, nearest
- * first, 20 px per step: below the anchor, to its right, to its left. A node with no anchor goes
- * below everything. A spot is free when it overlaps no box in `previous` or placed so far.
+ * An empty `previous` places everything with `relayout`. Otherwise a new leaf goes next to the first
+ * of these that has a point: a node it shares a flow edge with inside its own parent, a sibling, any
+ * node it shares a flow edge with, a node its parent shares one with (a dep edge never anchors; a
+ * parent anchors by its first leaf with a point). It takes the first free spot in this order, nearest
+ * first, 20 px per step: below the anchor, to its right, to its left; the first child of a parent
+ * that was once a box tries that box's spot before all of them. A node with no anchor goes below
+ * everything. A spot is free when it overlaps no drawn box in `previous` or placed so far, and, near
+ * the anchor, when every frame stays clean: no frame holds a box from outside its parent and no two
+ * unrelated frames overlap. Past `FRAME_SEARCH` any free spot will do, so the search always ends.
  */
 export function place(previous: Layout, shape: Shape): Layout {
   if (Object.keys(previous).length === 0) return relayout(shape);
-  const missing = shape.nodes.filter(({ id }) => previous[id] === undefined).map(({ id }) => id);
+  const hierarchy = hierarchyOf(shape.nodes);
+  const missing = shape.nodes.flatMap(({ id }) =>
+    hierarchy.isLeaf(id) && previous[id] === undefined ? [id] : [],
+  );
   if (missing.length === 0) return previous;
 
   const placed: Record<string, Point> = { ...previous };
-  const anchorOf = (id: StateName): Point | undefined => {
-    for (const edge of shape.edges) {
-      if (edge.type !== "flow" || edge.from === edge.to) continue;
-      const other = edge.from === id ? edge.to : edge.to === id ? edge.from : null;
-      const point = other === null ? undefined : placed[other];
+  const parents = new Set<string>(
+    shape.nodes.flatMap(({ id }) => (hierarchy.isLeaf(id) ? [] : [id])),
+  );
+  const pointOf = (id: StateName): Point | undefined =>
+    parents.has(id) ? hierarchy.within(id).flatMap((leaf) => placed[leaf] ?? [])[0] : placed[id];
+  const neighbours = (id: StateName): StateName[] =>
+    shape.edges.flatMap((edge) => {
+      if (edge.type !== "flow" || edge.from === edge.to) return [];
+      return edge.from === id ? [edge.to] : edge.to === id ? [edge.from] : [];
+    });
+  const anchorOf = (id: Leaf): Point | undefined => {
+    const parent = hierarchy.parentOf(id);
+    const near = neighbours(id);
+    const candidates =
+      parent === null
+        ? near
+        : [
+            ...near.filter((other) => hierarchy.parentOf(other) === parent),
+            ...hierarchy.childrenOf(parent).filter((sibling) => sibling !== id),
+            ...near,
+            ...hierarchy.ancestorsOf(id).flatMap(neighbours),
+          ];
+    for (const other of candidates) {
+      const point = pointOf(other);
       if (point !== undefined) return point;
     }
     return undefined;
@@ -88,26 +198,55 @@ export function place(previous: Layout, shape: Shape): Layout {
     const anchored = missing.findIndex((id) => anchorOf(id) !== undefined);
     const [id] = missing.splice(Math.max(anchored, 0), 1);
     if (id === undefined) break;
-    const occupied = Object.values(placed);
+    const occupied = Object.entries(placed).flatMap(([key, point]) =>
+      parents.has(key) ? [] : [point],
+    );
     const anchor = anchorOf(id) ?? {
       x: Math.min(...occupied.map((p) => p.x)),
       y: Math.max(...occupied.map((p) => p.y)),
     };
-    placed[id] = freeSpot(anchor, occupied);
+    const parent = hierarchy.parentOf(id);
+    const keepsFramesClean = (candidate: Point): boolean => {
+      if (parents.size === 0) return true;
+      const boxOf = (leaf: Leaf): Box | undefined => {
+        const point = leaf === id ? candidate : placed[leaf];
+        return point === undefined ? undefined : boxAt(point);
+      };
+      return framesAreClean(hierarchy, parentFrames(hierarchy, boxOf), boxOf);
+    };
+    const own = parent === null ? undefined : placed[parent];
+    placed[id] = freeSpot(anchor, occupied, keepsFramesClean, own);
   }
   return placed;
 }
 
-/** Below, right, left of `anchor`, then each again one grid step further out, until one is clear. */
-function freeSpot(anchor: Point, occupied: readonly Point[]): Point {
+/** How far a leaf looks for a spot that keeps every frame clean before it takes any free one. */
+const FRAME_SEARCH = 25 * GRID;
+
+/**
+ * `first` if it is free and clean, else below, right, left of `anchor`, then each again one grid step
+ * further out: a free spot that keeps the frames clean within `FRAME_SEARCH`, else the first free one.
+ */
+function freeSpot(
+  anchor: Point,
+  occupied: readonly Point[],
+  keepsFramesClean: (candidate: Point) => boolean,
+  first?: Point,
+): Point {
+  const free = (candidate: Point): boolean => occupied.every((box) => clear(candidate, box));
+  if (first !== undefined && free(first) && keepsFramesClean(first)) return first;
+  const ring = (step: number): readonly Point[] => [
+    { x: anchor.x, y: anchor.y + BOX.height + RANKSEP + step },
+    { x: anchor.x + BOX.width + NODESEP + step, y: anchor.y },
+    { x: anchor.x - BOX.width - NODESEP - step, y: anchor.y },
+  ];
+  for (let step = 0; step <= FRAME_SEARCH; step += GRID) {
+    const found = ring(step).find((candidate) => free(candidate) && keepsFramesClean(candidate));
+    if (found !== undefined) return found;
+  }
   for (let step = 0; ; step += GRID) {
-    const candidates: readonly Point[] = [
-      { x: anchor.x, y: anchor.y + BOX.height + RANKSEP + step },
-      { x: anchor.x + BOX.width + NODESEP + step, y: anchor.y },
-      { x: anchor.x - BOX.width - NODESEP - step, y: anchor.y },
-    ];
-    const free = candidates.find((candidate) => occupied.every((box) => clear(candidate, box)));
-    if (free !== undefined) return free;
+    const found = ring(step).find(free);
+    if (found !== undefined) return found;
   }
 }
 
@@ -118,21 +257,45 @@ function clear(a: Point, b: Point): boolean {
 }
 
 /**
- * The whole graph through dagre (TB, 180×64, ranksep 70, nodesep 40), as top-left points. Only ids
- * of `shape`: an explicit relayout drops the reserved spots of absent nodes.
+ * The whole graph through dagre (TB, 180×64, ranksep 70, nodesep 40), as top-left points of the
+ * leaves. A parent is a dagre cluster, so what is inside it stays together and its frame holds no
+ * stranger; the gaps grow by the room a frame takes, once per level. Without `@state-parent` this is
+ * the same call as before. Only ids of `shape`: an explicit relayout drops the reserved spots of
+ * absent nodes.
  */
 export function relayout(shape: Shape): Layout {
-  const graph = new Graph();
-  graph.setGraph({ rankdir: "TB", ranksep: RANKSEP, nodesep: NODESEP, marginx: 40, marginy: 40 });
+  const hierarchy = hierarchyOf(shape.nodes);
+  const leaves = shape.nodes.flatMap(({ id }) => (hierarchy.isLeaf(id) ? [id] : []));
+  const levels = Math.max(0, ...leaves.map((leaf) => hierarchy.ancestorsOf(leaf).length));
+  const graph = levels === 0 ? new Graph() : new Graph({ compound: true });
+  graph.setGraph({
+    rankdir: "TB",
+    ranksep: RANKSEP + levels * (FRAME.name + FRAME.pad),
+    nodesep: NODESEP + levels * 2 * FRAME.pad,
+    marginx: 40,
+    marginy: 40,
+  });
   graph.setDefaultEdgeLabel(() => ({}));
+  /** dagre joins no edge to a cluster: a parent's edge stands for one from its first leaf. */
+  const endOf = (id: StateName): StateName | undefined =>
+    hierarchy.has(id) && !hierarchy.isLeaf(id) ? hierarchy.within(id)[0] : id;
   // dagre breaks cycles from the first node it meets, so the initial state goes first and lands on top.
   const initial = shape.model?.initial ?? null;
-  const first = shape.nodes.filter(({ id }) => id === initial);
-  for (const { id } of [...first, ...shape.nodes]) graph.setNode(id, { ...BOX });
-  for (const { from, to } of shape.edges) if (from !== to) graph.setEdge(from, to);
+  const first = initial === null ? [] : leaves.filter((id) => id === endOf(initial));
+  for (const id of [...first, ...leaves]) graph.setNode(id, { ...BOX });
+  for (const { id } of shape.nodes) {
+    const parent = hierarchy.parentOf(id);
+    if (!hierarchy.isLeaf(id)) graph.setNode(id, {});
+    if (parent !== null) graph.setParent(id, parent);
+  }
+  for (const { from, to } of shape.edges) {
+    const a = endOf(from);
+    const b = endOf(to);
+    if (a !== undefined && b !== undefined && a !== b) graph.setEdge(a, b);
+  }
   layout(graph);
   return Object.fromEntries(
-    shape.nodes.map(({ id }) => {
+    leaves.map((id) => {
       const { x = 0, y = 0 } = graph.node(id);
       return [id, { x: Math.round(x - BOX.width / 2), y: Math.round(y - BOX.height / 2) }];
     }),
