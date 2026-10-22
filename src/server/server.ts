@@ -61,7 +61,7 @@ export async function startServer({
   const reviewer = await reviewerName(root);
   const http = createServer();
   const listening = await listen(http, port);
-  const opening = openWriter(root, reviewer, (published) =>
+  const opening = openWriter(root, reviewer, listening, (published) =>
     broadcast({ type: "graph", ...published }),
   );
   const watcher = watchRepository(root, () => {

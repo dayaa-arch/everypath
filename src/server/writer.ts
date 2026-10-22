@@ -1,7 +1,14 @@
 import { rescanWithHistory, scanWithHistory } from "../core/scan.js";
 import type { TlcRecord } from "../core/tla/result.js";
 import type { Graph, HistoryEntry, Layout, StateName } from "../core/types.js";
-import { commitTlc, writeApproval, writeLayout } from "../core/workspace.js";
+import {
+  commitTlc,
+  removeServeRecord,
+  type ServeRecord,
+  writeApproval,
+  writeLayout,
+  writeServeRecord,
+} from "../core/workspace.js";
 
 /**
  * Every write the server makes. Jobs run one at a time in submit order, so no two touch `.everypath/`
@@ -45,16 +52,29 @@ export type Writer = {
 };
 
 /**
- * The only path from the server to the disk. Scans once before it resolves, so `current()` always
- * has a graph, and hands every later graph that differs from it to `publish` in the order it was
- * written. `reviewer` is the `by` of each approval.
+ * The only path from the server to the disk. It claims the directory first (`serve.json` names this
+ * process and `port`) and refuses when another running serve holds it. Scans once before it resolves,
+ * so `current()` always has a graph, and hands every later graph that differs from it to `publish` in
+ * the order it was written. `reviewer` is the `by` of each approval.
  */
 export async function openWriter(
   root: string,
   reviewer: string,
+  port: number,
   publish: (published: Published) => void,
 ): Promise<Writer> {
-  const first = await scanWithHistory(root, { reason: "serve" });
+  const record: ServeRecord = { version: 1, pid: process.pid, port };
+  const holder = await writeServeRecord(root, record);
+  if (holder !== null) {
+    throw new Error(
+      `everypath serve はこのディレクトリですでに動いています（http://127.0.0.1:${holder.port}/、pid ${holder.pid}）。そちらを使うか、止めてから起動し直してください`,
+    );
+  }
+  const first = await scanWithHistory(root, { reason: "serve" }).catch(async (error: unknown) => {
+    // A record left behind names this process, which the next start finds dead and replaces.
+    await removeServeRecord(root, record).catch(() => {});
+    throw error;
+  });
   let current: Published = { graph: first.graph, diff: first.history, reason: "serve" };
   let tail: Promise<unknown> = Promise.resolve();
   let waitingRescan: Promise<JobResult> | null = null;
@@ -112,6 +132,7 @@ export async function openWriter(
     async close() {
       closed = true;
       await tail;
+      await removeServeRecord(root, record);
     },
   };
 }

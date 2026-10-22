@@ -272,7 +272,7 @@ describe("single writer: the queue", () => {
   it("runs jobs submitted together one at a time, in the order they came", async () => {
     const root = await makeRepo({ "src/a.ts": ts("@state A"), "src/b.ts": ts("@state B") });
     const reasons: string[] = [];
-    const writer = await openWriter(root, "tester", ({ reason }: Published) =>
+    const writer = await openWriter(root, "tester", 4747, ({ reason }: Published) =>
       reasons.push(reason),
     );
     const [a, b] = [stateName("A"), stateName("B")];
@@ -296,7 +296,7 @@ describe("single writer: the queue", () => {
   it("lets a rescan that is still waiting answer for the rescans submitted after it", async () => {
     const root = await makeRepo({ "src/a.ts": ts("@state A") });
     const reasons: string[] = [];
-    const writer = await openWriter(root, "tester", ({ reason }: Published) => {
+    const writer = await openWriter(root, "tester", 4747, ({ reason }: Published) => {
       reasons.push(reason);
       // Seen only by a rescan that runs after this one.
       writeFileSync(
