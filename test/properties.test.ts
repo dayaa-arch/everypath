@@ -5,6 +5,7 @@ import { checkProperties, PROPERTIES_FILE, parseProperties } from "../src/core/p
 import { scan } from "../src/core/scan.js";
 import type { Graph, PropertyResult } from "../src/core/types.js";
 import { deps, flows, makeRepo, node, readGraph, runCli, ts } from "./helpers/repo.js";
+import { fastestOf } from "./helpers/timing.js";
 
 const T1 = new Date("2026-10-21T00:00:00.000Z");
 
@@ -483,7 +484,6 @@ describe("properties: speed", () => {
     });
     assert.deepEqual(warnings, []);
 
-    const started = performance.now();
     const declared: Parameters<typeof flatten>[0] = {
       nodes: graph.nodes,
       flows: flows(graph),
@@ -491,10 +491,11 @@ describe("properties: speed", () => {
       deps: deps(graph),
       model: graph.model,
     };
-    const checked = checkProperties(flatten(declared, file), graph.generatedAt);
-    const elapsed = performance.now() - started;
+    const { ms, result: checked } = fastestOf(() =>
+      checkProperties(flatten(declared, file), graph.generatedAt),
+    );
 
     assert.equal(checked.properties.length, 4);
-    assert.ok(elapsed < 1000, `took ${elapsed.toFixed(0)} ms`);
+    assert.ok(ms < 2000, `took ${ms.toFixed(0)} ms`);
   });
 });

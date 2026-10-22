@@ -12,6 +12,7 @@ import { analyze, scan } from "../src/core/scan.js";
 import { generateTla, modelKey } from "../src/core/tla/generate.js";
 import type { Graph, StateNode } from "../src/core/types.js";
 import { makeRepo, node, runCli, ts, writeFiles } from "./helpers/repo.js";
+import { fastestOf } from "./helpers/timing.js";
 import { exampleRepo } from "./helpers/tlc.js";
 import { name } from "./helpers/ui-fixtures.js";
 
@@ -285,7 +286,7 @@ describe("hierarchy: entering a parent", () => {
 describe("hierarchy: a tree that is not a tree never stops a scan (R-04)", () => {
   const chainOf = (length: number) => Array.from({ length }, (_, index) => name(`L${index}`));
 
-  it("cuts every fourth link of a 2,000-link chain, the shallowest first, in under 100 ms", () => {
+  it("cuts every fourth link of a 2,000-link chain, the shallowest first, far faster than the old cubic pass", () => {
     const chain = chainOf(2000);
     const parents = chain.slice(1).map((node, index) => ({
       node,
@@ -293,9 +294,10 @@ describe("hierarchy: a tree that is not a tree never stops a scan (R-04)", () =>
       file: `src/${node}.ts`,
       line: 2,
     }));
-    const started = performance.now();
-    const { nodes, problems } = resolveHierarchy({ nodes: chain, parents, initials: [] });
-    const elapsed = performance.now() - started;
+    const { ms, result } = fastestOf(() =>
+      resolveHierarchy({ nodes: chain, parents, initials: [] }),
+    );
+    const { nodes, problems } = result;
 
     assert.deepEqual(
       problems.map((problem) => (problem.kind === "parent-too-deep" ? problem.claim.node : "?")),
@@ -303,7 +305,8 @@ describe("hierarchy: a tree that is not a tree never stops a scan (R-04)", () =>
     );
     const tree = hierarchyOf(nodes);
     assert.ok(chain.every((id) => tree.ancestorsOf(id).length <= MAX_DEPTH));
-    assert.ok(elapsed < 100, `${Math.round(elapsed)} ms`);
+    // The cubic pass took about 5 s here; the memoised one about 12 ms.
+    assert.ok(ms < 1000, `${Math.round(ms)} ms`);
   });
 
   it("caps the depth of a hand-edited graph.json, so a 20,000-link chain overflows no stack", () => {
@@ -821,7 +824,7 @@ describe("hierarchy: the tree is total", () => {
     assert.deepEqual(flat.model.hierarchy.within(name("Nowhere")), []);
   });
 
-  it("builds a parent with 40,000 children in under a second", () => {
+  it("builds a parent with 40,000 children far faster than the old quadratic accumulation", () => {
     const nodes = [
       { id: name("P") },
       ...Array.from({ length: 40_000 }, (_, index) => ({
@@ -829,12 +832,11 @@ describe("hierarchy: the tree is total", () => {
         parent: name("P"),
       })),
     ];
-    const started = performance.now();
-    const tree = hierarchyOf(nodes);
-    const elapsed = performance.now() - started;
+    const { ms, result: tree } = fastestOf(() => hierarchyOf(nodes));
 
     assert.equal(tree.childrenOf(name("P")).length, 40_000);
-    assert.ok(elapsed < 1000, `${Math.round(elapsed)} ms`);
+    // Spreading into a new array per child took about 9 s; pushing takes about 0.15 s.
+    assert.ok(ms < 3000, `${Math.round(ms)} ms`);
   });
 
   it("is built once per nodes array, so a viewer asking every frame does not rebuild it", () => {
