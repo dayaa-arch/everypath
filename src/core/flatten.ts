@@ -121,12 +121,23 @@ export type Flat = {
    * starts in (the file's `entry`, else `model.initial`), in id order. Entering one lands on every child.
    */
   readonly ambiguous: readonly StateName[];
+  /** The inner flows whose unread `if:` left a parent's transition in place, in flow order. */
+  readonly unreadRivals: readonly UnreadRival[];
 };
+
+/**
+ * A flow whose `if:` could not be read, on an event a state above it also has a transition on. It
+ * lost its guard, as every clause with a problem does, but it shadows nothing: failing closed keeps
+ * the inherited arcs. `kept` is those states, in id order; `scan` words the warning.
+ */
+export type UnreadRival = { readonly rival: DeclaredFlow; readonly kept: readonly StateName[] };
 
 /** The statechart as the annotations declare it: what flattening reads, before any code is compared. */
 export type Declared = {
   readonly nodes: readonly StateNode[];
   readonly flows: readonly DeclaredFlow[];
+  /** The flows whose `if:` could not be read. */
+  readonly unreadGuards: ReadonlySet<DeclaredFlow>;
   readonly deps: readonly DepEdge[];
   readonly model: GraphModel;
 };
@@ -136,18 +147,26 @@ const NONE: readonly never[] = [];
 const compareText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /** SPEC §5 `@state-parent`: the statechart with every parent replaced by the leaves inside it. */
-export function flattenModel(graph: Declared): FlatModel {
+function flattenModel(graph: Declared): {
+  readonly model: FlatModel;
+  readonly unreadRivals: readonly UnreadRival[];
+} {
   const hierarchy = hierarchyOf(graph.nodes);
-  const { flows } = graph;
+  const { flows, unreadGuards } = graph;
   const bySource = new Map<StateName, DeclaredFlow[]>();
   for (const edge of flows) bySource.set(edge.from, [...(bySource.get(edge.from) ?? []), edge]);
 
   const arcs: FlatArc[] = [];
+  const kept = new Map<DeclaredFlow, Set<StateName>>();
   for (const edge of flows) {
     const landing = hierarchy.enter(edge.to);
     for (const from of hierarchy.within(edge.from)) {
-      const guard = guardAt(edge, from, hierarchy, bySource);
-      if (guard === SHADOWED) continue;
+      const inherited = guardAt(edge, from, hierarchy, bySource, unreadGuards);
+      if (inherited === SHADOWED) continue;
+      for (const rival of inherited.past) {
+        kept.set(rival, (kept.get(rival) ?? new Set()).add(edge.from));
+      }
+      const { guard } = inherited;
       for (const to of landing) {
         arcs.push({ from, to, event: edge.event, guard, set: edge.set, declared: edge });
       }
@@ -168,7 +187,7 @@ export function flattenModel(graph: Declared): FlatModel {
     if (node.group !== null) groups.set(node.group, [...(groups.get(node.group) ?? []), node.id]);
   }
   const real = new Set(graph.nodes.filter((node) => !node.status.planned).map((node) => node.id));
-  return mint({
+  const model = mint({
     hierarchy,
     states: hierarchy.leaves,
     real: hierarchy.leaves.filter((leaf) => real.has(leaf)),
@@ -179,6 +198,11 @@ export function flattenModel(graph: Declared): FlatModel {
     deps: graph.deps,
     groups,
   });
+  const unreadRivals = flows.flatMap((rival): UnreadRival[] => {
+    const states = kept.get(rival);
+    return states === undefined ? [] : [{ rival, kept: [...states].sort(compareText) }];
+  });
+  return { model, unreadRivals };
 }
 
 /** The only place a `FlatModel` is made. */
@@ -188,20 +212,25 @@ function mint(model: Omit<FlatModel, typeof flattened>): FlatModel {
 
 const SHADOWED = Symbol("shadowed");
 
+/** The guard `edge` gives a leaf's arc, and the rivals with an unread `if:` the arc stayed past. */
+type Inherited = { readonly guard: GuardExpr | null; readonly past: readonly DeclaredFlow[] };
+
 /**
  * Inner first, as in UML and Harel. `edge` is declared on an ancestor of `source` (or on `source`).
  * On the levels between them, every transition with the same named event is a rival. An unguarded
  * rival always takes the event, so the inherited arc is dropped; guarded rivals leave it the guard
- * `g && !(r1 || r2 …)`. A transition with no event may happen at any time: it neither yields nor
- * shadows.
+ * `g && !(r1 || r2 …)`. A rival whose `if:` could not be read is neither: nothing says when it takes
+ * the event, so the arc stays. A transition with no event may happen at any time: it neither yields
+ * nor shadows.
  */
 function guardAt(
   edge: DeclaredFlow,
   source: Leaf,
   hierarchy: Hierarchy,
   bySource: ReadonlyMap<StateName, readonly DeclaredFlow[]>,
-): GuardExpr | null | typeof SHADOWED {
-  if (edge.from === source || edge.event === null) return edge.guard;
+  unread: ReadonlySet<DeclaredFlow>,
+): Inherited | typeof SHADOWED {
+  if (edge.from === source || edge.event === null) return { guard: edge.guard, past: NONE };
   const chain = [source, ...hierarchy.ancestorsOf(source)];
   const rivals = chain
     .slice(0, chain.indexOf(edge.from))
@@ -209,16 +238,20 @@ function guardAt(
       (bySource.get(level) ?? NONE).filter((other) => other.event === edge.event),
     );
   const guards: GuardExpr[] = [];
+  const past: DeclaredFlow[] = [];
   for (const rival of rivals) {
-    if (rival.guard === null) return SHADOWED;
-    guards.push(rival.guard);
+    if (unread.has(rival)) past.push(rival);
+    else if (rival.guard === null) return SHADOWED;
+    else guards.push(rival.guard);
   }
   const [first, second, ...rest] = guards;
-  if (first === undefined) return edge.guard;
+  if (first === undefined) return { guard: edge.guard, past };
   const blocked: GuardExpr =
     second === undefined ? first : { kind: "or", operands: [first, second, ...rest] };
   const negated: GuardExpr = { kind: "not", operand: blocked };
-  return edge.guard === null ? negated : { kind: "and", operands: [edge.guard, negated] };
+  const guard: GuardExpr =
+    edge.guard === null ? negated : { kind: "and", operands: [edge.guard, negated] };
+  return { guard, past };
 }
 
 /**
@@ -370,7 +403,7 @@ function mentions(def: PropertyDef): readonly (readonly [string, readonly StateN
  * an empty set, as before.
  */
 export function flatten(graph: Declared, file: PropertiesFile): Flat {
-  const model = flattenModel(graph);
+  const { model, unreadRivals } = flattenModel(graph);
   const { hierarchy } = model;
   const unknown: UnknownName[] = [];
   for (const name of new Set(file.entry ?? NONE)) {
@@ -396,6 +429,7 @@ export function flatten(graph: Declared, file: PropertiesFile): Flat {
     ambiguous: [...new Set(entered.flatMap((name) => hierarchy.ambiguousEntries(name)))].sort(
       compareText,
     ),
+    unreadRivals,
   };
 }
 

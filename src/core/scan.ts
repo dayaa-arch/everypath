@@ -2,7 +2,14 @@ import { createHash } from "node:crypto";
 import { basename, posix, resolve } from "node:path";
 import { type Notes, readNotes } from "./annotations.js";
 import { sanitizeStateName } from "./expr.js";
-import { type DeclaredFlow, type Flat, type FlatArc, type FlatModel, flatten } from "./flatten.js";
+import {
+  type DeclaredFlow,
+  type Flat,
+  type FlatArc,
+  type FlatModel,
+  flatten,
+  type UnreadRival,
+} from "./flatten.js";
 import {
   type Hierarchy,
   type HierarchyProblem,
@@ -190,7 +197,13 @@ function fold(
     events: [...new Set([...model.events, ...flows.events])].sort(compareText),
   };
   const flat = flatten(
-    { nodes: built, flows: flows.edges, deps, model: graphModel },
+    {
+      nodes: built,
+      flows: flows.edges,
+      unreadGuards: new Set(flows.unread.keys()),
+      deps,
+      model: graphModel,
+    },
     workspace.properties,
   );
   const observed = collectObserved(members);
@@ -227,6 +240,7 @@ function fold(
       ...facts.flatMap((file) => file.warnings),
       ...model.warnings,
       ...flows.warnings,
+      ...unreadGuardWarnings(flows.unread, flat.unreadRivals),
       ...observed.warnings,
       ...tree.warnings,
       ...flat.ambiguous.map((id) => ambiguityWarning(id, hierarchy, tree.locate)),
@@ -410,50 +424,74 @@ function ambiguityWarning(id: StateName, hierarchy: Hierarchy, locate: Locate): 
   };
 }
 
-/** One edge per `(from, to, text)`; every file that declares it goes to `via`. */
+/**
+ * One edge per `(from, to, text)`; every file that declares it goes to `via`. `unread` holds the
+ * edges with an event whose `if:` could not be read, each with the warnings of the files that wrote
+ * it: `flatten` lets such an edge shadow nothing, and the warning says what it left in place.
+ */
 function collectFlows(members: readonly Member[], vars: VarTable) {
   const warnings: ScanWarning[] = [];
   const events = new Set<EventName>();
-  const merged = new Map<string, { edge: Omit<DeclaredFlow, "via">; via: Set<string> }>();
+  const merged = new Map<
+    string,
+    { edge: Omit<DeclaredFlow, "via">; via: Set<string>; unread: ScanWarning[] }
+  >();
 
   for (const { file, id } of members) {
     for (const decl of file.notes.nexts) {
       const resolved = resolveNext(decl, vars);
-      if (resolved.problem !== null) {
-        warnings.push({
-          file: file.path,
-          line: decl.line,
-          message: resolved.problem.message,
-          detail: resolved.problem.detail,
-        });
-      }
       if (resolved.event !== null) events.add(resolved.event);
-
       const key = JSON.stringify([id, decl.to, decl.text]);
       const known = merged.get(key);
-      if (known !== undefined) {
-        known.via.add(file.path);
-      } else {
-        merged.set(key, {
-          edge: {
-            type: "flow",
-            from: id,
-            to: decl.to,
-            event: resolved.event,
-            guard: resolved.guard,
-            set: resolved.set,
-            text: decl.text,
-            declared: true,
-          },
-          via: new Set([file.path]),
-        });
-      }
+      const entry = known ?? {
+        edge: {
+          type: "flow",
+          from: id,
+          to: decl.to,
+          event: resolved.event,
+          guard: resolved.guard,
+          set: resolved.set,
+          text: decl.text,
+          declared: true,
+        },
+        via: new Set<string>(),
+        unread: [],
+      };
+      if (known === undefined) merged.set(key, entry);
+      entry.via.add(file.path);
+
+      if (resolved.problem === null) continue;
+      const warning: ScanWarning = {
+        file: file.path,
+        line: decl.line,
+        message: resolved.problem.message,
+        detail: resolved.problem.detail,
+      };
+      const unread = decl.guard !== null && resolved.guard === null && resolved.event !== null;
+      (unread ? entry.unread : warnings).push(warning);
     }
   }
-  const edges = [...merged.values()].map(
-    ({ edge, via }): DeclaredFlow => ({ ...edge, via: [...via].sort(compareText) }),
-  );
-  return { edges, events, warnings };
+  const unread = new Map<DeclaredFlow, readonly ScanWarning[]>();
+  const edges = [...merged.values()].map(({ edge, via, unread: said }): DeclaredFlow => {
+    const flow = { ...edge, via: [...via].sort(compareText) };
+    if (said.length > 0) unread.set(flow, said);
+    return flow;
+  });
+  return { edges, events, warnings, unread };
+}
+
+/** The warnings of an unread `if:`, saying which parents' transitions it left in place. */
+function unreadGuardWarnings(
+  unread: ReadonlyMap<DeclaredFlow, readonly ScanWarning[]>,
+  rivals: readonly UnreadRival[],
+): ScanWarning[] {
+  const kept = new Map(rivals.map(({ rival, kept }) => [rival, kept]));
+  return [...unread].flatMap(([flow, said]) => {
+    const states = kept.get(flow);
+    if (states === undefined) return said;
+    const note = `。この if: は使わず、${states.join("、")} から継いだ ${flow.event} の遷移は消しません`;
+    return said.map((warning) => ({ ...warning, message: `${warning.message}${note}` }));
+  });
 }
 
 /** One link per `(from, to)`, in first-seen order. `via` is every file that gave the pair. */

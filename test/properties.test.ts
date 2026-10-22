@@ -484,9 +484,10 @@ describe("properties: speed", () => {
     assert.deepEqual(warnings, []);
 
     const started = performance.now();
-    const declared = {
+    const declared: Parameters<typeof flatten>[0] = {
       nodes: graph.nodes,
       flows: flows(graph),
+      unreadGuards: new Set(),
       deps: deps(graph),
       model: graph.model,
     };

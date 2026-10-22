@@ -70,6 +70,34 @@ describe("hierarchy: a transition declared on a parent", () => {
     );
   });
 
+  for (const [what, guard] of [
+    ["does not check", "typo"],
+    ["does not parse", "u &&"],
+  ] as const) {
+    it(`keeps the inherited arc, and says so, when an inner rival's if: ${what}`, async () => {
+      const root = await makeRepo({
+        ...AREA,
+        "src/b.ts": ts(
+          "@state B",
+          "@state-parent Area",
+          "@state-next A on:back",
+          `@state-next X on:logout if:${guard}`,
+        ),
+        "src/x.ts": ts("@state X"),
+      });
+      const { graph, flat } = await analyze(root, { now: T1 });
+
+      assert.ok(arcs(flat).includes("B->Out(logout)"), "B keeps Area's logout");
+      assert.ok(arcs(flat).includes("B->X(logout)"), "the rival stays, without its if:");
+      assert.deepEqual(
+        graph.warnings.map((warning) => `${warning.file}:${warning.line}`),
+        ["src/b.ts:4"],
+      );
+      assert.match(graph.warnings[0]?.message ?? "", /^if: /);
+      assert.match(graph.warnings[0]?.message ?? "", /Area から継いだ logout の遷移は消しません/);
+    });
+  }
+
   it("fires only when no guarded inner rival on the same event can: g && !(r1 || r2)", async () => {
     const root = await makeRepo({
       ...AREA,
