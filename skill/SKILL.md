@@ -29,8 +29,8 @@ everypath は、ソースファイルの先頭 60 行にあるコメントの `@
    理由: スキャナの指摘とは別の印で表示されるので、書いて損はない。
 10. 作業の前に `.everypath/graph.json` を読む。`nodes[].status.reviewed` が `true` の状態のファイル（`nodes[].files`）を変えたら、変えた理由を最終報告に書く。
     理由: ファイルが変わると人間の承認が外れ、もう一度確認してもらう必要があるため。
-11. `.everypath/` の中と `everypath.*.json` は変更しない。
-    理由: `.everypath/` は everypath が書く生成物と承認の記録で、`everypath.*.json` は人間が決める設定と性質のため。
+11. `.everypath/` の中と `everypath.*.json` は変更しない。`scan` や `check` が「承認が食い違っています」と警告しても、`.everypath/review/` のファイルを消したり書いたりせず、最終報告で人間に知らせる。
+    理由: `.everypath/` は everypath が書く生成物と承認の記録で、`everypath.*.json` は人間が決める設定と性質のため。承認の食い違いは、人間がビューアで内容を確かめて承認し直すか取り消すことでしか解けない。
 
 ## タグ
 

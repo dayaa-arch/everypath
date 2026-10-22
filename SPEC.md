@@ -95,7 +95,7 @@ everypath は、開発中のシステムの振る舞いを**ステートチャ�
 ## 3. 設計原則
 
 1. **見るだけ、書かない。** 対象リポジトリのソースを変更しない。everypath が書くのは `.everypath/` 配下のみ。
-2. **真実は一つ、出口は二つ。** 状態の真実は `.everypath/graph.json`（と `review.json`）。ビューアは人間向けに描画し、エージェント用スキルは同じ JSON を読む。
+2. **真実は一つ、出口は二つ。** 状態の真実は `.everypath/graph.json`（と承認の記録 `review/`）。ビューアは人間向けに描画し、エージェント用スキルは同じ JSON を読む。
 3. **AI にモデルを描かせる。** 状態・遷移・イベント・ガード・変数はアノテーション（`@state-*`）でコードと同じ場所に書かせる。人間に書かせるのは無理でも、AI にはスキルで強制できる。モデルがコードの隣にあるので、コードが変われば図も変わる。
 4. **全探索を日常にする。** 簡易検査（BFS）は保存のたびに、TLA+ によるモデル検査は手動または CI で走らせ、どちらの結果も同じ図に戻す。人間は TLA+ を読まなくてよい。
 5. **レイアウトは安定させる。** ノードが増えるたびに全体が組み替わると人間の空間記憶が壊れる。既存ノードの座標は極力固定し、新ノードだけ空き地に置く。
@@ -114,7 +114,8 @@ everypath は、開発中のシステムの振る舞いを**ステートチャ�
  ├ everypath.findings.json   （任意・semgrep/bandit 出力）
  └ .everypath/
      ├ graph.json     ← scanner が毎回上書き（真実）
-     ├ review.json    ← ビューアの承認操作で更新（人間の記録）
+     ├ review/        ← ビューアの承認と取り消しを 1 件 1 ファイルで足す（人間の記録。git 管理）
+     ├ review.json    ← 決定 0004 より前の承認の記録。読むだけで書かない
      ├ layout.json    ← ノード座標のキャッシュ（安定レイアウト用）
      ├ history.jsonl  ← 差分ログ（追記）
      └ tla/
@@ -189,7 +190,7 @@ everypath/
 │  │  ├ expr.ts
 │  │  ├ scan.ts
 │  │  ├ properties.ts
-│  │  ├ review.ts        （review.json / layout.json の読み書き）
+│  │  ├ review.ts        （承認の記録の読み方と判定。純粋。読み書きは workspace.ts）
 │  │  └ tla/ generate.ts, run.ts, parse.ts
 │  ├ server/ server.ts, sse.ts, watch.ts
 │  └ ui/ index.html, main.ts, layout.ts, render.ts, panel.ts, prompt.ts（指示生成）
@@ -293,9 +294,11 @@ set    := VAR "=" VALUE ("," VAR "=" VALUE)*       ; VALUE は TRUE/FALSE/整数
         "planned": false,
         "requireProof": true,
         "proof": "none" | "pending" | "passed" | "failed",
-        "reviewed": false,          // review.json の hash と一致すれば true
-        "changedSinceReview": true  // review.json にあるが hash が違う
+        "reviewed": false,          // review.approval の hash と一致すれば true。食い違いは false
+        "changedSinceReview": true  // review.approval があるが hash が違う
       },
+      // 生きた承認があるときだけ書く（§6.2）。食い違いは { "conflict": [記録, …] }
+      "review": { "approval": { "hash": "…", "at": "2026-10-21T04:50:00.000Z", "by": "taiga", "note": "" } },
       "spec": ["requires token.valid && !token.expired", "ensures session == none"],
       "risks": [{ "file": "src/auth/reset.ts", "message": "..." }],
       "findings": [{ "file": "...", "line": 42, "severity": "high", "rule": "...", "message": "..." }],
@@ -338,20 +341,22 @@ set    := VAR "=" VALUE ("," VAR "=" VALUE)*       ; VALUE は TRUE/FALSE/整数
 }
 ```
 
-### 6.2 `.everypath/review.json`（人間の記録。everypath のビューアだけが書く）
+### 6.2 `.everypath/review/`（人間の記録。everypath のビューアだけが書く。決定 0004）
 
-```json
-{
-  "version": 1,
-  "approvals": {
-    "ログイン": { "hash": "…", "at": "2026-10-21T04:50:00Z", "by": "taiga", "note": "仕様確認済み" }
-  }
-}
+承認と取り消しは 1 件 1 ファイル `.everypath/review/<id>.jsonl` に 1 行で書く。`<id>` はその行の sha256 の先頭 16 桁。everypath は記録を作るだけで、書き換えも削除もしない。だから別々のブランチの承認は違うファイルを足すだけで、git は衝突しない。
+
+```jsonl
+{"v":1,"kind":"approve","node":"ログイン","hash":"…","by":"taiga","at":"2026-10-21T04:50:00.000Z","note":"仕様確認済み","supersedes":["3f2a…"]}
+{"v":1,"kind":"revoke","node":"ログイン","by":"hanako","at":"2026-10-22T01:00:00.000Z","supersedes":["9c0d…"]}
 ```
 
-- `reviewed = approvals[id] が存在 && approvals[id].hash == node.hash`
-- `changedSinceReview = approvals[id] が存在 && hash が不一致`
-- `by` は `git config user.name` → 環境変数 `USER` → 空、の順で埋める。チーム利用時に「誰が見たか」が要るため残す。
+- `supersedes` は書いた人が見ていた、その状態の生きた記録。誰にも置き換えられていない記録が生きている。
+- 生きた記録が同じ hash の承認だけなら `review.approval`（いちばん新しいもの）。`reviewed = approval.hash == node.hash`、`changedSinceReview = approval.hash != node.hash`。
+- 違う hash の承認、承認と取り消し、承認と読めない記録が並ぶと `review.conflict`。承認済みにせず、`scan` と `check` が警告し、ビューアは記録ごとに承認者・時刻・版を出す。承認し直すか取り消すと終わる。
+- 読めない記録は閉じる。状態が読めれば、その状態を食い違いにする。状態すら読めなければ、承認のあるすべての状態を食い違いにする。
+- 旧形式の `.everypath/review.json`（`{"version":1,"approvals":{"ログイン":{hash,at,by,note}}}`）は読み続け、書かない。各項目は何も置き換えない承認として同じ集合に入る。git の衝突の印が残っていても両側を読む。
+- `.everypath/.gitignore` の `!review/` が、ルートの `.everypath/*` の下で記録を git 管理に戻す。`init` と記録の書き込みが足す。
+- `by` は `git config user.name` → 環境変数 `USER` → 空、の順でサーバーが埋める。表示名で、署名ではない。
 
 ### 6.3 `everypath.properties.json`（性質定義。AI が提案してよいが、人間が読んで承認する）
 
@@ -470,7 +475,7 @@ semgrep 形式（`results[].path, extra.message, extra.severity, start.line, che
 8b. **モデル**: 全ファイルの `@state-var` を集めて `graph.json.model.vars` に、`on:` に出たイベント名と `@state-event` を `model.events` に、`@state-initial` を `model.initial` に。同名変数の重複宣言は型が一致すれば許し、違えば警告。
 9. **findings / risks** をノードに付与。
 10. **性質チェック**（§9）を呼び、結果を `properties` と `nodes[].violations` に書く。
-11. **review.json** を読み、`reviewed` / `changedSinceReview` を計算。
+11. **承認の記録**（`.everypath/review/` と旧 `review.json`）を読み、`reviewed` / `changedSinceReview` / `review` を計算（§6.2）。
 12. **lastChangedAt**: 前回 graph.json の同 id ノードと hash が違えば今、同じなら前回値を引き継ぐ。
 13. `.everypath/graph.json` に書き、差分を `.everypath/history.jsonl` に追記（`{at, reason, added, removed, updated, addedEdges, removedEdges}`）。
 
@@ -583,15 +588,15 @@ TLA+ は「振る舞いのモデル」を検査する。関数単位の証明（
 | `GET /history.json` | 直近 200 件の差分 |
 | `GET /events` | SSE。接続時に `{type:"graph", graph, diff:null}`、変更のたびに `{type:"graph", graph, diff, reason}` |
 | `POST /rescan` | 手動再スキャン |
-| `POST /review/:id` | body `{ "note": "..." }`。review.json に承認を書き、再スキャンして配信 |
-| `DELETE /review/:id` | 承認を取り消す |
+| `POST /review/:id` | body `{ "note": "..." }`。承認の記録を 1 件足し（§6.2）、再スキャンして配信 |
+| `DELETE /review/:id` | 取り消しの記録を 1 件足す。取り消す承認が無ければ何も書かない |
 | `GET /layout.json` / `PUT /layout.json` | 座標キャッシュ |
 | `POST /check/tlc` | TLA+ 生成 + TLC を非同期で開始。すでに実行中なら 409。進捗は SSE の `{type:"tlc", status:"running"\|"done"\|"error", states, message}` で配信し、完了時に graph.json を再配信 |
 | `GET /tla/Model.tla` | 生成した TLA+ をそのまま返す（詳細パネルの「モデル」タブ用） |
 | `GET /templates.json` | 指示文のテンプレート 5 種類。`.everypath/templates/<種類>.md` があればそれ（`source: "override"`）、無ければ同梱の `templates/prompts/<種類>.md`（`source: "default"`）。ビューアが §13 の文面を作るのに使う |
 
 - 監視: `fs.watch(root, {recursive:true})`。無視パターンはスキャナと同じ。250ms デバウンス。`recursive` 非対応環境は 1.5 秒ポーリングにフォールバック。
-- `.everypath/` 配下の変更で再スキャンをトリガーしない（自己ループ防止）。ただし `review.json`、`proofs.json`、`tla/result.json` の変更は再配信する（CI や手動の `everypath check --tlc` の結果をビューアが拾うため）。
+- `.everypath/` 配下の変更で再スキャンをトリガーしない（自己ループ防止）。ただし `review/` の記録、`review.json`、`proofs.json`、`tla/result.json` の変更は再配信する（`git pull` で届いた承認や、CI や手動の `everypath check --tlc` の結果をビューアが拾うため）。
 - TLC はスキャンのレーンと独立した子プロセス。スキャンが TLC の完了を待つことはなく、TLC 実行中にソースが変わったら結果は「古いモデルに対する結果」として `staleModel: true` を付ける。
 - ポート既定 4747。`--open` でブラウザを開く。
 
@@ -635,7 +640,8 @@ TLA+ は「振る舞いのモデル」を検査する。関数単位の証明（
 ### 12.2 承認
 
 - `[仕様を承認]` → `POST /review/:id`。即座に緑（または青）になる。
-- 承認後にファイルが変わると `changedSinceReview` でグレー太枠に戻る。詳細パネルに「承認時からの変更あり（hash 不一致）」と前回承認日時を表示。
+- 承認後にファイルが変わると `changedSinceReview` でグレー太枠に戻る。詳細パネルに「承認時からの変更あり（hash 不一致）」と承認者、前回承認日時を表示。承認済みなら承認者と承認日時を表示。
+- 承認が食い違っている（`review.conflict`）と、未レビューの色のまま、パネルに「承認が食い違っています」と記録ごとの承認者・時刻・版（今の内容か）を出し、[仕様を承認] と [承認を取り消す] の両方を出す。
 
 ### 12.3 見た目
 
@@ -701,7 +707,7 @@ src/auth/reset.ts（機能: パスワードリセット）を修正してくだ�
 - 外部に見せない設定・型定義には `@state-hidden`。
 - 自分で気づいたリスクは `@state-risk` に正直に書く（スキャナとは別枠で表示されるので、書いて損はない）。
 - 作業前に `.everypath/graph.json` を読み、`reviewed: true` のノードを変更する場合は、変更理由を最終報告に含める（人間側で承認が外れて再確認が必要になるため）。
-- `.everypath/` 配下と `everypath.*.json|yml` は変更しない。
+- `.everypath/` 配下と `everypath.*.json|yml` は変更しない。承認の食い違いの警告が出ても `.everypath/review/` に触らず、人間に知らせる（解けるのは人間の承認し直しか取り消しだけ）。
 
 ### 14.2 スラッシュコマンド `/everypath-fix <ノード名>`（任意）
 
@@ -733,7 +739,7 @@ src/auth/reset.ts（機能: パスワードリセット）を修正してくだ�
 | `everypath check [dir] [--tlc] [--timeout 120]` | 性質チェック。既定は簡易検査、`--tlc` で TLA+ を生成して TLC を実行。違反があれば exit 1（CI 用）。反例を標準出力に人間可読で出す |
 | `everypath tla export [dir]` | `.everypath/tla/Model.tla` と `Model.cfg` を生成するだけ（人間が TLA+ Toolbox で開く用） |
 | `everypath tla install` | `tla2tools.jar` を `~/.everypath/` にダウンロード |
-| `everypath init [dir]` | `everypath.config.json`、`everypath.properties.json` の雛形、`.claude/skills/everypath/SKILL.md`、hooks 例をコピー。`.gitignore` に `.everypath/*` と `!.everypath/review.json` を追記（決定 0003） |
+| `everypath init [dir]` | `everypath.config.json`、`everypath.properties.json` の雛形、`.claude/skills/everypath/SKILL.md`、hooks 例をコピー。`.gitignore` に `.everypath/*` と `!.everypath/review.json` を追記（決定 0003）。`.everypath/.gitignore` に `!review/` と `review/*.tmp` を書く（決定 0004） |
 | `everypath export [dir] --mermaid` | グラフを Mermaid の stateDiagram-v2 に書き出す（README や PR に貼る用） |
 
 パッケージ名: `everypath`（2026-10-21 時点で npm 未使用を確認済み。公開前に再確認し、取られていれば `@<scope>/everypath`）。`bin` は `{"everypath": "dist/cli.js"}` の 1 本（先頭に `#!/usr/bin/env node`）。実行時依存ゼロ。Node 22 以上。
@@ -766,7 +772,7 @@ src/auth/reset.ts（機能: パスワードリセット）を修正してくだ�
 
 - 関数単位の証明アダプタ（Dafny / Verus）、`@state-require proof`、「仕様と証明を書く」テンプレ
 - Go/Rust/Java の import 解決
-- チーム向け（承認者の表示、review.json の git 共有を前提にしたマージ）
+- チーム向け（承認者の表示、承認の記録の git 共有を前提にしたマージ）。2026-10-22 に入った（決定 0004、`docs/specs/team-review.md`）
 
 ---
 
@@ -777,7 +783,7 @@ src/auth/reset.ts（機能: パスワードリセット）を修正してくだ�
 3. ~~イベントの発生モデル~~ → 決定済み（`docs/specs/tla.md`）: 推奨どおり、すべてのイベントを環境が非決定的に選ぶ。元の状態とガードが真なら常に発火できる。必要になったら `@state-event` に `kind:` を足す。
 4. ~~ノード id の衝突~~ → 決定済み（`docs/specs/scan.md`）: 衝突したファイルだけパス由来の id（`src/a/utils.ts` は `src_a_utils`）にする。`dir/name` は状態名の識別子規則に合わないため、区切りも `_` に置き換える。
 5. **レイアウト安定の「空き地探索」アルゴリズム**: 親の直下 → 右 → 左 の順に 1 グリッド（20px）刻みで衝突判定、で十分か。
-6. ~~review.json を git 管理させるか~~ → 決定済み（`docs/decisions/0003-review-json-in-git.md`）: 常に git 管理。`init` は `.gitignore` に `.everypath/*` と `!.everypath/review.json` を書き、聞かない。
+6. ~~review.json を git 管理させるか~~ → 決定済み（`docs/decisions/0003-review-json-in-git.md`）: 常に git 管理。`init` は `.gitignore` に `.everypath/*` と `!.everypath/review.json` を書き、聞かない。記録の置き場は決定 0004 で `.everypath/review/` に変わった。
 7. ~~ダークモード~~ → 決定済み（`docs/REQUIREMENTS.md` 非目標）: やらない。色が意味を持つ UI なので配色を 2 系統維持しない。
 
 ---
@@ -800,7 +806,7 @@ src/auth/reset.ts（機能: パスワードリセット）を修正してくだ�
 1. `example/` に対して `everypath serve` を実行し、ブラウザで §0.1 の原案図を拡張した遷移図（ログイン・新規登録・Home・マイページ・ログアウトの 5 画面に、パスワードリセット・ロック・DB層を加えた 8 ノード）が描かれる。
 2. `example/src/` に `@state 設定` `@state-next Home` を書いた新規ファイルを追加すると、**2 秒以内**に新ノードと矢印が現れ、既存ノードの位置は動かない。
 3. そのファイルを import するテストを追加すると、ノードが橙からグレーに変わる。
-4. 詳細パネルで「仕様を承認」を押すと緑になり、`review.json` に hash 付きで記録される。そのファイルを変更するとグレー太枠に戻る。
+4. 詳細パネルで「仕様を承認」を押すと緑になり、承認の記録（`.everypath/review/`。当時は `review.json`）に hash 付きで記録される。そのファイルを変更するとグレー太枠に戻る。
 5. `everypath.findings.json` に `src/auth/reset.ts` の指摘を置くと、そのノードが赤になり、パネルに行番号つきで表示される。
 6. `everypath.properties.json` の `never-reach` 違反があるとき、簡易検査でノードが赤になり、クリックで反例経路が赤破線で描かれ、`everypath check` が exit 1 で反例を出力する。
 7. `everypath check --tlc` を example に対して実行すると、`Model.tla` が生成され、TLC が `no-unauth-home` の違反を見つけ、反例トレース（状態 + イベント + 変数値）が標準出力と graph.json に出る。ビューアで反例をステップ再生でき、各ステップで変数値が表示される。example の `reset.ts` を修正すると ok になる。

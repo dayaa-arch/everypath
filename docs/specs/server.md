@@ -8,12 +8,12 @@
 - [x] 1. `npm run typecheck`、`npm run lint`、`npm test` がすべて exit 0（実行して確認）
 - [x] 2. `everypath serve <dir> --port 0` が待ち受け URL を 1 行出す。`GET /graph.json` が同じ時点の `everypath scan --json` と同じノードとエッジを返す（`test/server.test.ts`）
 - [x] 3. `GET /events` は接続直後に `{type:"graph", diff:null}` を送る。`@state 設定` と `@state-next Home` を書いたファイルを足すと、新ノードと遷移を含む `graph` イベントが届く。10 回計測した最大が 2,000 ms 未満（`scripts/verify-requirements.ts` の R-05 の行。`npm test` からも呼ぶ）
-- [x] 4. `POST /review/:id`（本文 `{note}`）が `review.json` にそのノードの hash、`at`、`by` を書き、続く `graph` イベントで `reviewed: true` になる。ファイルを変えると `changedSinceReview: true`。`DELETE /review/:id` で承認が消える。無いノードは 404、本文が不正なら 400（`test/server.test.ts`）
+- [x] 4. `POST /review/:id`（本文 `{note}`）が `review.json` にそのノードの hash、`at`、`by` を書き、続く `graph` イベントで `reviewed: true` になる。ファイルを変えると `changedSinceReview: true`。`DELETE /review/:id` で承認が消える。無いノードは 404、本文が不正なら 400（`test/server.test.ts`）。決定 0004 で、承認も取り消しも `.everypath/review/` に記録を 1 件足す形に変わった（`docs/specs/team-review.md`）
 - [x] 5. `PUT /layout.json` が正しい本文を `.everypath/layout.json` に保存し、`GET` で同じものを返す。不正な本文は 400。再スキャンは `layout.json` を変えない（`test/server.test.ts`）
 - [x] 6. `POST /check/tlc` は 202 を返し、SSE で `tlc` の `running`、続いて `done` か `error` を送り、完了後に `graph` を再配信する。実行中の 2 回目は 409。Java が無い環境では `error` に導入手順を載せ、他の API は動き続ける（`test/server.test.ts`。TLC はスタブの jar ではなく `PATH` の差し替えで無しを作る。実物の TLC は jar があるときだけ走る 1 件）
 - [x] 7. TLC の結果は、その後の再スキャンでも消えない。モデル（状態、遷移、変数、性質）が TLC 実行時と同じなら結果をそのまま残し、違えば `staleModel: true` を付けて残す（`test/server.test.ts`）
 - [x] 8. サーバーの稼働中にディスクへ書くのは `.everypath/` 配下だけ（`test/requirements.test.ts` の R-01 に serve の場合を足す）
-- [x] 9. `.everypath/graph.json` や一時ファイルの変化では再スキャンしない。`.everypath/review.json` と `.everypath/findings.json`、`everypath.*.json` の変化では再スキャンして配信する（`test/server.test.ts`）
+- [x] 9. `.everypath/graph.json` や一時ファイルの変化では再スキャンしない。`.everypath/review.json` と `.everypath/findings.json`、`everypath.*.json` の変化では再スキャンして配信する（`test/server.test.ts`）。決定 0004 の後は `.everypath/review/` の記録も同じ（`test/server.test.ts`）
 - [x] 10. `GET /` は `dist/ui.html` があれば返し、無ければ 503 と日本語の案内を返す。`GET /tla/Model.tla` は生成前なら 404。使用中のポートを指定すると日本語のエラーで exit 1（`test/server.test.ts`）
 
 ## データの形

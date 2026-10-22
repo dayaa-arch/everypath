@@ -22,7 +22,7 @@ npm install -D everypath
 npx everypath init
 ```
 
-次の 5 つができます。既にあるファイルは上書きしないので、何度実行しても結果は同じです。
+次の 6 つができます。既にあるファイルは上書きしないので、何度実行しても結果は同じです。
 
 | ファイル | 中身 |
 |---|---|
@@ -31,6 +31,7 @@ npx everypath init
 | `.claude/skills/everypath/SKILL.md` | Claude Code のスキル。エージェントにアノテーションの書き方と守ることを伝える |
 | `.claude/settings.example.json` | Claude Code がファイルを書くたびに `npx everypath scan --quiet` を走らせる hook の例 |
 | `.gitignore` | `.everypath/*` と `!.everypath/review.json` を末尾に足す。承認の記録だけを git で管理する |
+| `.everypath/.gitignore` | `!review/` と `review/*.tmp`。承認の記録（`.everypath/review/`）を git で管理に戻す |
 
 hook を使うときは、`settings.example.json` の `hooks` を `.claude/settings.json` に写します。`serve` を起動しているなら hook は要りません。
 
@@ -94,6 +95,14 @@ npx everypath serve --open
 ```
 
 ブラウザで `http://localhost:4747` が開きます。ファイルを保存するたびに図が変わり、既存の箱は動きません。ポートは `--port` で変えられます。
+
+## チームで承認を共有する
+
+詳細パネルの「仕様を承認」と「承認を取り消す」は、`.everypath/review/` にファイルを 1 つずつ足します。ファイルは書き換えも削除もしないので、別々のブランチで承認しても、`git merge` でも、ホスティングサービスが使うサーバー側の合流（`git merge-tree`）でも衝突しません。承認したファイルを commit して共有します。パネルには承認者（`git config user.name`）と承認日時が出ます。
+
+同じ状態を 2 人が違う内容で承認したブランチ、または承認と取り消しのブランチを合流すると、その状態は「承認が食い違っています」になります。どちらかが勝つことはなく、未レビューのまま残り、`scan` と `check` が警告を出し、パネルに記録ごとの承認者、時刻、版が並びます。内容を確かめて承認し直すか取り消すと解けます。
+
+以前の `.everypath/review.json` は読み続け、書き換えません。`init` をやり直さなくても、最初の承認で `.everypath/.gitignore` に `!review/` が足され、新しいファイルも git で管理されます。
 
 ## 検査する
 
@@ -173,7 +182,7 @@ node dist/cli.js check example --tlc
 
 | コマンド | 内容 |
 |---|---|
-| `everypath init [dir]` | 設定、性質、スキル、hook の例を置き、`.gitignore` に追記する |
+| `everypath init [dir]` | 設定、性質、スキル、hook の例、`.everypath/.gitignore` を置き、`.gitignore` に追記する |
 | `everypath scan [dir] [--json] [--quiet]` | 一回スキャンして `.everypath/graph.json` を書く |
 | `everypath check [dir] [--tlc [--timeout 秒]] [--require-proof]` | 性質を検査する。違反があれば終了コード 1。`--require-proof` なら、証明の通っていない状態があっても 1 |
 | `everypath prove [dir] [--timeout 秒]` | `@state-require proof` の状態ごとに検証ツールを走らせ、`.everypath/proofs.json` を書く。すべて通れば終了コード 0 |

@@ -20,3 +20,7 @@
 ## 影響
 
 `docs/REQUIREMENTS.md` の決定記録に追加。`SPEC.md` §17.6 を決定済みに書き換え、§15 の `init` の説明に `.gitignore` 追記を加える。
+
+## 追記（2026-10-22、0004）
+
+承認の記録の置き場は `docs/decisions/0004-review-events.md` で `.everypath/review/`（1 件 1 ファイル）に変わった。`review.json` は読み続け、書かない。`init` が書く 2 行はそのままで、`review/` は `.everypath/.gitignore` の `!review/` で管理に戻す。「承認の記録だけを常に git 管理する」は両方を指す。
