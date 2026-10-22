@@ -6,7 +6,7 @@ import type {
   StateName,
   Step,
 } from "../core/types.js";
-import type { Point } from "./layout.js";
+import { type Point, place, relayout, snap } from "./layout.js";
 import type { GraphEvent, Layout, TlcEvent } from "./wire.js";
 
 /** What the header says about TLC. `done` with M violations is read from the graph, not stored. */
@@ -69,9 +69,18 @@ export type Action =
  * notice.
  */
 export function initialState(saved: Layout): ViewState {
-  void saved;
-  throw new Error("not implemented");
+  return {
+    graph: null,
+    layout: saved,
+    connection: "connecting",
+    tlc: { kind: "idle" },
+    selection: NONE,
+    showDeps: true,
+    notice: null,
+  };
 }
+
+const NONE: Selection = { kind: "none" };
 
 /**
  * Condition 6. Total and pure. Returns `state` itself when an action changes nothing, so the caller
@@ -95,9 +104,111 @@ export function initialState(saved: Layout): ViewState {
  * - toggle-deps flips `showDeps`. notice sets `notice`.
  */
 export function reduce(state: ViewState, action: Action): ViewState {
-  void state;
-  void action;
-  throw new Error("not implemented");
+  switch (action.kind) {
+    case "graph": {
+      const { graph } = action.event;
+      const stranded = state.connection !== "live" && state.tlc.kind === "running";
+      return {
+        ...state,
+        graph,
+        layout: place(state.layout, graph),
+        connection: "live",
+        tlc: stranded ? { kind: "idle" } : state.tlc,
+        selection: reselect(state.selection, graph),
+      };
+    }
+    case "offline":
+      return state.connection === "offline" ? state : { ...state, connection: "offline" };
+    case "tlc":
+      return { ...state, tlc: tlcView(action.event) };
+    case "select": {
+      if (action.id === null)
+        return state.selection.kind === "none" ? state : { ...state, selection: NONE };
+      const node = state.graph?.nodes.find((n) => n.id === action.id);
+      if (state.graph === null || node === undefined) return state;
+      const first = node.violations
+        .map((property) => ({ property, index: 0 }))
+        .find((target) => traceOf(state.graph, target) !== undefined);
+      const replay = first === undefined ? null : { ...first, step: 0 };
+      return { ...state, selection: { kind: "node", id: node.id, replay } };
+    }
+    case "replay": {
+      const selection = state.selection;
+      if (selection.kind !== "node") return state;
+      if (action.target === null) {
+        return selection.replay === null
+          ? state
+          : { ...state, selection: { ...selection, replay: null } };
+      }
+      if (traceOf(state.graph, action.target) === undefined) return state;
+      return { ...state, selection: { ...selection, replay: { ...action.target, step: 0 } } };
+    }
+    case "step": {
+      const selection = state.selection;
+      const replay = replayOf(state);
+      if (selection.kind !== "node" || selection.replay === null || replay === null) return state;
+      const last = replay.trace.steps.length - 1;
+      const step = Math.min(last, Math.max(0, replay.step + action.delta));
+      if (step === replay.step) return state;
+      return { ...state, selection: { ...selection, replay: { ...selection.replay, step } } };
+    }
+    case "move":
+      if (!state.graph?.nodes.some((n) => n.id === action.id)) return state;
+      return { ...state, layout: { ...state.layout, [action.id]: snap(action.to) } };
+    case "relayout":
+      return state.graph === null ? state : { ...state, layout: relayout(state.graph) };
+    case "toggle-deps":
+      return { ...state, showDeps: !state.showDeps };
+    case "notice":
+      return state.notice === action.text ? state : { ...state, notice: action.text };
+    default: {
+      const _exhaustive: never = action;
+      return _exhaustive;
+    }
+  }
+}
+
+function tlcView(event: TlcEvent): TlcView {
+  switch (event.status) {
+    case "running":
+      return { kind: "running" };
+    case "done":
+      return { kind: "done", states: event.states, message: event.message };
+    case "error":
+      return {
+        kind: "error",
+        message: event.message ?? "全探索が失敗しました（理由は届いていません）",
+      };
+    default: {
+      const _exhaustive: never = event.status;
+      return _exhaustive;
+    }
+  }
+}
+
+function reselect(selection: Selection, graph: Graph): Selection {
+  if (selection.kind === "none") return selection;
+  if (!graph.nodes.some((n) => n.id === selection.id)) return NONE;
+  const { replay } = selection;
+  if (replay === null) return selection;
+  const found = traceOf(graph, replay);
+  if (found === undefined) return { ...selection, replay: null };
+  const step = Math.min(replay.step, found.trace.steps.length - 1);
+  return step === replay.step ? selection : { ...selection, replay: { ...replay, step } };
+}
+
+/** SPEC §11: a TLC verdict on a model that has changed since the run marks no node. */
+export function isLiveViolation(property: PropertyResult): boolean {
+  return property.result === "violated" && property.staleModel !== true;
+}
+
+function traceOf(
+  graph: Graph | null,
+  target: { readonly property: PropertyId; readonly index: number },
+): { readonly property: PropertyResult; readonly trace: Counterexample } | undefined {
+  const property = graph?.properties.find((p) => p.id === target.property && isLiveViolation(p));
+  const trace = property?.counterexamples[target.index];
+  return property === undefined || trace === undefined ? undefined : { property, trace };
 }
 
 /** A replay resolved against the current graph. `loopStart` is where an infinite trace repeats from. */
@@ -112,6 +223,17 @@ export type Replay = {
 
 /** The selected replay, or null. Panel, canvas and tests all read the trace through this function. */
 export function replayOf(state: ViewState): Replay | null {
-  void state;
-  throw new Error("not implemented");
+  const { selection } = state;
+  if (selection.kind !== "node" || selection.replay === null) return null;
+  const found = traceOf(state.graph, selection.replay);
+  const current = found?.trace.steps[selection.replay.step];
+  if (found === undefined || current === undefined) return null;
+  return {
+    node: selection.id,
+    property: found.property,
+    trace: found.trace,
+    step: selection.replay.step,
+    current,
+    loopStart: found.trace.loopStart,
+  };
 }
