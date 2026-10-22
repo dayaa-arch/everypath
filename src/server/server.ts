@@ -3,11 +3,11 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { parseStateName } from "../core/expr.js";
 import { asText, errorMessage, isMissing, isRecord } from "../core/json.js";
-import { runTlc, type TlcOutcome } from "../core/tla/run.js";
+import { runTlc, summarizeTlc, type TlcOutcome, type TlcSummary } from "../core/tla/run.js";
 import type { Graph, HistoryEntry, Layout, StateName } from "../core/types.js";
 import { readOutput, serializeGraph } from "../core/workspace.js";
 import { watchRepository } from "./watch.js";
-import { type JobResult, openWriter, type Writer } from "./writer.js";
+import { type JobResult, openWriter, STOPPING, type Writer } from "./writer.js";
 
 /** Every SSE `data:` line. A viewer reads nothing from the server but these and the HTTP bodies. */
 export type ServerEvent =
@@ -26,10 +26,21 @@ export type ServerEvent =
 
 type TlcEvent = Extract<ServerEvent, { readonly type: "tlc" }>;
 
-/** At most one TLC run. It writes nothing itself: its record lands through the writer. */
+/**
+ * At most one TLC run. It writes nothing itself: its record lands through the writer. `finished`
+ * settles when the run is over, whatever way, and never rejects.
+ */
 type TlcLane =
   | { readonly kind: "idle" }
   | { readonly kind: "running"; readonly abort: AbortController; readonly finished: Promise<void> };
+
+/**
+ * The body of `POST /check/tlc`. `start`: no body, a body that is not JSON or `{}` start a run and
+ * answer at once. `wait`: wait for the open run, start one with `timeoutMs`, answer when it is settled.
+ */
+type CheckTlcBody =
+  | { readonly kind: "start" }
+  | { readonly kind: "wait"; readonly budget: { readonly timeoutMs?: number } };
 
 export type RunningServer = {
   /** `http://127.0.0.1:<port>/`. */
@@ -57,6 +68,7 @@ export async function startServer({
     for (const stream of streams) push(stream, event, () => (frame ??= eventFrame(event)));
   };
   let lane: TlcLane = { kind: "idle" };
+  let closing: Promise<void> | null = null;
 
   const reviewer = await reviewerName(root);
   const http = createServer();
@@ -92,9 +104,14 @@ export async function startServer({
    * A run ends with one `done` or `error`. A checked run's record lands through the writer first, so
    * `done` means Model.tla and result.json are on disk, and the lane stays busy until then. The graph
    * with the verdicts follows `done`. A failure after that is the rescan's, so it goes to stderr.
+   * `null` while a run is open. Otherwise the summary of the run this starts: it settles once the
+   * rescan that publishes a checked run's verdicts is through the queue, and rejects if the run threw.
    */
-  function startTlc(writer: Writer): boolean {
-    if (lane.kind === "running") return false;
+  function startTlc(
+    writer: Writer,
+    budget: { readonly timeoutMs?: number } = {},
+  ): Promise<TlcSummary> | null {
+    if (lane.kind === "running") return null;
     const abort = new AbortController();
     let open = true;
     const settle = (event: TlcEvent): void => {
@@ -103,18 +120,56 @@ export async function startServer({
       if (!abort.signal.aborted) broadcast(event);
     };
     broadcast({ type: "tlc", status: "running", states: null, message: null });
-    const finished = runTlc(root, { signal: abort.signal })
+    const settled = runTlc(root, { ...budget, signal: abort.signal })
       .then(async (outcome) => {
-        if (outcome.kind !== "checked") return settle(tlcEvent(outcome));
-        const landed = (): void => settle(tlcEvent(outcome));
-        await writer.submit({ kind: "tlc-commit", run: outcome.record, landed });
+        if (outcome.kind !== "checked") {
+          settle(tlcEvent(outcome));
+        } else {
+          const landed = (): void => settle(tlcEvent(outcome));
+          await writer
+            .submit({ kind: "tlc-commit", run: outcome.record, landed })
+            .catch((error: unknown) => {
+              if (open) throw error;
+              report(error);
+            });
+        }
+        return summarizeTlc(outcome);
       })
       .catch((error: unknown) => {
-        if (!open) return report(error);
         settle({ type: "tlc", status: "error", states: null, message: errorMessage(error) });
+        throw error;
       });
-    lane = { kind: "running", abort, finished };
-    return true;
+    lane = { kind: "running", abort, finished: settled.then(ignore, ignore) };
+    return settled;
+  }
+
+  /** `start` answers 202 or 409 at once. `wait` answers 200 with the summary of its own run. */
+  async function checkTlc(
+    writer: Writer,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const body = await readJson(request);
+    if (body.kind === "too-large") return send(response, 413, TOO_LARGE);
+    const parsed = parseCheckTlcBody(body.value);
+    if (parsed === null) {
+      return send(
+        response,
+        400,
+        '本文は空か {"wait": true, "timeoutMs"?: 1 以上の整数（ミリ秒）} にしてください',
+      );
+    }
+    if (parsed.kind === "start") {
+      return startTlc(writer) !== null
+        ? send(response, 202, "")
+        : send(response, 409, "全探索はすでに実行中です。終わってからもう一度実行してください");
+    }
+    for (;;) {
+      if (closing !== null) return send(response, 503, STOPPING);
+      const run = startTlc(writer, parsed.budget);
+      if (run !== null) return send(response, 200, JSON.stringify(await run), JSON_TYPE);
+      if (lane.kind === "running") await lane.finished;
+    }
   }
 
   function subscribe(writer: Writer, request: IncomingMessage, response: ServerResponse): void {
@@ -207,9 +262,7 @@ export async function startServer({
         return answer(response, await writer.submit({ kind: "layout", body: layout }));
       }
       case "POST /check/tlc":
-        return startTlc(writer)
-          ? send(response, 202, "")
-          : send(response, 409, "全探索はすでに実行中です。終わってからもう一度実行してください");
+        return checkTlc(writer, request, response);
       case "GET /tla/Model.tla": {
         const model = await readOutput(root, "tla/Model.tla");
         return model === null
@@ -221,7 +274,6 @@ export async function startServer({
     }
   }
 
-  let closing: Promise<void> | null = null;
   return {
     url: `http://127.0.0.1:${listening}/`,
     close: () => {
@@ -241,6 +293,7 @@ export async function startServer({
 }
 
 const JSON_TYPE = "application/json; charset=utf-8";
+const ignore = (): void => {};
 const HISTORY_LIMIT = 200;
 
 /** The last lines of `history.jsonl` as a JSON array, oldest first. A damaged line is left out. */
@@ -406,6 +459,21 @@ function parseLayout(value: unknown, nodes: ReadonlySet<string>): Layout | null 
     points.push([id, { x, y }]);
   }
   return Object.fromEntries(points);
+}
+
+/** An absent body, or `{}`, starts a run at once. */
+function parseCheckTlcBody(value: unknown): CheckTlcBody | null {
+  if (value === undefined) return { kind: "start" };
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.length === 0) return { kind: "start" };
+  if (value.wait !== true || keys.some((key) => key !== "wait" && key !== "timeoutMs")) return null;
+  const { timeoutMs } = value;
+  if (timeoutMs === undefined) return { kind: "wait", budget: {} };
+  if (typeof timeoutMs !== "number" || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    return null;
+  }
+  return { kind: "wait", budget: { timeoutMs } };
 }
 
 const ANSWERS: Readonly<Record<JobResult, readonly [number, string]>> = {

@@ -33,6 +33,9 @@ export type Job =
       readonly landed: () => void;
     };
 
+/** What a job or a TLC wait is told once the server is closing. */
+export const STOPPING = "サーバーを止めているので受け付けません";
+
 /** `missing-node`: no node of that id in the last graph. `stale-hash`: the node changed since. */
 export type JobResult = "done" | "missing-node" | "stale-hash";
 
@@ -119,7 +122,7 @@ export async function openWriter(
   return {
     current: () => current,
     submit(job) {
-      if (closed) return Promise.reject(new Error("サーバーを止めているので受け付けません"));
+      if (closed) return Promise.reject(new Error(STOPPING));
       if (job.kind === "rescan" && waitingRescan !== null) return waitingRescan;
       const result = tail.then(() => {
         if (job.kind === "rescan") waitingRescan = null;
