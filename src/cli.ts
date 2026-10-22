@@ -39,6 +39,8 @@ const USAGE_ERROR = 2;
 const DEFAULT_PORT = 4747;
 /** `dist/ui.html` of this package, from `src/cli.ts` and from the built `dist/cli.js` alike. */
 const UI_PATH = fileURLToPath(new URL("../dist/ui.html", import.meta.url));
+/** `templates/prompts/` of this package, found the same way. */
+const PROMPTS_DIR = fileURLToPath(new URL("../templates/prompts/", import.meta.url));
 
 type Label = "scan" | "check" | "tla export" | "tla install" | "serve";
 
@@ -498,7 +500,7 @@ async function runServe(
   root: string,
   { port, open }: Extract<Command, { readonly kind: "serve" }>,
 ): Promise<number> {
-  const server = await startServer({ root, port, uiPath: UI_PATH });
+  const server = await startServer({ root, port, uiPath: UI_PATH, promptsDir: PROMPTS_DIR });
   process.stdout.write(`${server.url}\n`);
   if (open) openBrowser(server.url);
   await new Promise<void>((resolve) => {

@@ -14,6 +14,7 @@ import {
   isRecord,
   readJsonFile,
 } from "./json.js";
+import type { PromptKind } from "./prompts.js";
 import { NO_PROPERTIES, PROPERTIES_FILE, parseProperties } from "./properties.js";
 import { parseStoredVerdicts, type StoredVerdicts, type TlcRecord } from "./tla/result.js";
 import type {
@@ -216,7 +217,7 @@ export async function writeLayout(root: string, layout: Layout): Promise<void> {
 /** An output file the server hands out as it is, or `null` before anything wrote it. */
 export async function readOutput(
   root: string,
-  file: "layout.json" | "history.jsonl" | "tla/Model.tla",
+  file: "layout.json" | "history.jsonl" | "tla/Model.tla" | `templates/${PromptKind}.md`,
 ): Promise<string | null> {
   try {
     return await readFile(join(root, OUTPUT_DIRECTORY, file), "utf8");

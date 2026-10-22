@@ -975,3 +975,35 @@ describe("serve: an /events client that stops reading", () => {
     assert.ok(allReviewed(events.at(-1)), "the last frame is the latest graph");
   });
 });
+
+describe("serve: prompt templates (docs/specs/viewer-panels.md condition 6)", () => {
+  const kinds = [
+    "draw-model",
+    "explain-model",
+    "fix-counterexample",
+    "propose-properties",
+    "write-tests",
+  ];
+
+  it("serves every kind from templates/prompts, and a file in .everypath/templates over it", async () => {
+    const root = await makeRepo({
+      ...small,
+      ".everypath/templates/write-tests.md": "{{TARGETS}} のテストを書いて",
+      ".everypath/templates/unknown.md": "使われない",
+    });
+    const serve = await serveRepo(root);
+
+    const reply = await request(serve, "GET", "/templates.json");
+    assert.equal(reply.status, 200);
+    const templates = reply.json() as Record<string, { text: string; source: string }>;
+    assert.deepEqual(Object.keys(templates).sort(), kinds);
+    assert.deepEqual(templates["write-tests"], {
+      text: "{{TARGETS}} のテストを書いて",
+      source: "override",
+    });
+    for (const kind of kinds.filter((k) => k !== "write-tests")) {
+      const shipped = await readFile(join(repoRoot, "templates", "prompts", `${kind}.md`), "utf8");
+      assert.deepEqual(templates[kind], { text: shipped, source: "default" }, kind);
+    }
+  });
+});

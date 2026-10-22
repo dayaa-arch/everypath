@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { join } from "node:path";
 import { parseStateName } from "../core/expr.js";
 import { asText, errorMessage, isMissing, isRecord } from "../core/json.js";
+import { PROMPT_KINDS, type PromptTemplates } from "../core/prompts.js";
 import { runTlc, summarizeTlc, type TlcOutcome, type TlcSummary } from "../core/tla/run.js";
 import type { Graph, HistoryEntry, Layout, StateName } from "../core/types.js";
 import { isRunning, readOutput, readServeRecord, serializeGraph } from "../core/workspace.js";
@@ -51,16 +53,19 @@ export type RunningServer = {
 
 /**
  * `everypath serve`. Listens on 127.0.0.1 first, so a port in use fails before anything is scanned,
- * then scans and watches. `uiPath` is the viewer `GET /` hands out.
+ * then scans and watches. `uiPath` is the viewer `GET /` hands out; `promptsDir` holds the shipped
+ * instruction templates, one `<kind>.md` per prompt kind.
  */
 export async function startServer({
   root,
   port,
   uiPath,
+  promptsDir,
 }: {
   readonly root: string;
   readonly port: number;
   readonly uiPath: string;
+  readonly promptsDir: string;
 }): Promise<RunningServer> {
   const streams = new Set<Stream>();
   const broadcast = (event: ServerEvent): void => {
@@ -266,6 +271,13 @@ export async function startServer({
       }
       case "POST /check/tlc":
         return checkTlc(writer, request, response);
+      case "GET /templates.json":
+        return send(
+          response,
+          200,
+          `${JSON.stringify(await readTemplates(root, promptsDir))}\n`,
+          JSON_TYPE,
+        );
       case "GET /tla/Model.tla": {
         const model = await readOutput(root, "tla/Model.tla");
         return model === null
@@ -311,6 +323,31 @@ function recentHistory(jsonl: string | null): string {
   return `${JSON.stringify(entries.slice(-HISTORY_LIMIT))}\n`;
 }
 const LOCAL_HOST = /^(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
+
+/**
+ * Each prompt kind's template: `.everypath/templates/<kind>.md` when the repository has one, else the
+ * one shipped in `promptsDir`. Other files in `.everypath/templates/` are never looked at. Read on
+ * every request, so an edit is picked up when the viewer next connects.
+ */
+async function readTemplates(root: string, promptsDir: string): Promise<PromptTemplates> {
+  const entries = await Promise.all(
+    PROMPT_KINDS.map(async (kind) => {
+      const override = await readOutput(root, `templates/${kind}.md`);
+      if (override !== null) return [kind, { text: override, source: "override" }] as const;
+      const path = join(promptsDir, `${kind}.md`);
+      try {
+        return [kind, { text: await readFile(path, "utf8"), source: "default" }] as const;
+      } catch (error) {
+        if (!isMissing(error)) throw error;
+        throw new Error(
+          `既定のテンプレートがありません（${path}）。パッケージを入れ直してください`,
+        );
+      }
+    }),
+  );
+  // One entry per kind, in PROMPT_KINDS order, so the keys are exactly PromptTemplates'.
+  return Object.fromEntries(entries) as PromptTemplates;
+}
 
 function eventFrame(event: ServerEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;

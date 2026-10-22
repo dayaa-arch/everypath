@@ -583,6 +583,7 @@ TLA+ は「振る舞いのモデル」を検査する。関数単位の証明（
 | `GET /layout.json` / `PUT /layout.json` | 座標キャッシュ |
 | `POST /check/tlc` | TLA+ 生成 + TLC を非同期で開始。すでに実行中なら 409。進捗は SSE の `{type:"tlc", status:"running"\|"done"\|"error", states, message}` で配信し、完了時に graph.json を再配信 |
 | `GET /tla/Model.tla` | 生成した TLA+ をそのまま返す（詳細パネルの「モデル」タブ用） |
+| `GET /templates.json` | 指示文のテンプレート 5 種類。`.everypath/templates/<種類>.md` があればそれ（`source: "override"`）、無ければ同梱の `templates/prompts/<種類>.md`（`source: "default"`）。ビューアが §13 の文面を作るのに使う |
 
 - 監視: `fs.watch(root, {recursive:true})`。無視パターンはスキャナと同じ。250ms デバウンス。`recursive` 非対応環境は 1.5 秒ポーリングにフォールバック。
 - `.everypath/` 配下の変更で再スキャンをトリガーしない（自己ループ防止）。ただし `review.json`、`proofs.json`、`tla/result.json` の変更は再配信する（CI や手動の `everypath check --tlc` の結果をビューアが拾うため）。
