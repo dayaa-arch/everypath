@@ -8,8 +8,9 @@ import type {
   StateNode,
   Value,
 } from "../core/types.js";
+import { isLiveViolation, selectedIds } from "./facts.js";
 import { type Box, boxAt, type Point, route } from "./layout.js";
-import { isLiveViolation, replayOf, type ViewState } from "./state.js";
+import { replayOf, type ViewState } from "./state.js";
 
 export type Tone =
   | "danger"
@@ -357,7 +358,7 @@ export function sceneOf(
     return point === undefined ? undefined : boxAt(point);
   };
   const replay = replayOf(state);
-  const selected = state.selection.kind === "node" ? state.selection.id : null;
+  const selected = new Set(selectedIds(state.selection));
   const items: { readonly item: SceneItem; readonly touches: readonly StateName[] }[] = [];
 
   const lines = (look: "flow" | "dep" | "trail", pairs: readonly Pair[], lane: number): void => {
@@ -399,7 +400,7 @@ export function sceneOf(
         tone,
         title: fitTitle(node.id),
         caption: rowOf(tone).label,
-        selected: node.id === selected,
+        selected: selected.has(node.id),
         current: replay?.current.state === node.id,
         age: age >= 0 && age < PULSE_MS ? age : null,
       },

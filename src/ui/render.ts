@@ -1,13 +1,7 @@
 import type { NodeStatus, PropertyResult, StateName, StateNode } from "../core/types.js";
+import { isLiveViolation } from "./facts.js";
 import { type Box, labelAt, type Point } from "./layout.js";
-import {
-  type Action,
-  isLiveViolation,
-  type Replay,
-  replayOf,
-  type TlcView,
-  type ViewState,
-} from "./state.js";
+import { type Action, type Replay, replayOf, type TlcView, type ViewState } from "./state.js";
 import {
   headerCounts,
   rowOf,
@@ -232,9 +226,13 @@ export function mount(commands: Commands): Viewer {
     canvas.classList.remove("panning");
     request();
     if (!commit) return;
-    if (ended.kind === "press") commands.dispatch({ kind: "select", id: ended.id });
+    if (ended.kind === "press") {
+      commands.dispatch({ kind: "select", id: ended.id, extend: event.shiftKey });
+    }
     if (ended.kind === "drag") commands.dispatch({ kind: "move", id: ended.id, to: ended.at });
-    if (ended.kind === "pan" && !ended.moved) commands.dispatch({ kind: "select", id: null });
+    if (ended.kind === "pan" && !ended.moved) {
+      commands.dispatch({ kind: "select", id: null, extend: false });
+    }
   };
   canvas.addEventListener("pointerup", (event) => release(event, true));
   canvas.addEventListener("lostpointercapture", (event) => release(event, false));
@@ -261,7 +259,7 @@ export function mount(commands: Commands): Viewer {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     if (event.key === "ArrowLeft") commands.dispatch({ kind: "step", delta: -1 });
     if (event.key === "ArrowRight") commands.dispatch({ kind: "step", delta: 1 });
-    if (event.key === "Escape") commands.dispatch({ kind: "select", id: null });
+    if (event.key === "Escape") commands.dispatch({ kind: "select", id: null, extend: false });
   });
 
   return {
