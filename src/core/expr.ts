@@ -1,6 +1,7 @@
 import type {
   Assignment,
   EventName,
+  FlowEdge,
   GuardExpr,
   MemberName,
   ModelVar,
@@ -63,6 +64,54 @@ export function sanitizeStateName(raw: string): StateName {
   const headed = /^[\p{L}_]/u.test(replaced) ? replaced : `_${replaced}`;
   // The replacement and prefix above leave exactly the shape `parseName` accepts.
   return (KEYWORDS.includes(headed) ? `${headed}_` : headed) as StateName;
+}
+
+/**
+ * A flow's label in the viewer and in `export --mermaid`: the `on:` event, then `[guard]` (SPEC
+ * §12.1). Either is left out when the edge has none.
+ */
+export function edgeLabel(edge: Pick<FlowEdge, "event" | "guard">): string {
+  const guard = edge.guard === null ? null : `[${printGuard(edge.guard)}]`;
+  return [edge.event, guard].filter((part) => part !== null).join(" ");
+}
+
+/**
+ * The guard in SPEC §5.1's operators, which `parseGuard` reads back to the same expression. With the
+ * precedence `||` < `&&` < `!`, brackets go only round an `||` inside an `&&` and round a compound
+ * under `!`. `authed == TRUE` prints as `authed`, which is how the parser reads a bare variable.
+ */
+export function printGuard(expr: GuardExpr): string {
+  switch (expr.kind) {
+    case "cmp":
+      return isBare(expr) ? expr.name : `${expr.name}${expr.op}${printValue(expr.value)}`;
+    case "not": {
+      const inner = printGuard(expr.operand);
+      return expr.operand.kind === "not" || isBare(expr.operand) ? `!${inner}` : `!(${inner})`;
+    }
+    case "and":
+      return expr.operands
+        .map((operand) =>
+          operand.kind === "or" ? `(${printGuard(operand)})` : printGuard(operand),
+        )
+        .join(" && ");
+    case "or":
+      return expr.operands.map(printGuard).join(" || ");
+  }
+}
+
+function isBare(expr: GuardExpr): boolean {
+  return expr.kind === "cmp" && expr.op === "==" && expr.value.kind === "bool" && expr.value.value;
+}
+
+function printValue(value: Value): string {
+  switch (value.kind) {
+    case "bool":
+      return value.value ? "TRUE" : "FALSE";
+    case "int":
+      return String(value.value);
+    case "member":
+      return value.name;
+  }
 }
 
 const MAX_NESTING = 64;

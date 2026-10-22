@@ -1,12 +1,5 @@
-import type {
-  FlowEdge,
-  Graph,
-  GuardExpr,
-  PropertyId,
-  StateName,
-  StateNode,
-  Value,
-} from "./types.js";
+import { edgeLabel } from "./expr.js";
+import type { FlowEdge, Graph, PropertyId, StateName, StateNode } from "./types.js";
 
 type Mark = {
   readonly name: "violated" | "planned";
@@ -83,58 +76,4 @@ export function toMermaid(graph: Graph): string {
   ];
   const lines = ["stateDiagram-v2", ...body.map((line) => `${INDENT}${line}`)];
   return `${lines.join("\n")}\n`;
-}
-
-/**
- * `on:` event, then `[guard]`, as `edgeLabel` in `src/ui/view.ts` prints them. That file cannot be
- * imported here: it reaches `@dagrejs/dagre`, a devDependency that `dist/cli.js` must not load
- * (R-02). `test/mermaid.test.ts` compares the two over every operator, so they cannot drift.
- */
-function edgeLabel(edge: FlowEdge): string {
-  const guard = edge.guard === null ? null : `[${printGuard(edge.guard)}]`;
-  return [edge.event, guard].filter((part) => part !== null).join(" ");
-}
-
-/** `authed` for `authed == TRUE`, which is how the parser reads a bare variable. */
-function isBare(expr: GuardExpr): boolean {
-  return expr.kind === "cmp" && expr.op === "==" && expr.value.kind === "bool" && expr.value.value;
-}
-
-/** Precedence `||` < `&&` < `!`, so parentheses go only round an `||` in an `&&` and a compound under `!`. */
-function printGuard(expr: GuardExpr): string {
-  switch (expr.kind) {
-    case "cmp":
-      return isBare(expr) ? expr.name : `${expr.name}${expr.op}${printValue(expr.value)}`;
-    case "not": {
-      const inner = printGuard(expr.operand);
-      return expr.operand.kind === "not" || isBare(expr.operand) ? `!${inner}` : `!(${inner})`;
-    }
-    case "and":
-      return expr.operands
-        .map((operand) =>
-          operand.kind === "or" ? `(${printGuard(operand)})` : printGuard(operand),
-        )
-        .join(" && ");
-    case "or":
-      return expr.operands.map(printGuard).join(" || ");
-    default: {
-      const _exhaustive: never = expr;
-      return _exhaustive;
-    }
-  }
-}
-
-function printValue(value: Value): string {
-  switch (value.kind) {
-    case "bool":
-      return value.value ? "TRUE" : "FALSE";
-    case "int":
-      return String(value.value);
-    case "member":
-      return value.name;
-    default: {
-      const _exhaustive: never = value;
-      return _exhaustive;
-    }
-  }
 }

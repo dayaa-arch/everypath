@@ -1,13 +1,5 @@
-import type {
-  Counterexample,
-  FlowEdge,
-  Graph,
-  GuardExpr,
-  PropertyResult,
-  StateName,
-  StateNode,
-  Value,
-} from "../core/types.js";
+import { edgeLabel } from "../core/expr.js";
+import type { Counterexample, Graph, PropertyResult, StateName, StateNode } from "../core/types.js";
 import { isLiveViolation, selectedIds } from "./facts.js";
 import { type Box, boxAt, labelBoxes, overlaps, type Point, route } from "./layout.js";
 import { replayOf, type ViewState } from "./state.js";
@@ -213,56 +205,6 @@ export function stepEvent(index: number, event: string | null): string {
 
 function compare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
-}
-
-/** `on:` event, then `[guard]` (SPEC §12.1). Printed from the AST with SPEC §5.1's operators. */
-export function edgeLabel(edge: FlowEdge): string {
-  const guard = edge.guard === null ? null : `[${printGuard(edge.guard)}]`;
-  return [edge.event, guard].filter((part) => part !== null).join(" ");
-}
-
-/** `authed` for `authed == TRUE`, which is how the parser reads a bare variable. */
-function isBare(expr: GuardExpr): boolean {
-  return expr.kind === "cmp" && expr.op === "==" && expr.value.kind === "bool" && expr.value.value;
-}
-
-/** Precedence `||` < `&&` < `!`, so parentheses go only round an `||` in an `&&` and a compound under `!`. */
-function printGuard(expr: GuardExpr): string {
-  switch (expr.kind) {
-    case "cmp":
-      return isBare(expr) ? expr.name : `${expr.name}${expr.op}${printValue(expr.value)}`;
-    case "not": {
-      const inner = printGuard(expr.operand);
-      return expr.operand.kind === "not" || isBare(expr.operand) ? `!${inner}` : `!(${inner})`;
-    }
-    case "and":
-      return expr.operands
-        .map((operand) =>
-          operand.kind === "or" ? `(${printGuard(operand)})` : printGuard(operand),
-        )
-        .join(" && ");
-    case "or":
-      return expr.operands.map(printGuard).join(" || ");
-    default: {
-      const _exhaustive: never = expr;
-      return _exhaustive;
-    }
-  }
-}
-
-function printValue(value: Value): string {
-  switch (value.kind) {
-    case "bool":
-      return value.value ? "TRUE" : "FALSE";
-    case "int":
-      return String(value.value);
-    case "member":
-      return value.name;
-    default: {
-      const _exhaustive: never = value;
-      return _exhaustive;
-    }
-  }
 }
 
 /** A box being dragged and where it is now (world coordinates, unsnapped). */
