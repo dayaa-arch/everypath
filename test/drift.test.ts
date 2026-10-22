@@ -39,7 +39,8 @@ describe("drift: @state-route", () => {
   it("accepts /, a trailing slash, a parameter and several routes on one file", async () => {
     const root = await makeRepo({
       "src/top.ts": ts("@state Top", "@state-route /"),
-      "src/reset.ts": ts("@state Reset", "@state-route /reset/", "@state-route /forgot"),
+      "src/reset.ts": ts("@state Reset", "@state-route /reset/"),
+      "src/forgot.ts": ts("@state Forgot", "@state-route /forgot", "@state-route /password/forgot"),
       "src/user.ts": ts("@state User", "@state-route /users/:id"),
       "src/nav.ts": file(
         ["@state Nav"],
@@ -48,12 +49,19 @@ describe("drift: @state-route", () => {
         'router.push("/forgot");',
         'router.push("/users/42");',
       ),
+      "src/help.ts": file(["@state Help"], 'router.push("/password/forgot");'),
     });
 
     const graph = await scan(root, { now: T1 });
 
     assert.deepEqual(graph.warnings, []);
-    assert.deepEqual(driftPairs(graph), ["Nav->Reset", "Nav->Top", "Nav->User"]);
+    assert.deepEqual(driftPairs(graph), [
+      "Help->Forgot",
+      "Nav->Forgot",
+      "Nav->Reset",
+      "Nav->Top",
+      "Nav->User",
+    ]);
   });
 
   it("warns on each malformed route by file and line, and keeps scanning", async () => {
@@ -201,8 +209,11 @@ describe("drift: resolution", () => {
         ["@state Nav"],
         'router.push("/users/new");',
         'router.push("/users/42");',
-        'router.push("/users/settings");',
         'router.push("/acme/settings");',
+      ),
+      "src/lost.ts": file(
+        ["@state Lost"],
+        'router.push("/users/settings");',
         'router.push("/nowhere");',
         'router.push("/users/42/edit");',
       ),
