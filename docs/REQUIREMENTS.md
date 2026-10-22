@@ -53,6 +53,8 @@ AI にコードを書かせている開発者が、自分のアプリの振る�
 | 簡易検査 | 内蔵 BFS。変数を無視した過大近似。保存のたびに走る | `checkedBy: "bfs"` |
 | モデル検査 | TLC による全探索。手動または CI で走る | `checkedBy: "tlc"` |
 | 承認 | 人間が状態の仕様を確認した記録。ファイル hash と紐づく。機械の「検証」とは別 | `Approval` |
+| 親、葉 | `@state-parent` で子を持つ状態が親、子を持たない状態が葉。検査と TLA+ は葉だけの平らなモデルを読む。名乗るファイルの無い親は入れ物 | `StateNode.parent`、`Leaf`、`StateNode.container` |
+| 入口 | 親へ遷移したときに入る葉。`@state-initial` の付いた子をたどって決まる | `Hierarchy.enter` |
 
 ## 未定
 
