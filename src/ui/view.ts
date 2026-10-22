@@ -2,7 +2,7 @@ import { edgeLabel } from "../core/expr.js";
 import type { Counterexample, Graph, PropertyResult, StateName, StateNode } from "../core/types.js";
 import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
 import { selectedIds } from "./facts.js";
-import { type Box, boxAt, labelBoxes, overlaps, type Point, route } from "./layout.js";
+import { type Box, boxAt, labelBoxes, labelWidth, overlaps, type Point, route } from "./layout.js";
 import { replayOf, type ViewState } from "./state.js";
 
 export type Tone =
@@ -247,6 +247,14 @@ export const DRIFT = { stroke: "#ef6c00", label: "宣言なし" } as const;
 
 export type SceneItem =
   | {
+      /** SPEC §12.1: the boxes of one `@state-group`, framed by their bounding box, not by dagre. */
+      readonly kind: "group";
+      readonly name: string;
+      readonly box: Box;
+      /** Where the name is written, inside the frame's top-left corner, above every member. */
+      readonly label: Box;
+    }
+  | {
       readonly kind: "box";
       readonly id: StateName;
       readonly box: Box;
@@ -282,12 +290,12 @@ export type SceneItem =
 /**
  * The canvas as data. `live` is everything that moves with the dragged box (the box, its edges, trail
  * segments and callout touching it); `base` is the rest. With no drag, `live` is empty. Each list is
- * in paint order: dep lines, flow lines, drift lines, trail, boxes, callout.
+ * in paint order: group frames, dep lines, flow lines, drift lines, trail, boxes, callout.
  */
 export type Scene = {
   readonly base: readonly SceneItem[];
   readonly live: readonly SceneItem[];
-  /** Bounding box of the drawn boxes, for the first fit-to-view. null for an empty graph. */
+  /** Bounding box of the drawn boxes and frames, for the first fit-to-view. null for an empty graph. */
   readonly bounds: Box | null;
 };
 
@@ -357,8 +365,13 @@ export function sceneOf(
   const replay = replayOf(state);
   const selected = new Set(selectedIds(state.selection));
   const items: { readonly item: SceneItem; readonly touches: readonly StateName[] }[] = [];
-  /** What a label may not cover: every node, then each label as it is placed. */
-  const taken = graph.nodes.flatMap(({ id }) => boxOf(id) ?? []);
+  const frames = framesOf(graph, boxOf);
+  /** What a label may not cover: every node and group name, then each label as it is placed. */
+  const taken = [
+    ...graph.nodes.flatMap(({ id }) => boxOf(id) ?? []),
+    ...frames.map(({ item }) => item.label),
+  ];
+  items.push(...frames);
 
   const lines = (look: Look, pairs: readonly Pair[], lane: number): void => {
     for (const { from, to, labels } of pairs) {
@@ -435,7 +448,9 @@ export function sceneOf(
 
   const moving = (touches: readonly StateName[]): boolean =>
     drag !== null && touches.includes(drag.id);
-  const boxes = items.flatMap(({ item }) => (item.kind === "box" ? [item.box] : []));
+  const boxes = items.flatMap(({ item }) =>
+    item.kind === "box" || item.kind === "group" ? [item.box] : [],
+  );
   return {
     base: items.filter(({ touches }) => !moving(touches)).map(({ item }) => item),
     live: items.filter(({ touches }) => moving(touches)).map(({ item }) => item),
@@ -455,6 +470,46 @@ function placeLabel(
     boxes[0] ??
     boxAt({ x: 0, y: 0 });
   return { text, box };
+}
+
+/** Air round a group's boxes, and the height of the row its name takes above them. */
+const FRAME_PAD = 16;
+const FRAME_NAME = 24;
+
+/**
+ * One frame per group with two or more drawn boxes, in name order. A group of one box would only
+ * double that box's border; its name is in the detail panel.
+ */
+function framesOf(
+  graph: Graph,
+  boxOf: (id: StateName) => Box | undefined,
+): readonly {
+  readonly item: Extract<SceneItem, { readonly kind: "group" }>;
+  readonly touches: readonly StateName[];
+}[] {
+  const members = new Map<string, { ids: StateName[]; boxes: Box[] }>();
+  for (const node of graph.nodes) {
+    const box = boxOf(node.id);
+    if (node.group === null || box === undefined) continue;
+    const group = members.get(node.group) ?? { ids: [], boxes: [] };
+    group.ids.push(node.id);
+    group.boxes.push(box);
+    members.set(node.group, group);
+  }
+  return [...members.entries()]
+    .sort(([a], [b]) => compare(a, b))
+    .flatMap(([name, { ids, boxes }]) => {
+      const around = boundsOf(boxes);
+      if (ids.length < 2 || around === null) return [];
+      const box = {
+        x: around.x - FRAME_PAD,
+        y: around.y - FRAME_PAD - FRAME_NAME,
+        width: around.width + 2 * FRAME_PAD,
+        height: around.height + 2 * FRAME_PAD + FRAME_NAME,
+      };
+      const label = { x: box.x + 6, y: box.y + 4, width: labelWidth(name), height: 18 };
+      return [{ item: { kind: "group", name, box, label }, touches: ids }];
+    });
 }
 
 function boundsOf(boxes: readonly Box[]): Box | null {

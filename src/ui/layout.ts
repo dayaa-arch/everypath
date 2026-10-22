@@ -236,23 +236,29 @@ const LABEL_HEIGHT = 18;
 const LABEL_PADDING = 8;
 const LABEL_GAP = 2;
 
+/** The width 13 px text takes: 13 px for a character wider than Latin-1, 7.5 px for the rest, plus 8 px of air. */
+export function labelWidth(text: string): number {
+  return (
+    [...text].reduce((sum, char) => sum + ((char.codePointAt(0) ?? 0) > 0xff ? 13 : 7.5), 0) +
+    LABEL_PADDING
+  );
+}
+
 /** True when the interiors meet; boxes that only touch do not overlap. */
 export function overlaps(a: Box, b: Box): boolean {
   return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }
 
 /**
- * Where an edge's label may go, best first, as the box the 13 px text takes (13 px for a character
- * wider than Latin-1, 7.5 px for the rest, plus 8 px of air). First on the line: the segments of the
+ * Where an edge's label may go, best first, as the box the 13 px text takes (`labelWidth` wide).
+ * First on the line: the segments of the
  * polyline from the middle one outwards (the one after it, the one before it, and so on), and on
  * each the midpoint, then the point a quarter of the way along, then three quarters. Then beside the
  * line at the same points (above or below a horizontal segment, right or left of a vertical one),
  * for a line too short to carry its text clear of the boxes it joins, as a self-loop is.
  */
 export function labelBoxes(text: string, points: readonly Point[]): readonly Box[] {
-  const width =
-    [...text].reduce((sum, char) => sum + ((char.codePointAt(0) ?? 0) > 0xff ? 13 : 7.5), 0) +
-    LABEL_PADDING;
+  const width = labelWidth(text);
   const centred = (at: Point): Box => ({
     x: at.x - width / 2,
     y: at.y - LABEL_HEIGHT / 2,

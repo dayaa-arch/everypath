@@ -9,6 +9,7 @@
   --ink: #222222;
   --muted: #6b6b6b;
   --rule: #d4d4d4;
+  --group: #a8a8a8;
   --grid-minor: #ececec;
   --grid-major: #d9d9d9;
   --paper: #ffffff;
@@ -95,6 +96,8 @@ label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
 .grid-minor { fill: none; stroke: var(--grid-minor); stroke-width: 1; }
 .grid-major { fill: none; stroke: var(--grid-major); stroke-width: 1; }
 
+.group .frame { fill: var(--chrome); fill-opacity: 0.6; stroke: var(--group); stroke-width: 1; stroke-dasharray: 6 4; }
+.group .name { font-size: 13px; fill: var(--muted); dominant-baseline: middle; }
 .box { cursor: pointer; }
 .box .title { font-size: 15px; font-weight: 600; text-anchor: middle; }
 .box .caption { font-size: 13px; text-anchor: middle; }

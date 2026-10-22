@@ -363,6 +363,15 @@ function paint(layer: SVGGElement, items: readonly SceneItem[]): void {
 
 function draw(item: SceneItem): SVGElement {
   switch (item.kind) {
+    case "group": {
+      const { box, label } = item;
+      return svg(
+        "g",
+        { class: "group" },
+        svg("rect", { class: "frame", ...box, rx: 12 }),
+        svg("text", { class: "name", x: label.x + 4, y: label.y + label.height / 2 }, item.name),
+      );
+    }
     case "box":
       return drawBox(item);
     case "line": {
@@ -681,6 +690,8 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
           ? ["なし（計画のみ）"]
           : node.files.map((file) => html("div", { class: "mono" }, file))),
       ),
+      html("dt", {}, "グループ"),
+      html("dd", {}, node.group ?? "なし"),
       html("dt", {}, "最終変更"),
       html("dd", {}, formatTime(node.lastChangedAt)),
       html("dt", {}, "テスト"),
