@@ -61,10 +61,10 @@ export type ScanOptions = {
 };
 
 const TEST_PATH = /(^|[/._-])(test|tests|spec|specs|__tests__)([/._-]|$)/i;
+const INDEX_STEMS: ReadonlySet<string> = new Set(["index", "__init__", "main"]);
 
 /** A Dafny file is checked by `everypath prove`, and no test imports it, so it needs no test. */
 const isProofFile = (path: string): boolean => posix.extname(path) === ".dfy";
-const INDEX_STEMS: ReadonlySet<string> = new Set(["index", "__init__", "main"]);
 
 /** What one source file contributes, before it meets any other file. */
 type FileFacts = {
