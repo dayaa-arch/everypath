@@ -559,7 +559,7 @@ async function runInit(root: string): Promise<number> {
   process.stdout.write(actions.map(({ path, kind }) => `${path} ${INIT_WORDS[kind]}\n`).join(""));
   for (const line of await linesHidingReview(root)) {
     process.stderr.write(
-      `警告: .gitignore の「${line}」が .everypath/ ごと無視するので、.everypath/review.json を git で管理できません。この行を消すか「.everypath/*」に変えてください\n`,
+      `警告: .gitignore の「${line}」が .everypath/ ごと無視するので、承認の記録（.everypath/review/ と .everypath/review.json）を git で管理できません。この行を消すか「.everypath/*」に変えてください\n`,
     );
   }
   return 0;

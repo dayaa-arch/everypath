@@ -3,8 +3,9 @@ import { dirname, join } from "node:path";
 import { CONFIG_FILE } from "./config.js";
 import { isMissing } from "./json.js";
 import { PROPERTIES_FILE } from "./properties.js";
+import { REVIEW_GITIGNORE } from "./review.js";
 
-/** A file `init` hands out: a copy of a package file, or lines `.gitignore` must have. */
+/** A file `init` hands out: a copy of a package file, or lines a `.gitignore` must have. */
 type InitFile = {
   readonly path: string;
   readonly source:
@@ -36,6 +37,7 @@ const INIT_FILES: readonly InitFile[] = [
     path: ".gitignore",
     source: { kind: "gitignore", lines: [".everypath/*", "!.everypath/review.json"] },
   },
+  { path: REVIEW_GITIGNORE.path, source: { kind: "gitignore", lines: REVIEW_GITIGNORE.lines } },
 ];
 
 function isExisting(error: unknown): boolean {
@@ -63,6 +65,7 @@ async function appendMissingLines(
     content = await readFile(path, "utf8");
   } catch (error) {
     if (!isMissing(error)) throw error;
+    await mkdir(dirname(path), { recursive: true });
     await writeFile(path, `${lines.join("\n")}\n`, { flag: "wx" });
     return "created";
   }
@@ -98,7 +101,8 @@ const HIDES_DIRECTORY = /^(?:\/|\*\*\/)?\.everypath\/?$/;
 
 /**
  * Lines of `root`'s `.gitignore` that ignore the `.everypath` directory itself. Git cannot re-include
- * a file whose parent directory is excluded, so `!.everypath/review.json` stops working (decision 0003).
+ * a file whose parent directory is excluded, so `!.everypath/review.json` and the `!review/` of
+ * `.everypath/.gitignore` stop working (decisions 0003 and 0004).
  * `init` reports them and leaves the person's lines as they are.
  */
 export async function linesHidingReview(root: string): Promise<readonly string[]> {
