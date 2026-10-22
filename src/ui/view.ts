@@ -12,6 +12,7 @@ import {
   overlaps,
   type Point,
   parentFrames,
+  pointIn,
   route,
 } from "./layout.js";
 import { replayOf, type ViewState } from "./state.js";
@@ -408,7 +409,7 @@ export function sceneOf(
   /** A leaf's box. A parent has none: it is a frame round what is inside it. */
   const leafBox = (id: StateName): Box | undefined => {
     if (!hierarchy.isLeaf(id)) return undefined;
-    const point = drag?.id === id ? drag.at : state.layout[id];
+    const point = drag?.id === id ? drag.at : pointIn(state.layout, id);
     return point === undefined ? undefined : boxAt(point);
   };
   const parents = parentFrames(hierarchy, leafBox);

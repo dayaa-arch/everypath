@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { analyze } from "../src/core/scan.js";
 import type { Edge, Graph, StateNode } from "../src/core/types.js";
-import { type Box, boxAt, overlaps, place, relayout } from "../src/ui/layout.js";
+import { type Box, boxAt, overlaps, place, relayout, type Shape } from "../src/ui/layout.js";
 import { promptTargets } from "../src/ui/prompt.js";
 import { initialState, reduce, type ViewState } from "../src/ui/state.js";
 import { headerCounts, reviewQueue, type SceneItem, sceneOf, toneOf } from "../src/ui/view.js";
@@ -241,5 +242,186 @@ describe("hierarchy in the viewer: coordinates (R-05)", () => {
       }
     }
     assert.ok(!overlaps(frameOf(items, "P").box, frameOf(items, "Q").box));
+  });
+
+  it("puts a new child of a parent that already has children next to them, not on the parent's old point", () => {
+    const previous: Layout = { A: { x: 0, y: 0 }, B: { x: 300, y: 0 }, P: { x: 2000, y: 2000 } };
+    const shape = graph({
+      nodes: [child("A", "P"), child("B", "P"), child("N", "P"), { ...node("P") }],
+    });
+
+    assert.deepEqual(place(previous, shape).N, { x: 0, y: 134 }, "below A, the first sibling");
+  });
+
+  it("still gives the old point of a box that became a parent to its first placed child only", () => {
+    const previous: Layout = { P: { x: 2000, y: 2000 }, X: { x: 0, y: 0 } };
+    const shape = graph({
+      nodes: [child("N1", "P"), child("N2", "P"), { ...node("P") }, { ...node("X") }],
+    });
+    const placed = place(previous, shape);
+
+    assert.deepEqual(placed.N1, { x: 2000, y: 2000 });
+    assert.notDeepEqual(placed.N2, { x: 2000, y: 2000 });
+  });
+
+  it("keeps a3 out of B's frame when an unrelated frame was already dirty", () => {
+    const shape = graph({
+      nodes: [
+        { ...node("A"), files: ["src/a.ts"] },
+        child("a1", "A"),
+        child("a2", "A"),
+        child("a3", "A"),
+        { ...node("B"), files: ["src/b.ts"] },
+        child("b1", "B"),
+        child("b2", "B"),
+        { ...node("C"), files: ["src/c.ts"] },
+        child("c1", "C"),
+        { ...node("z"), files: ["src/z.ts"] },
+      ],
+    });
+    const previous: Layout = {
+      a1: { x: 0, y: 0 },
+      a2: { x: 220, y: 0 },
+      b1: { x: -300, y: 134 },
+      b2: { x: 300, y: 134 },
+      c1: { x: 1000, y: 0 },
+      z: { x: 1000, y: 70 },
+    };
+    const placed = place(previous, shape);
+    const items = itemsOf(shown(shape, placed));
+
+    assert.ok(overlaps(frameOf(items, "C").box, boxOf(placed, "z")), "C's frame was dirty before");
+    assert.ok(!overlaps(frameOf(items, "B").box, boxOf(placed, "a3")), "a3 is not in B's frame");
+    assert.ok(
+      !overlaps(frameOf(items, "A").box, frameOf(items, "B").box),
+      "A's frame stays off B's",
+    );
+    assert.ok(encloses(frameOf(items, "A").box, boxOf(placed, "a3")));
+  });
+
+  it("places 800 new siblings in under 300 ms, each on a box of its own", () => {
+    const siblings = Array.from(
+      { length: 800 },
+      (_, index) => `c${String(index + 1).padStart(3, "0")}`,
+    );
+    const shape = graph({
+      nodes: [child("c000", "P"), ...siblings.map((id) => child(id, "P")), { ...node("P") }],
+    });
+    const started = performance.now();
+    const placed = place({ c000: { x: 0, y: 0 } }, shape);
+    const elapsed = performance.now() - started;
+
+    const points = siblings.map((id) => placed[id]);
+    assert.ok(points.every((point) => point !== undefined));
+    assert.equal(new Set(points.map((point) => `${point?.x},${point?.y}`)).size, 800);
+    assert.ok(elapsed < 300, `${Math.round(elapsed)} ms`);
+  });
+});
+
+const layoutModule = new URL("../src/ui/layout.ts", import.meta.url).href;
+const tsx = import.meta.resolve("tsx");
+
+/** `place` in a child process, so a placement that never ends fails the test instead of the run. */
+function placeApart(previous: Layout, shape: Shape): Layout | null {
+  const script = [
+    `import { place } from ${JSON.stringify(layoutModule)};`,
+    "const [previous, shape] = JSON.parse(process.argv[1]);",
+    "process.stdout.write(JSON.stringify(place(previous, shape)));",
+  ].join("\n");
+  const run = spawnSync(
+    process.execPath,
+    ["--import", tsx, "--input-type=module", "-e", script, JSON.stringify([previous, shape])],
+    { encoding: "utf8", timeout: 20_000 },
+  );
+  return run.status === 0 ? (JSON.parse(run.stdout) as Layout) : null;
+}
+
+describe("hierarchy in the viewer: names that objects already have", () => {
+  const odd = ["constructor", "toString", "__proto__"];
+  const shape = graph({
+    nodes: [
+      { ...node("A") },
+      ...odd.map((id) => ({ ...node(id) })),
+      { ...node("X") },
+      { ...node("valueOf"), files: ["src/v.ts"] },
+      child("hasOwnProperty", "valueOf"),
+      child("isPrototypeOf", "valueOf"),
+    ],
+    edges: [
+      flow("A", "constructor"),
+      flow("constructor", "toString"),
+      flow("toString", "__proto__"),
+      flow("__proto__", "X"),
+      flow("X", "valueOf"),
+    ],
+  });
+  const leaves = ["A", ...odd, "X", "hasOwnProperty", "isPrototypeOf"];
+  const ownBoxes = (placed: Layout) => {
+    for (const id of leaves) {
+      assert.ok(Object.hasOwn(placed, id), `${id} has a point`);
+      const point = placed[id];
+      assert.ok(Number.isFinite(point?.x) && Number.isFinite(point?.y), `${id} is finite`);
+    }
+    for (const [index, a] of leaves.entries()) {
+      for (const b of leaves.slice(index + 1)) {
+        assert.ok(!overlaps(boxOf(placed, a), boxOf(placed, b)), `${a} and ${b} apart`);
+      }
+    }
+  };
+
+  it("places each of them next to its neighbours, and ends", { timeout: 60_000 }, () => {
+    const previous = JSON.parse('{"A": {"x": 0, "y": 0}, "hasOwnProperty": {"x": 0, "y": 900}}');
+    const placed = placeApart(previous, shape);
+
+    assert.ok(placed !== null, "place ended");
+    ownBoxes(placed);
+  });
+
+  it("lays them all out from nothing", { timeout: 60_000 }, () => {
+    const placed = placeApart({}, shape);
+
+    assert.ok(placed !== null, "relayout ended");
+    ownBoxes(placed);
+  });
+});
+
+describe("hierarchy in the viewer: a layout dagre cannot finish", () => {
+  /** 10 parents of 5 parents of 10 leaves, and 300 edges drawn by a fixed linear congruential sequence. */
+  function nested(): Graph {
+    const nodes: StateNode[] = [];
+    for (let a = 0; a < 10; a++) {
+      nodes.push({ ...node(`P${a}`), files: [`src/p${a}.ts`] });
+      for (let b = 0; b < 5; b++) {
+        nodes.push({ ...child(`P${a}_${b}`, `P${a}`, [`src/p${a}_${b}.ts`]) });
+        for (let c = 0; c < 10; c++) nodes.push(child(`L${a}_${b}_${c}`, `P${a}_${b}`));
+      }
+    }
+    let seed = 1;
+    const next = (): number => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const ids = nodes.map(({ id }) => id);
+    const pick = (): string => ids[Math.floor(next() * ids.length)] ?? "P0";
+    const edges = Array.from({ length: 300 }, () => {
+      const from = pick();
+      return flow(from, pick());
+    });
+    return graph({ nodes, edges });
+  }
+
+  it("falls back to the layout without frames for the 10x5x10 nest instead of throwing", {
+    timeout: 120_000,
+  }, () => {
+    const shape = nested();
+    const layout = relayout(shape);
+    const leaves = shape.nodes.filter(({ id }) => id.startsWith("L")).map(({ id }) => id);
+
+    assert.deepEqual(Object.keys(layout).sort(), [...leaves].sort());
+    const boxes = leaves.map((id) => boxOf(layout, id));
+    assert.ok(boxes.every((box) => Number.isFinite(box.x) && Number.isFinite(box.y)));
+    for (const [index, a] of boxes.entries()) {
+      for (const b of boxes.slice(index + 1)) assert.ok(!overlaps(a, b));
+    }
   });
 });

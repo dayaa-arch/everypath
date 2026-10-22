@@ -11,7 +11,7 @@ import type {
 } from "../core/types.js";
 import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
 import { driftsFrom, fixOf, selectedIds } from "./facts.js";
-import { type Box, boxAt, type Point } from "./layout.js";
+import { type Box, boxAt, type Point, pointIn } from "./layout.js";
 import { modelSlice } from "./model.js";
 import { type Prompt, promptBlocker, promptLabel, promptTargets } from "./prompt.js";
 import {
@@ -247,7 +247,7 @@ export function mount(commands: Commands): Viewer {
   /** Selects the node and brings its box to the middle of the canvas, at the zoom it has now. */
   function jump(id: StateName): void {
     commands.dispatch({ kind: "select", id, extend: false });
-    const point = latest?.layout[id];
+    const point = latest === null ? undefined : pointIn(latest.layout, id);
     if (point === undefined) return;
     const box = boxAt(point);
     const { width, height } = canvas.getBoundingClientRect();
@@ -273,7 +273,8 @@ export function mount(commands: Commands): Viewer {
     const start = { x: event.clientX, y: event.clientY };
     const id = nodeAt(event.target);
     const frame = isFrame(event.target) ? id : null;
-    const origin = id === null || frame !== null ? undefined : latest?.layout[id];
+    const origin =
+      id === null || frame !== null || latest === null ? undefined : pointIn(latest.layout, id);
     if (id !== null && origin !== undefined) {
       gesture = { kind: "press", pointer: event.pointerId, id, start, origin, at: origin };
     } else {
