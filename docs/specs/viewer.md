@@ -20,13 +20,14 @@
 type ViewState = {
   graph: Graph | null; layout: Layout; connection: "connecting" | "live" | "offline";
   tlc: { kind: "idle" } | { kind: "running" } | { kind: "finished"; states: number | null; message: string | null };
-  selection: { kind: "none" } | { kind: "node"; id: StateName }
-    | { kind: "counterexample"; property: PropertyId; index: number; step: number };
-  showDeps: boolean; recent: ReadonlyMap<StateName, number>; // 30 秒のパルス用。値は受信時刻
+  // 反例の再生はノードの選択の中にある。再生だけがあってノードが無い状態は作れない
+  selection: { kind: "none" } | { kind: "node"; id: StateName;
+    replay: { property: PropertyId; index: number; step: number } | null };
+  showDeps: boolean; // パルスは node.lastChangedAt から導くので状態に持たない
 };
 type Action = { kind: "graph"; event: GraphEvent; now: number } | { kind: "connection"; state: ViewState["connection"] }
   | { kind: "tlc"; event: TlcEvent } | { kind: "select"; selection: ViewState["selection"] }
-  | { kind: "step"; delta: 1 | -1 } | { kind: "layout"; layout: Layout } | { kind: "toggle-deps" };
+  | { kind: "step"; delta: 1 | -1 } | { kind: "move"; id: StateName; at: Point } | { kind: "relayout" } | { kind: "toggle-deps" };
 declare function reduce(state: ViewState, action: Action): ViewState;
 type Tone = "danger" | "planned" | "wip" | "untested" | "changed" | "unreviewed" | "proven" | "approved";
 declare function toneOf(node: StateNode, properties: readonly PropertyResult[]): Tone; // §7.2 の表
@@ -34,12 +35,19 @@ declare function place(previous: Layout, graph: Graph): Layout;   // 既存の�
 declare function relayout(graph: Graph): Layout;                   // dagre で全体を置く
 declare function route(from: Box, to: Box): readonly Point[];      // 直交の折れ線
 ```
-表し方: 画面の状態は判別可能なユニオンを持つ 1 つの reducer。色は `Tone` を返す 1 つの表。理由: 描画、パネル、ヘッダの 3 か所が同じ条件を別々に判定すると、色と一覧の順がずれるため。型は `src/core/types.ts` と `src/server/server.ts` から `import type` だけで読む。
+表し方: 画面の状態は判別可能なユニオンを持つ 1 つの reducer。色は `Tone` を返す 1 つの表。理由: 描画、パネル、ヘッダの 3 か所が同じ条件を別々に判定すると、色と一覧の順がずれるため。
+
+設計は architect の 2 案（最小構成、次の機能が載る構造）から合成した。採点役と同じく最小構成案を土台にした。純関数の `layout.ts`、`state.ts`、`view.ts` と、DOM を触る `render.ts`、`main.ts` の 5 つである。接ぎ木は 4 点。DOM 側の型検査に Node の型が入らないよう tsconfig を分け、サーバーのイベント型を `src/ui/wire.ts` に写してコンパイル時に一致を確かめる。色は表から属性として出し、CSS に色の一覧を持たない。`innerHTML` などの文字列からの DOM 生成を禁じるテストを置く（ページは承認 API と同じ origin でリポジトリ由来の文字列を描くため）。経路は自己ループ、往復、同じ組の複数本を描き分ける。
+
+決めたこと。
+- 状態が変わるたびに、基の SVG、ヘッダ、パネルを 1 フレームにまとめて作り直す。差分の適用はしない。200 ノードで 6〜10 ms の推定で、SSE のイベントはまれなため。ドラッグ中はつかんだ箱とその辺だけを別の層で描き直し、パンとズームは変換を 1 つ変えるだけにする。
+- `layout.json` を書くのは `main.ts` の `persist()` 1 か所だけ。新しいノードを置いた後、ドラッグを離した後、整列し直した後に書く。消えたノードの座標は画面の記憶に残し、戻れば同じ場所に置く。ただし、消えている間に別の書き込みがあると、ファイルからは消える（サーバーが今のノードの id しか受け付けないため）。
+- 反例のあるノードを選ぶと、最初の反例の再生が 0 歩目から始まる。
 
 ## 非目標
 - 未レビュー一覧、変更ログのタブ、指示生成、モデルタブ、グループ枠、複数選択、ファイル粒度へのズーム。次の仕様で扱う
 - ダークモード（要件定義書の非目標）
-- `src/server/` と `src/cli.ts` の変更。別のブランチ（`feat/serve-cli-guard`）が作業中のため、ビューアはサーバーの今の API だけを使う
+- `src/server/` と `src/cli.ts` の変更。別のブランチ（`feat/serve-cli-guard`）が作業中のため、ビューアはサーバーの今の API だけを使う。そのため、詳細パネルに「前回承認日時」は出さない（`Graph` に承認時刻が無い）
 
 ## 検証方法
-`test/ui-layout.test.ts`、`test/ui-status.test.ts`、`test/ui-route.test.ts`、`test/ui-state.test.ts`（DOM を使わない純関数）、`test/verify-requirements.test.ts`、`scripts/build-ui.ts`。条件 7 と 8 は内蔵ブラウザで実物を確かめる。作る。
+`test/ui-layout.test.ts`、`test/ui-status.test.ts`、`test/ui-route.test.ts`、`test/ui-state.test.ts`（DOM を使わない純関数）、`test/ui-boundaries.test.ts`（`innerHTML` などの禁止）、`test/ui-wire.check.ts`（型の一致）、`test/verify-requirements.test.ts`、`scripts/build-ui.ts`。条件 7 と 8 は内蔵ブラウザで実物を確かめる。作る。
