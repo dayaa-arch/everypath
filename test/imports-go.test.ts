@@ -230,13 +230,14 @@ describe("imports: Go modules", () => {
       "go.mod": MODULE,
       "tools/go.mod": "module example.org/tools\n\ngo 1.22\n",
       "tools/lint/lint.go": go("Lint", "lint", 'import "example.com/shop/internal/cart"\n'),
+      "tools/other/other.go": go("Other", "other"),
       "internal/cart/cart.go": go("Cart", "cart"),
       "main.go": go(
         "Main",
         "main",
         `import (
 	"example.org/tools/lint"
-	"example.com/shop/tools/lint"
+	"example.com/shop/tools/other"
 )
 `,
       ),

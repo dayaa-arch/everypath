@@ -140,6 +140,7 @@ mod p {
       "src/legacy/old_impl.rs": rs("Old"),
       "src/p/q.rs": rs("Q"),
       "src/p/inner.rs": rs("Inner"),
+      "src/inner.rs": rs("OuterInner"),
     });
 
     assert.deepEqual(depPairs(graph), ["Lib->Deep", "Lib->Dir", "Lib->Old", "Lib->Plain"]);
@@ -288,8 +289,22 @@ mod real;
       "src/ghost.rs": rs("Ghost"),
       "src/real.rs": rs("Real"),
       "src/outer/deep.rs": rs("Deep"),
+      "src/raw.rs": rs("Raw", 'const R: &str = r#"a"b mod ghost; c"#;\nmod after_raw;\n'),
+      "src/raw/after_raw.rs": rs("AfterRaw"),
+      "src/chars.rs": rs(
+        "Chars",
+        "const E: char = '\"';\nmod after_quote_char;\nfn f<'a>(x: &'a str) -> &'a str { x }\nmod after_lifetime;\n",
+      ),
+      "src/chars/after_quote_char.rs": rs("AfterQuoteChar"),
+      "src/chars/after_lifetime.rs": rs("AfterLifetime"),
     });
 
-    assert.deepEqual(depPairs(graph), ["Lib->Deep", "Lib->Real"]);
+    assert.deepEqual(depPairs(graph), [
+      "Chars->AfterLifetime",
+      "Chars->AfterQuoteChar",
+      "Lib->Deep",
+      "Lib->Real",
+      "Raw->AfterRaw",
+    ]);
   });
 });
