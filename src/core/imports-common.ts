@@ -43,6 +43,7 @@ const QUOTE = 0x22;
 const APOSTROPHE = 0x27;
 const BACKSLASH = 0x5c;
 const HASH = 0x23;
+const BACKTICK = 0x60;
 const COLON = 0x3a;
 
 function isIdentStart(code: number, dollar: boolean): boolean {
@@ -127,18 +128,24 @@ function skipRawString(text: string, from: number): number {
 }
 
 const OTHER: Token = { kind: "other", text: "" };
+const EMPTY_STRING: Token = { kind: "string", text: "" };
+const DOUBLE_COLON: Token = { kind: "punct", text: "::" };
+/** One shared token for each ASCII punctuation character, so the lexer allocates none for them. */
+const PUNCT: readonly Token[] = Array.from({ length: 128 }, (_, code) => ({
+  kind: "punct",
+  text: String.fromCharCode(code),
+}));
 
-/**
- * Tokens one at a time, so a caller that reads only the head of a file (Go, Java, Kotlin imports) never
- * lexes the rest. Anything it cannot place comes out as a one-character `punct`.
- */
-export function* lex(text: string, syntax: Syntax): Generator<Token, void, undefined> {
+/** The next token each time it is called, and `null` at the end. Anything it cannot place is a `punct`. */
+export type Lexer = () => Token | null;
+
+export function lexer(text: string, syntax: Syntax): Lexer {
   const { rust, nestedComments } = syntax;
   const dollar = !rust;
   let at = 0;
-  for (;;) {
+  return () => {
     at = skipTrivia(text, at, nestedComments);
-    if (at >= text.length) return;
+    if (at >= text.length) return null;
     const code = text.charCodeAt(at);
 
     if (isIdentStart(code, dollar)) {
@@ -150,56 +157,66 @@ export function* lex(text: string, syntax: Syntax): Generator<Token, void, undef
         if (after === HASH || after === QUOTE) {
           const past = skipRawString(text, end);
           if (past !== -1) {
-            yield { kind: "string", text: "" };
             at = past;
-            continue;
+            return EMPTY_STRING;
           }
           if (word === "r" && isIdentStart(text.charCodeAt(end + 1), false)) {
             let raw = end + 2;
             while (raw < text.length && isIdentPart(text.charCodeAt(raw), false)) raw += 1;
-            yield { kind: "ident", text: text.slice(end + 1, raw) };
+            const name = text.slice(end + 1, raw);
             at = raw;
-            continue;
+            return { kind: "ident", text: name };
           }
         }
       }
-      yield { kind: "ident", text: word };
       at = end;
-    } else if (code >= 48 && code <= 57) {
+      return { kind: "ident", text: word };
+    }
+    if (code >= 48 && code <= 57) {
       let end = at + 1;
       while (end < text.length && isIdentPart(text.charCodeAt(end), dollar)) end += 1;
-      yield OTHER;
       at = end;
-    } else if (code === QUOTE) {
+      return OTHER;
+    }
+    if (code === QUOTE) {
       const close = closingQuote(text, at, QUOTE);
       if (close === -1) {
-        yield OTHER;
-        return;
+        at = text.length;
+        return OTHER;
       }
-      yield { kind: "string", text: text.slice(at + 1, close) };
+      const value = text.slice(at + 1, close);
       at = close + 1;
-    } else if (code === 96 && syntax.backtick !== "punct") {
+      return { kind: "string", text: value };
+    }
+    if (code === BACKTICK && syntax.backtick !== "punct") {
       const close = text.indexOf("`", at + 1);
       if (close === -1) {
-        yield OTHER;
-        return;
+        at = text.length;
+        return OTHER;
       }
-      yield {
-        kind: syntax.backtick === "raw-string" ? "string" : "ident",
-        text: text.slice(at + 1, close),
-      };
+      const value = text.slice(at + 1, close);
       at = close + 1;
-    } else if (code === APOSTROPHE && rust) {
-      at = skipApostrophe(text, at);
-      yield OTHER;
-    } else if (rust && code === COLON && text.charCodeAt(at + 1) === COLON) {
-      yield { kind: "punct", text: "::" };
-      at += 2;
-    } else {
-      yield { kind: "punct", text: text.charAt(at) };
-      at += 1;
+      return { kind: syntax.backtick === "raw-string" ? "string" : "ident", text: value };
     }
-  }
+    if (code === APOSTROPHE && rust) {
+      at = skipApostrophe(text, at);
+      return OTHER;
+    }
+    if (rust && code === COLON && text.charCodeAt(at + 1) === COLON) {
+      at += 2;
+      return DOUBLE_COLON;
+    }
+    at += 1;
+    return PUNCT[code] ?? OTHER;
+  };
+}
+
+/** The whole file as tokens. */
+export function lexAll(text: string, syntax: Syntax): Token[] {
+  const next = lexer(text, syntax);
+  const tokens: Token[] = [];
+  for (let token = next(); token !== null; token = next()) tokens.push(token);
+  return tokens;
 }
 
 /** Rust: past the character literal or lifetime that starts at `at`. A lone `'` counts as one character. */
@@ -216,19 +233,16 @@ function skipApostrophe(text: string, at: number): number {
   return end;
 }
 
-/** One token of lookahead over `lex`. */
+/** One token of lookahead over a `Lexer`, for the readers that stop after the head of a file. */
 export type Cursor = {
   readonly peek: () => Token | null;
   readonly next: () => Token | null;
 };
 
-export function cursor(tokens: Iterator<Token, void, undefined>): Cursor {
+export function cursor(lexed: Lexer): Cursor {
   let ahead: Token | null | undefined;
   const peek = (): Token | null => {
-    if (ahead === undefined) {
-      const step = tokens.next();
-      ahead = step.done === true ? null : step.value;
-    }
+    if (ahead === undefined) ahead = lexed();
     return ahead;
   };
   return {

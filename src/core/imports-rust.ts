@@ -4,7 +4,7 @@ import {
   isPunct,
   isWord,
   joinPath,
-  lex,
+  lexAll,
   type Manifest,
   nameOf,
   type Syntax,
@@ -285,7 +285,7 @@ function scanItems(content: string): {
   readonly modules: ModuleDeclaration[];
   readonly uses: UseDeclaration[];
 } {
-  const tokens = [...lex(content, RUST)];
+  const tokens = lexAll(content, RUST);
   const modules: ModuleDeclaration[] = [];
   const uses: UseDeclaration[] = [];
   /** The inline modules around the current token; `null` is a block that is no module. */

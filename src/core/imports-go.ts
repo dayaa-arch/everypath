@@ -5,7 +5,7 @@ import {
   isPunct,
   isWord,
   joinPath,
-  lex,
+  lexer,
   type Manifest,
   nameOf,
   type Syntax,
@@ -84,7 +84,7 @@ export function resolveGo(path: string, content: string, go: GoModules): string[
 
 /** The paths in the import declarations that follow the package clause. Nothing after them is read. */
 function goImports(content: string): string[] {
-  const tokens = cursor(lex(content, GO));
+  const tokens = cursor(lexer(content, GO));
   const found: string[] = [];
   if (!isWord(tokens.next(), "package")) return found;
   tokens.next();

@@ -5,7 +5,7 @@ import {
   isPunct,
   isWord,
   joinPath,
-  lex,
+  lexer,
   type Syntax,
 } from "./imports-common.js";
 
@@ -126,7 +126,7 @@ function resolveImport(
 
 /** The imports of the file's head: after the package clause and the annotations on it, before any declaration. */
 function jvmImports(content: string, syntax: Syntax): JvmImport[] {
-  const tokens = cursor(lex(content, syntax));
+  const tokens = cursor(lexer(content, syntax));
   const found: JvmImport[] = [];
   for (;;) {
     const token = tokens.peek();
