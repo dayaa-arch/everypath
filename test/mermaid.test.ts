@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import { toMermaid } from "../src/core/mermaid.js";
 import { analyze } from "../src/core/scan.js";
 import type { Graph } from "../src/core/types.js";
-import { edgeLabel, TONES } from "../src/ui/view.js";
+import { TONES } from "../src/ui/view.js";
 import { flows, makeRepo, runCli, runCliAsync, ts } from "./helpers/repo.js";
 import { ready, serveEnv, serveRepo } from "./helpers/server.js";
 import { exampleRepo } from "./helpers/tlc.js";
@@ -223,24 +223,37 @@ const guards = {
   ),
 };
 
-describe("toMermaid: edge labels are the viewer's", () => {
-  it("prints the event, then [guard], exactly as the viewer's edgeLabel does", async () => {
+describe("toMermaid: edge labels", () => {
+  it("prints the event, then [guard] with SPEC 5.1's operators and the fewest brackets", async () => {
     const graph = await graphOf(guards);
     assert.deepEqual(graph.warnings, []);
     const diagram = readDiagram(toMermaid(graph));
 
-    const edges = flows(graph);
-    assert.equal(diagram.transitions.length, edges.length);
-    edges.forEach((edge, index) => {
-      const drawn = diagram.transitions[index];
-      assert.equal(nameOf(diagram, drawn?.from ?? ""), edge.from);
-      assert.equal(nameOf(diagram, drawn?.to ?? ""), edge.to);
-      assert.equal(drawn?.label ?? "", edgeLabel(edge), edge.text);
-    });
-    const labels = diagram.transitions.map((t) => t.label ?? "").join("\n");
-    for (const part of ["&&", "||", "!(", "(a || b)", "<=", ">=", "!=", "==FALSE", "[a]", "[!a]"]) {
-      assert.ok(labels.includes(part), `the matrix reaches ${part}`);
-    }
+    const drawn = diagram.transitions.map((t) => [
+      nameOf(diagram, t.from),
+      nameOf(diagram, t.to),
+      t.label,
+    ]);
+    const loop = (label: string) => ["G", "G", label];
+    const expected = [
+      loop("e1 [a]"),
+      loop("e2 [!a]"),
+      loop("e3 [a]"),
+      loop("e4 [a==FALSE]"),
+      loop("e5 [n<3]"),
+      loop("e6 [n<=3 && n>=1]"),
+      loop("e7 [n>0 || n!=2]"),
+      loop("e8 [(a || b) && !(n==2)]"),
+      loop("e9 [mode==busy]"),
+      loop("e10 [mode!=done && !b]"),
+      loop("e11 [!!a]"),
+      loop("e12"),
+      ["G", "H", "[a]"],
+      ["G", "H", null],
+    ];
+    const order = (rows: readonly unknown[][]) => rows.map((row) => JSON.stringify(row)).sort();
+    assert.equal(drawn.length, flows(graph).length);
+    assert.deepEqual(order(drawn), order(expected));
   });
 
   it("leaves out the colon for an arrow with no event and no guard", async () => {

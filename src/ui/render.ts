@@ -8,14 +8,25 @@ import type {
   StateName,
   StateNode,
 } from "../core/types.js";
-import { isLiveViolation, selectedIds } from "./facts.js";
+import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
+import { driftsFrom, fixOf, selectedIds } from "./facts.js";
 import { type Box, boxAt, type Point } from "./layout.js";
 import { modelSlice } from "./model.js";
-import { type Prompt, promptLabel, promptTargets } from "./prompt.js";
-import { type Action, type Replay, replayOf, type TlcView, type ViewState } from "./state.js";
+import { type Prompt, promptBlocker, promptLabel, promptTargets } from "./prompt.js";
+import {
+  type Action,
+  type DriftFix,
+  type Replay,
+  replayOf,
+  type TlcView,
+  type ViewState,
+} from "./state.js";
 import {
   checkedByLabel,
+  DRIFT,
+  FILE_CARD,
   headerCounts,
+  type Look,
   reviewQueue,
   rowOf,
   type SceneItem,
@@ -23,6 +34,7 @@ import {
   stepEvent,
   TONES,
   type ToneRow,
+  tlcLines,
   toneOf,
   violated,
 } from "./view.js";
@@ -71,6 +83,13 @@ const SLOP = 4;
 const ZOOM_MIN = 0.2;
 const ZOOM_MAX = 3;
 const DANGER = rowOf("danger");
+/** The lines whose color means something; `null` leaves it to the stylesheet's ink and grey. */
+const LINE_COLORS: Readonly<Record<Look, string | null>> = {
+  flow: null,
+  dep: null,
+  observed: DRIFT.stroke,
+  trail: DANGER.stroke,
+};
 
 const PROOF: Readonly<Record<NodeStatus["proof"], string>> = {
   none: "なし",
@@ -312,9 +331,19 @@ export function mount(commands: Commands): Viewer {
 
   document.addEventListener("keydown", (event) => {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
+    // The arrows of a focused radio button move its choice; they must not step the replay too.
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+      return;
+    }
     if (event.key === "ArrowLeft") commands.dispatch({ kind: "step", delta: -1 });
     if (event.key === "ArrowRight") commands.dispatch({ kind: "step", delta: 1 });
-    if (event.key === "Escape") commands.dispatch({ kind: "select", id: null, extend: false });
+    if (event.key === "Escape") commands.dispatch({ kind: "escape" });
+  });
+
+  // The pointer is captured by the canvas, so the box is found under the pointer, not by target.
+  canvas.addEventListener("dblclick", (event) => {
+    const id = nodeAt(document.elementFromPoint(event.clientX, event.clientY));
+    if (id !== null) commands.dispatch({ kind: "zoom", id });
   });
 
   return {
@@ -352,10 +381,20 @@ function paint(layer: SVGGElement, items: readonly SceneItem[]): void {
 
 function draw(item: SceneItem): SVGElement {
   switch (item.kind) {
+    case "group": {
+      const { box, label } = item;
+      return svg(
+        "g",
+        { class: "group" },
+        svg("rect", { class: "frame", ...box, rx: 12 }),
+        svg("text", { class: "name", x: label.x + 4, y: label.y + label.height / 2 }, item.name),
+      );
+    }
     case "box":
       return drawBox(item);
     case "line": {
       const d = `M ${item.points.map((p) => `${p.x} ${p.y}`).join(" L ")}`;
+      const color = LINE_COLORS[item.look];
       return svg(
         "g",
         { class: `line ${item.look}` },
@@ -364,7 +403,7 @@ function draw(item: SceneItem): SVGElement {
           class: "stroke",
           d,
           "marker-end": "url(#arrow)",
-          ...(item.look === "trail" ? { stroke: DANGER.stroke } : {}),
+          ...(color === null ? {} : { stroke: color }),
         }),
         item.label === null
           ? null
@@ -374,6 +413,7 @@ function draw(item: SceneItem): SVGElement {
                 class: "label",
                 x: item.label.box.x + item.label.box.width / 2,
                 y: item.label.box.y + item.label.box.height / 2,
+                ...(color === null ? {} : { fill: color }),
               },
               item.label.text,
             ),
@@ -389,6 +429,8 @@ function draw(item: SceneItem): SVGElement {
         ),
       );
     }
+    case "files":
+      return drawFiles(item);
     default: {
       const _exhaustive: never = item;
       return _exhaustive;
@@ -430,6 +472,40 @@ function drawBox(item: Extract<SceneItem, { kind: "box" }>): SVGElement {
   return group;
 }
 
+/** The open files of a box. It carries the box's id, so a press on it drags or selects that box. */
+function drawFiles(item: Extract<SceneItem, { kind: "files" }>): SVGElement {
+  const { box, rows, id } = item;
+  const left = box.x + FILE_CARD.inset;
+  const right = box.x + box.width - FILE_CARD.inset;
+  const rowY = (index: number): number =>
+    box.y + FILE_CARD.heading + index * FILE_CARD.row + FILE_CARD.row / 2;
+  const listed =
+    rows.length === 0
+      ? [svg("text", { class: "file", x: left, y: rowY(0) }, "ファイルなし（計画のみ）")]
+      : rows.flatMap((row, index) => [
+          svg("text", { class: "file", x: left, y: rowY(index) }, row.file),
+          row.tested === null
+            ? null
+            : svg(
+                "text",
+                { class: row.tested ? "tested" : "untested", x: right, y: rowY(index) },
+                row.tested ? "テスト済み" : "未テスト",
+              ),
+        ]);
+  return svg(
+    "g",
+    { class: "files", "data-id": id },
+    svg("rect", { class: "card", ...box, rx: 8 }),
+    svg(
+      "text",
+      { class: "heading", x: left, y: box.y + FILE_CARD.heading / 2 + 2 },
+      `${id} のファイル`,
+    ),
+    ...listed,
+    svg("title", {}, "ダブルクリックか Escape で閉じます"),
+  );
+}
+
 function swatch(row: ToneRow): SVGSVGElement {
   return svg(
     "svg",
@@ -453,8 +529,9 @@ function chip(row: ToneRow): HTMLElement {
 }
 
 function legend(): Node[] {
-  const sample = (look: "flow" | "dep" | "trail", text: string): HTMLElement =>
-    html(
+  const sample = (look: Look, text: string): HTMLElement => {
+    const color = LINE_COLORS[look];
+    return html(
       "span",
       { class: "chip" },
       svg(
@@ -470,15 +547,17 @@ function legend(): Node[] {
           class: "stroke",
           d: "M 2 6 L 30 6",
           "marker-end": "url(#arrow)",
-          ...(look === "trail" ? { stroke: DANGER.stroke } : {}),
+          ...(color === null ? {} : { stroke: color }),
         }),
       ),
       text,
     );
+  };
   return [
     html("strong", {}, "凡例"),
     ...TONES.map(chip),
     sample("flow", "遷移"),
+    sample("observed", `${DRIFT.label}（コードにだけある遷移）`),
     sample("dep", "依存"),
     sample("trail", "反例の経路"),
   ];
@@ -617,6 +696,11 @@ function panelOf(state: ViewState, commands: Commands): Content[] {
         { class: "hint" },
         "箱はドラッグで動かせます。背景のドラッグで画面を動かし、ホイールで拡大と縮小をします。",
       ),
+      html(
+        "p",
+        { class: "hint" },
+        "箱をダブルクリックすると中のファイルが開きます。もう一度ダブルクリックするか Escape で閉じます。",
+      ),
     ];
   }
   return [
@@ -643,7 +727,12 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
   const { status } = node;
   const touching = node.violations.flatMap((id) => graph.properties.filter((p) => p.id === id));
   const live = touching.filter(isLiveViolation);
-  const stale = touching.length - live.length;
+  const guardOnly = touching.filter(isGuardOnly).length;
+  const stale = touching.length - live.length - guardOnly;
+  const notes = [
+    ...(stale === 0 ? [] : [`古いモデルに対する結果 ${stale} 件`]),
+    ...(guardOnly === 0 ? [] : [`ガードを無視したときだけの経路 ${guardOnly} 件`]),
+  ];
   return [
     node.desc === null ? null : html("p", {}, node.desc),
     status.changedSinceReview
@@ -660,6 +749,8 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
           ? ["なし（計画のみ）"]
           : node.files.map((file) => html("div", { class: "mono" }, file))),
       ),
+      html("dt", {}, "グループ"),
+      html("dd", {}, node.group ?? "なし"),
       html("dt", {}, "最終変更"),
       html("dd", {}, formatTime(node.lastChangedAt)),
       html("dt", {}, "テスト"),
@@ -670,7 +761,7 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
       html(
         "dd",
         {},
-        `${live.length === 0 ? "違反なし" : `違反 ${live.length} 件`}${stale === 0 ? "" : `（古いモデルに対する結果 ${stale} 件）`}`,
+        `${live.length === 0 ? "違反なし" : `違反 ${live.length} 件`}${notes.length === 0 ? "" : `（${notes.join("、")}）`}`,
       ),
       html("dt", {}, "証明"),
       html(
@@ -687,6 +778,7 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
         ? button("承認を取り消す", () => commands.revoke(node))
         : null,
     ),
+    ...driftOf(state, graph, node, commands),
     ...generateOf("指示を生成", state, graph, [node.id], commands),
     ...section(
       "仕様",
@@ -729,6 +821,39 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
   ].filter((child) => child !== null);
 }
 
+const DRIFT_FIXES: readonly (readonly [DriftFix, string])[] = [
+  ["remove-call", "宣言が正しい（呼び出しを消す）"],
+  ["add-next", "コードが正しい（@state-next を足す）"],
+];
+
+/** The node's calls no `@state-next` declares, each with the person's choice of the side that is right. */
+function driftOf(state: ViewState, graph: Graph, node: StateNode, commands: Commands): Content[] {
+  const drifts = driftsFrom(graph, node.id);
+  if (drifts.length === 0) return [];
+  return section(
+    "コードにだけある遷移（乖離）",
+    ...drifts.map((drift, index) => {
+      const chosen = fixOf(state.decisions, drift);
+      const choices = DRIFT_FIXES.map(([fix, text]) => {
+        const input = html("input", { type: "radio", name: `drift-${index}`, value: fix });
+        input.checked = chosen === fix;
+        input.addEventListener("change", () => {
+          if (input.checked) {
+            commands.dispatch({ kind: "decide-drift", from: drift.from, to: drift.to, fix });
+          }
+        });
+        return html("label", {}, input, text);
+      });
+      return html(
+        "div",
+        { class: "drift" },
+        html("p", {}, `→ ${drift.to} `, html("span", { class: "mono" }, drift.via.join("、"))),
+        ...choices,
+      );
+    }),
+  );
+}
+
 /** One button per kind that applies to at least one of `ids`, then the instruction made last. */
 function generateOf(
   title: string,
@@ -738,23 +863,29 @@ function generateOf(
   commands: Commands,
 ): Content[] {
   const ready = state.templates !== null;
-  const buttons = PROMPT_KINDS.map((kind) => ({
+  const kinds = PROMPT_KINDS.map((kind) => ({
     kind,
     count: promptTargets(kind, graph, ids).length,
-  }))
-    .filter(({ count }) => ids.length > 1 || count > 0)
-    .map(({ kind, count }) =>
-      button(
-        ids.length > 1 ? `${promptLabel(kind)}（${count}/${ids.length}）` : promptLabel(kind),
-        () => commands.generate(kind),
-        count === 0 || !ready,
-      ),
-    );
+    blocker: promptBlocker(kind, state, ids),
+  })).filter(({ count }) => ids.length > 1 || count > 0);
+  const buttons = kinds.map(({ kind, count, blocker }) =>
+    button(
+      ids.length > 1 ? `${promptLabel(kind)}（${count}/${ids.length}）` : promptLabel(kind),
+      () => commands.generate(kind),
+      count === 0 || !ready || blocker !== null,
+    ),
+  );
+  const waiting = kinds.flatMap(({ kind, count, blocker }) =>
+    count === 0 || blocker === null
+      ? []
+      : [html("p", { class: "hint" }, `${promptLabel(kind)}: ${blocker}`)],
+  );
   return [
     ...section(
       title,
       ready ? null : html("p", { class: "hint" }, "テンプレートを読み込み中…"),
       html("div", { class: "actions" }, ...buttons),
+      ...waiting,
     ),
     ...(state.prompt === null ? [] : promptOf(state.prompt, commands)),
   ];
@@ -949,6 +1080,8 @@ function propertyOf(property: PropertyResult, state: ViewState, commands: Comman
       html("p", { class: "stale" }, "古いモデルに対する結果（今のモデルでは確かめていません）"),
     ];
   }
+  const tlc = tlcLines(property).map((line) => html("p", { class: "checker" }, line));
+  if (isGuardOnly(property)) return [title, checker, ...tlc];
   const replay = replayOf(state);
   const playing = replay?.property.id === property.id ? replay : null;
   const traces = property.counterexamples.map((trace, index) => {
@@ -961,7 +1094,7 @@ function propertyOf(property: PropertyResult, state: ViewState, commands: Comman
     );
     return chosen ? html("div", {}, pick, ...replayControls(playing, commands)) : pick;
   });
-  return [title, checker, html("div", { class: "actions" }, ...traces)];
+  return [title, checker, ...tlc, html("div", { class: "actions" }, ...traces)];
 }
 
 function replayControls(replay: Replay, commands: Commands): Content[] {

@@ -1,15 +1,8 @@
-import type {
-  Counterexample,
-  FlowEdge,
-  Graph,
-  GuardExpr,
-  PropertyResult,
-  StateName,
-  StateNode,
-  Value,
-} from "../core/types.js";
-import { isLiveViolation, selectedIds } from "./facts.js";
-import { type Box, boxAt, labelBoxes, overlaps, type Point, route } from "./layout.js";
+import { edgeLabel } from "../core/expr.js";
+import type { Counterexample, Graph, PropertyResult, StateName, StateNode } from "../core/types.js";
+import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
+import { selectedIds } from "./facts.js";
+import { type Box, boxAt, labelBoxes, labelWidth, overlaps, type Point, route } from "./layout.js";
 import { replayOf, type ViewState } from "./state.js";
 
 export type Tone =
@@ -147,8 +140,8 @@ export function rowOf(tone: Tone): ToneRow {
 }
 
 /**
- * Condition 4. A violation counts only while its property is `violated` and not `staleModel`.
- * `proof == "failed"` is `danger` too.
+ * Condition 4. A violation counts only while `isLiveViolation` says so: not on an older model, and
+ * not a path TLC cleared. `proof == "failed"` is `danger` too.
  */
 export function toneOf(node: StateNode, properties: readonly PropertyResult[]): Tone {
   const failing = node.violations.some((id) =>
@@ -211,64 +204,56 @@ export function stepEvent(index: number, event: string | null): string {
   return index === 0 ? "（初期状態）" : "（イベントなし）";
 }
 
+/**
+ * What TLC said about a quick-check violation, for the detail panel; empty without a verdict. A path
+ * TLC cleared on this model is listed as open only with guards ignored, so it is never replayed red.
+ */
+export function tlcLines(property: PropertyResult): readonly string[] {
+  const { tlc } = property;
+  if (tlc === undefined) return [];
+  const count = tlc.statesExplored === null ? "" : `、${tlc.statesExplored} 状態`;
+  if (tlc.staleModel === true) {
+    return [`全探索（TLC）: ${TLC_WORDS[tlc.result]}（古いモデルに対する結果${count}）`];
+  }
+  if (isGuardOnly(property)) {
+    return [
+      `全探索（TLC${count}）では成立。ガードどおりに動くと、この経路は通れません`,
+      ...property.counterexamples.map(
+        (trace) =>
+          `ガードを無視したときだけの経路: ${trace.steps.map((step) => step.state).join(" → ")}`,
+      ),
+    ];
+  }
+  return [`全探索（TLC${count}）: ${TLC_WORDS[tlc.result]}`];
+}
+
+const TLC_WORDS = { ok: "成立", violated: "違反", error: "エラーで判定できませんでした" } as const;
+
 function compare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
-}
-
-/** `on:` event, then `[guard]` (SPEC §12.1). Printed from the AST with SPEC §5.1's operators. */
-export function edgeLabel(edge: FlowEdge): string {
-  const guard = edge.guard === null ? null : `[${printGuard(edge.guard)}]`;
-  return [edge.event, guard].filter((part) => part !== null).join(" ");
-}
-
-/** `authed` for `authed == TRUE`, which is how the parser reads a bare variable. */
-function isBare(expr: GuardExpr): boolean {
-  return expr.kind === "cmp" && expr.op === "==" && expr.value.kind === "bool" && expr.value.value;
-}
-
-/** Precedence `||` < `&&` < `!`, so parentheses go only round an `||` in an `&&` and a compound under `!`. */
-function printGuard(expr: GuardExpr): string {
-  switch (expr.kind) {
-    case "cmp":
-      return isBare(expr) ? expr.name : `${expr.name}${expr.op}${printValue(expr.value)}`;
-    case "not": {
-      const inner = printGuard(expr.operand);
-      return expr.operand.kind === "not" || isBare(expr.operand) ? `!${inner}` : `!(${inner})`;
-    }
-    case "and":
-      return expr.operands
-        .map((operand) =>
-          operand.kind === "or" ? `(${printGuard(operand)})` : printGuard(operand),
-        )
-        .join(" && ");
-    case "or":
-      return expr.operands.map(printGuard).join(" || ");
-    default: {
-      const _exhaustive: never = expr;
-      return _exhaustive;
-    }
-  }
-}
-
-function printValue(value: Value): string {
-  switch (value.kind) {
-    case "bool":
-      return value.value ? "TRUE" : "FALSE";
-    case "int":
-      return String(value.value);
-    case "member":
-      return value.name;
-    default: {
-      const _exhaustive: never = value;
-      return _exhaustive;
-    }
-  }
 }
 
 /** A box being dragged and where it is now (world coordinates, unsnapped). */
 export type Drag = { readonly id: StateName; readonly at: Point };
 
+/**
+ * SPEC §7.3's line kinds. A declared flow is black whether or not a call was observed, because a
+ * missing call is no evidence (docs/specs/drift.md); `observed` is a call no `@state-next` declares.
+ */
+export type Look = "flow" | "dep" | "observed" | "trail";
+
+/** How a drift line looks: orange, labelled 宣言なし (SPEC §7.3). */
+export const DRIFT = { stroke: "#ef6c00", label: "宣言なし" } as const;
+
 export type SceneItem =
+  | {
+      /** SPEC §12.1: the boxes of one `@state-group`, framed by their bounding box, not by dagre. */
+      readonly kind: "group";
+      readonly name: string;
+      readonly box: Box;
+      /** Where the name is written, inside the frame's top-left corner, above every member. */
+      readonly label: Box;
+    }
   | {
       readonly kind: "box";
       readonly id: StateName;
@@ -285,7 +270,7 @@ export type SceneItem =
     }
   | {
       readonly kind: "line";
-      readonly look: "flow" | "dep" | "trail";
+      readonly look: Look;
       readonly points: readonly Point[];
       /**
        * Parallel flow edges between one pair are one line; their labels join with " / ". `box` is
@@ -300,17 +285,33 @@ export type SceneItem =
       readonly box: Box;
       /** "step 2/3", "event: forgot", "authed = FALSE", "retries = 0", "↺ 繰り返し" */
       readonly lines: readonly string[];
+    }
+  | {
+      /**
+       * SPEC §12.1's zoom to file granularity: the node's files, laid over the canvas from the box's
+       * top-left corner, so no other box moves.
+       */
+      readonly kind: "files";
+      readonly id: StateName;
+      readonly box: Box;
+      readonly rows: readonly FileRow[];
     };
+
+/**
+ * `tested` is null where graph.json cannot tell: it records one `tested` per node, true only when
+ * every file of the node is tested.
+ */
+export type FileRow = { readonly file: string; readonly tested: boolean | null };
 
 /**
  * The canvas as data. `live` is everything that moves with the dragged box (the box, its edges, trail
  * segments and callout touching it); `base` is the rest. With no drag, `live` is empty. Each list is
- * in paint order: dep lines, flow lines, trail, boxes, callout.
+ * in paint order: group frames, dep lines, flow lines, drift lines, trail, boxes, callout, files.
  */
 export type Scene = {
   readonly base: readonly SceneItem[];
   readonly live: readonly SceneItem[];
-  /** Bounding box of the drawn boxes, for the first fit-to-view. null for an empty graph. */
+  /** Bounding box of the drawn boxes and frames, for the first fit-to-view. null for an empty graph. */
   readonly bounds: Box | null;
 };
 
@@ -380,10 +381,15 @@ export function sceneOf(
   const replay = replayOf(state);
   const selected = new Set(selectedIds(state.selection));
   const items: { readonly item: SceneItem; readonly touches: readonly StateName[] }[] = [];
-  /** What a label may not cover: every node, then each label as it is placed. */
-  const taken = graph.nodes.flatMap(({ id }) => boxOf(id) ?? []);
+  const frames = framesOf(graph, boxOf);
+  /** What a label may not cover: every node and group name, then each label as it is placed. */
+  const taken = [
+    ...graph.nodes.flatMap(({ id }) => boxOf(id) ?? []),
+    ...frames.map(({ item }) => item.label),
+  ];
+  items.push(...frames);
 
-  const lines = (look: "flow" | "dep" | "trail", pairs: readonly Pair[], lane: number): void => {
+  const lines = (look: Look, pairs: readonly Pair[], lane: number): void => {
     for (const { from, to, labels } of pairs) {
       const a = boxOf(from);
       const b = boxOf(to);
@@ -404,6 +410,14 @@ export function sceneOf(
   lines(
     "flow",
     pairsOf(graph.edges.flatMap((e) => (e.type === "flow" ? [{ ...e, label: edgeLabel(e) }] : []))),
+    0,
+  );
+  // Lane 0 is free: scan makes an observed edge only for a pair no flow declares.
+  lines(
+    "observed",
+    pairsOf(
+      graph.edges.flatMap((e) => (e.type === "observed" ? [{ ...e, label: DRIFT.label }] : [])),
+    ),
     0,
   );
   if (replay !== null) lines("trail", pairsOf(trailOf(replay.trace)), 0);
@@ -448,9 +462,17 @@ export function sceneOf(
     });
   }
 
+  const zoomed = graph.nodes.find((node) => node.id === state.zoom);
+  const corner = zoomed === undefined ? undefined : boxOf(zoomed.id);
+  if (zoomed !== undefined && corner !== undefined) {
+    items.push({ item: filesOf(zoomed, corner), touches: [zoomed.id] });
+  }
+
   const moving = (touches: readonly StateName[]): boolean =>
     drag !== null && touches.includes(drag.id);
-  const boxes = items.flatMap(({ item }) => (item.kind === "box" ? [item.box] : []));
+  const boxes = items.flatMap(({ item }) =>
+    item.kind === "box" || item.kind === "group" ? [item.box] : [],
+  );
   return {
     base: items.filter(({ touches }) => !moving(touches)).map(({ item }) => item),
     live: items.filter(({ touches }) => moving(touches)).map(({ item }) => item),
@@ -470,6 +492,70 @@ function placeLabel(
     boxes[0] ??
     boxAt({ x: 0, y: 0 });
   return { text, box };
+}
+
+/** The rows of a file card: a heading, then one per file (or one saying there is none). */
+export const FILE_CARD = { heading: 30, row: 20, bottom: 10, inset: 12 } as const;
+const TESTED_WORD = "テスト済み";
+
+/** The open files of `node`, over its box: at least as large as the box, wide enough for each row. */
+function filesOf(node: StateNode, corner: Box): Extract<SceneItem, { readonly kind: "files" }> {
+  const tested = node.status.tested ? true : node.files.length === 1 ? false : null;
+  const rows = node.files.map((file) => ({ file, tested }));
+  const widest = Math.max(
+    labelWidth(`${node.id} のファイル`),
+    ...rows.map(({ file }) => labelWidth(file) + FILE_CARD.inset + labelWidth(TESTED_WORD)),
+  );
+  const box = {
+    x: corner.x,
+    y: corner.y,
+    width: Math.max(corner.width, widest + 2 * FILE_CARD.inset),
+    height: Math.max(
+      corner.height,
+      FILE_CARD.heading + Math.max(rows.length, 1) * FILE_CARD.row + FILE_CARD.bottom,
+    ),
+  };
+  return { kind: "files", id: node.id, box, rows };
+}
+
+/** Air round a group's boxes, and the height of the row its name takes above them. */
+const FRAME_PAD = 16;
+const FRAME_NAME = 24;
+
+/**
+ * One frame per group with two or more drawn boxes, in name order. A group of one box would only
+ * double that box's border; its name is in the detail panel.
+ */
+function framesOf(
+  graph: Graph,
+  boxOf: (id: StateName) => Box | undefined,
+): readonly {
+  readonly item: Extract<SceneItem, { readonly kind: "group" }>;
+  readonly touches: readonly StateName[];
+}[] {
+  const members = new Map<string, { ids: StateName[]; boxes: Box[] }>();
+  for (const node of graph.nodes) {
+    const box = boxOf(node.id);
+    if (node.group === null || box === undefined) continue;
+    const group = members.get(node.group) ?? { ids: [], boxes: [] };
+    group.ids.push(node.id);
+    group.boxes.push(box);
+    members.set(node.group, group);
+  }
+  return [...members.entries()]
+    .sort(([a], [b]) => compare(a, b))
+    .flatMap(([name, { ids, boxes }]) => {
+      const around = boundsOf(boxes);
+      if (ids.length < 2 || around === null) return [];
+      const box = {
+        x: around.x - FRAME_PAD,
+        y: around.y - FRAME_PAD - FRAME_NAME,
+        width: around.width + 2 * FRAME_PAD,
+        height: around.height + 2 * FRAME_PAD + FRAME_NAME,
+      };
+      const label = { x: box.x + 6, y: box.y + 4, width: labelWidth(name), height: 18 };
+      return [{ item: { kind: "group", name, box, label }, touches: ids }];
+    });
 }
 
 function boundsOf(boxes: readonly Box[]): Box | null {

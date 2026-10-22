@@ -1,19 +1,29 @@
-import type { Graph, PropertyResult, StateName, StateNode } from "../core/types.js";
-import type { Selection } from "./state.js";
+import type { Drift, Graph, PropertyResult, StateName, StateNode } from "../core/types.js";
+import { isLiveViolation } from "../core/verdict.js";
+import type { DriftDecision, DriftFix, Selection } from "./state.js";
 
 // Reads of the graph and the selection that state.ts, view.ts, prompt.ts and render.ts share. It
-// imports types only: state.ts imports prompt.ts, so prompt.ts cannot import state.ts back.
+// imports no module of src/ui at run time: state.ts imports prompt.ts, so prompt.ts cannot import
+// state.ts back.
 
-/** SPEC §11: a TLC verdict on a model that has changed since the run marks no node. */
-export function isLiveViolation(property: PropertyResult): boolean {
-  return property.result === "violated" && property.staleModel !== true;
-}
-
-/** The properties the node's `violations` name that are violated on the current model, in file order. */
+/** The properties the node's `violations` name that are live violations, in file order. */
 export function liveViolations(graph: Graph, node: StateNode): readonly PropertyResult[] {
   return node.violations.flatMap((id) =>
     graph.properties.filter((property) => property.id === id && isLiveViolation(property)),
   );
+}
+
+/** The drifts a node's code makes: the node is where both the call and `@state-next` live. */
+export function driftsFrom(graph: Graph, id: StateName): readonly Drift[] {
+  return graph.drift.filter((drift) => drift.from === id);
+}
+
+/** The side the person chose for this drift, or null before they choose. */
+export function fixOf(
+  decisions: readonly DriftDecision[],
+  drift: Pick<Drift, "from" | "to">,
+): DriftFix | null {
+  return decisions.find((d) => d.from === drift.from && d.to === drift.to)?.fix ?? null;
 }
 
 /** The selected node ids, in the order they were picked. */

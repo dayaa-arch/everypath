@@ -9,6 +9,7 @@
   --ink: #222222;
   --muted: #6b6b6b;
   --rule: #d4d4d4;
+  --group: #a8a8a8;
   --grid-minor: #ececec;
   --grid-major: #d9d9d9;
   --paper: #ffffff;
@@ -95,6 +96,8 @@ label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
 .grid-minor { fill: none; stroke: var(--grid-minor); stroke-width: 1; }
 .grid-major { fill: none; stroke: var(--grid-major); stroke-width: 1; }
 
+.group .frame { fill: var(--chrome); fill-opacity: 0.6; stroke: var(--group); stroke-width: 1; stroke-dasharray: 6 4; }
+.group .name { font-size: 13px; fill: var(--muted); dominant-baseline: middle; }
 .box { cursor: pointer; }
 .box .title { font-size: 15px; font-weight: 600; text-anchor: middle; }
 .box .caption { font-size: 13px; text-anchor: middle; }
@@ -109,6 +112,7 @@ label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
 .line .hit { stroke: transparent; stroke-width: 14; }
 .line.flow .stroke { stroke: var(--ink); stroke-width: 1.5; }
 .line.dep .stroke { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.7; }
+.line.observed .stroke { stroke-width: 2; }
 .line.trail .stroke { stroke-width: 3; stroke-dasharray: 8 6; }
 .line .label {
   font-size: 13px;
@@ -123,6 +127,13 @@ label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
 #canvas.labels-on-hover .line .label { opacity: 0; }
 #canvas.labels-on-hover .line:hover .label { opacity: 1; }
 .callout rect { fill: var(--paper); stroke: var(--ink); stroke-width: 1; }
+.files { cursor: pointer; }
+.files .card { fill: var(--paper); stroke: var(--ink); stroke-width: 1.5; filter: drop-shadow(0 2px 6px rgb(0 0 0 / 0.18)); }
+.files text { font-size: 13px; dominant-baseline: middle; fill: var(--ink); }
+.files .heading { font-weight: 600; }
+.files .file { font-family: var(--mono); }
+.files .tested { fill: var(--muted); text-anchor: end; }
+.files .untested { font-weight: 600; text-anchor: end; }
 .callout text { font: 13px/1 var(--mono); fill: var(--ink); }
 
 #panel {
@@ -147,6 +158,7 @@ label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
 #panel .steps { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
 #panel .vars { font-family: var(--mono); font-size: 13px; }
 #panel .tabs { display: flex; gap: 6px; margin: 10px 0 4px; }
+#panel .drift { display: flex; flex-direction: column; gap: 2px; margin: 6px 0 10px; }
 #panel textarea {
   display: block;
   width: 100%;

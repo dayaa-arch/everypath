@@ -38,6 +38,8 @@ const TLC_KINDS = ["invariant", "leads-to", "never-reach"] as const; // generate
 - fixture は手書きの試作モデルを TLC 2.19 で動かした出力。生成した `Model.tla` とはコメント以外の全行が一致する（`diff` で確認）。`-workers auto` の TLC は最短の反例を返すとは限らず、この fixture の反例も 7 ステップある。同じ理由と見られる失敗が、変更前の `main` にもある。`test/server.test.ts` の実物 TLC のテストが、2 回走らせたうち 1 回、反例 `ログイン → ログイン → パスワードリセット → Home` で落ちた。ここでは直さない。
 - 簡易検査の `pending` を返す種類が無くなり、`src/cli.ts` の「簡易検査はまだありません」の分岐には届かなくなった。触れるファイルの外なので残す。
 
+後の変更（`docs/specs/viewer-drift.md`）。同じモデルに対する TLC の `ok` が付いた簡易検査の違反は、`check` の終了コードに数えず、ビューアでも赤くしない。`graph.json` の `result` と `counterexamples` は簡易検査のまま。届かない分岐は消した。
+
 ## 非目標
 - CLI とビューアで `tlc` 欄を表示すること。この変更で触れるファイルの外にあるので、`graph.json` に載せるところまでにする
 - 簡易検査の `violated` を TLC の `ok` で終了コードから外すこと

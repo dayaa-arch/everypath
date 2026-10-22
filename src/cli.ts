@@ -18,7 +18,14 @@ import {
   summarizeTlc,
   type TlcSummary,
 } from "./core/tla/run.js";
-import type { Counterexample, Graph, PropertyResult, ScanWarning } from "./core/types.js";
+import type {
+  Counterexample,
+  Graph,
+  PropertyResult,
+  ScanWarning,
+  TlcVerdict,
+} from "./core/types.js";
+import { isGuardOnly, isLiveViolation } from "./core/verdict.js";
 import { serializeGraph } from "./core/workspace.js";
 import {
   findServer,
@@ -270,8 +277,9 @@ function describeWarning({ file, line, message }: ScanWarning): string {
 }
 
 function summarize(graph: Graph, by: Scanned["by"]): string {
-  const flows = graph.edges.filter((edge) => edge.type === "flow").length;
-  const counts = `状態 ${graph.nodes.length}、遷移 ${flows}、依存 ${graph.edges.length - flows}、警告 ${graph.warnings.length}`;
+  const count = (type: Graph["edges"][number]["type"]): number =>
+    graph.edges.filter((edge) => edge.type === type).length;
+  const counts = `状態 ${graph.nodes.length}、遷移 ${count("flow")}、依存 ${count("dep")}、乖離 ${graph.drift.length}、警告 ${graph.warnings.length}`;
   const wrote = by === "cli" ? "" : "起動中の everypath serve が ";
   return `スキャン完了: ${counts}（${wrote}.everypath/graph.json に書きました）`;
 }
@@ -306,23 +314,20 @@ function describeSteps({ steps, loopStart }: Counterexample): string[] {
 }
 
 const STALE = "古いモデルに対する結果";
+const GUARD_ONLY = "ガードを無視したときだけの経路";
 
-function describeProperty({
-  id,
-  kind,
-  description,
-  result,
-  checkedBy,
-  counterexamples,
-  staleModel,
-}: PropertyResult): string[] {
-  const title = `${STATUS_WORDS[result]} ${id} [${kind}]${description === null ? "" : ` ${description}`}`;
-  if (result === "pending") {
-    const reason =
-      checkedBy === "tlc"
-        ? "TLC の検査待ちです（everypath check --tlc）"
-        : `${kind} の簡易検査はまだありません`;
-    return [title, `  ${reason}`];
+/** A path TLC cleared on this model is counted as TLC decided it. */
+function wordOf(property: PropertyResult): string {
+  return STATUS_WORDS[isGuardOnly(property) ? "ok" : property.result];
+}
+
+function describeProperty(property: PropertyResult): string[] {
+  const { id, kind, description, result, checkedBy, counterexamples, staleModel, tlc } = property;
+  const title = `${wordOf(property)} ${id} [${kind}]${description === null ? "" : ` ${description}`}`;
+  if (result === "pending") return [title, "  TLC の検査待ちです（everypath check --tlc）"];
+  if (isGuardOnly(property)) {
+    const paths = counterexamples.map((example) => `  ${GUARD_ONLY}: ${formatPath(example)}`);
+    return [title, ...paths, ...describeTlc(tlc)];
   }
   const describe = (example: Counterexample): string[] =>
     checkedBy === "bfs" ? [`  ${formatPath(example)}`] : describeSteps(example);
@@ -331,22 +336,45 @@ function describeProperty({
         `  ${STALE}です。TLC の実行後にモデルが変わったため、終了コードに数えません（everypath check --tlc で検査し直せます）`,
       ]
     : [];
-  return [title, ...stale, ...counterexamples.flatMap(describe)];
+  return [title, ...stale, ...counterexamples.flatMap(describe), ...describeTlc(tlc)];
+}
+
+/** What TLC said beside a violation the quick check found. Only a verdict on this model counts. */
+function describeTlc(tlc: TlcVerdict | undefined): string[] {
+  if (tlc === undefined) return [];
+  const states = tlc.statesExplored === null ? [] : [`${tlc.statesExplored} 状態`];
+  if (tlc.staleModel) {
+    const about = [STALE, ...states].join("、");
+    return [`  TLC: ${STATUS_WORDS[tlc.result]}（${about}。終了コードは簡易検査のまま数えます）`];
+  }
+  const counted = states.length === 0 ? "" : `（${states.join("")}）`;
+  switch (tlc.result) {
+    case "ok":
+      return [
+        `  TLC: 成立${counted}。ガードどおりに動くとこの経路は通れないので、終了コードに数えません`,
+      ];
+    case "violated":
+      return [`  TLC: 違反${counted}`, ...tlc.counterexamples.flatMap(describeSteps)];
+    case "error":
+      return ["  TLC: エラー（判定できませんでした）"];
+  }
 }
 
 function summarizeChecks(
   properties: Graph["properties"],
   warnings: readonly ScanWarning[],
 ): string {
-  const counts = Object.entries(STATUS_WORDS).flatMap(([result, word]) => {
-    const count = properties.filter((p) => p.result === result).length;
+  const counts = Object.values(STATUS_WORDS).flatMap((word) => {
+    const count = properties.filter((p) => wordOf(p) === word).length;
     return count > 0 ? [`${word} ${count}`] : [];
   });
   const rejected = warnings.filter((warning) => warning.file === PROPERTIES_FILE).length;
   const stale = properties.filter((p) => p.staleModel).length;
+  const guardOnly = properties.filter(isGuardOnly).length;
   const notes = [
     ...(rejected > 0 ? [`${PROPERTIES_FILE} の警告 ${rejected} 件`] : []),
     ...(stale > 0 ? [`${STALE} ${stale} 件`] : []),
+    ...(guardOnly > 0 ? [`${GUARD_ONLY} ${guardOnly} 件`] : []),
   ];
   const note = notes.length > 0 ? `（${notes.join("、")}）` : "";
   return `性質 ${properties.length} 件: ${counts.join("、")}${note}`;
@@ -509,7 +537,8 @@ async function runScan(
  * silently. Under `--tlc` so does a definition the model left out, and any TLC error, which includes
  * a property TLC could not decide, and a variable out of its range. With `--tlc` but no Java or jar
  * the quick check alone decides the exit code. The scan reads TLC's record, so a plain check also
- * counts the last run's violations, unless the model has changed since.
+ * counts the last run's violations, and leaves out the quick-check paths that run cleared, unless
+ * the model has changed since.
  */
 async function runCheck(
   root: string,
@@ -528,12 +557,21 @@ async function runCheck(
   ];
   const stderr = warnings.map(describeWarning);
   const failure = tlcFailure(summary);
+  // A stored result.json is not evidence: a committed or stale file could hide a real path. Only a
+  // TLC run inside this check may clear a quick-check violation from the exit code.
+  const clearedNow = summary?.kind === "checked";
+  const storedOnly = clearedNow ? [] : graph.properties.filter(isGuardOnly);
+  if (storedOnly.length > 0) {
+    stderr.push(
+      `ガードを無視したときだけの経路が ${storedOnly.length} 件ありますが、この実行では TLC を走らせていないので終了コードに数えます（everypath check --tlc で確かめられます）`,
+    );
+  }
   if (summary?.kind === "missing") stderr.push(...summary.guide);
   if (stderr.length > 0) process.stderr.write(`${stderr.join("\n")}\n`);
   process.stdout.write(`${reportChecks(graph, warnings, failure ?? []).join("\n")}\n`);
 
   const rejected = warnings.some((warning) => warning.file === PROPERTIES_FILE);
-  const violated = graph.properties.some((p) => p.result === "violated" && !p.staleModel);
+  const violated = graph.properties.some(isLiveViolation) || storedOnly.length > 0;
   return rejected || violated || failure !== null ? 1 : 0;
 }
 

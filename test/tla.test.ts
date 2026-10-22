@@ -952,7 +952,7 @@ describe("tla: a stored verdict only fills what the quick check left pending", (
     assert.deepEqual(violatedAt(graph, "no-unauth-home"), []);
   });
 
-  it("cannot turn a violation the quick check found into ok through a forged result.json", async () => {
+  it("keeps the quick check's result, path and marks in graph.json whatever a forged result.json says", async () => {
     const root = await exampleRepo();
     await addProperty(root, noLock);
     const java = await fakeJava(await allOk());
@@ -968,12 +968,16 @@ describe("tla: a stored verdict only fills what the quick check left pending", (
       JSON.stringify({ ...stored, properties: forged }),
     );
 
-    const plain = runCli(["check", root]);
+    runCli(["check", root]);
 
-    assert.equal(plain.status, 1, plain.stdout);
     const graph = await readGraph(root);
     const lock = resultOf(graph, "no-lock");
     assert.deepEqual([lock.result, lock.checkedBy], ["violated", "bfs"]);
+    assert.deepEqual(
+      lock.counterexamples.map((c) => [...c.path]),
+      [["ログイン", "ロック"]],
+    );
+    assert.ok(violatedAt(graph, "no-lock").includes("ロック"), "ロック carries the violation");
     const home = resultOf(graph, "no-unauth-home");
     assert.deepEqual([home.result, home.checkedBy], ["ok", "tlc"]);
   });
@@ -1162,18 +1166,19 @@ describe("tla: TLC's verdict beside a quick-check violation", () => {
     assert.deepEqual([stored?.checkedBy, stored?.result], ["both", "violated"]);
   });
 
-  it("keeps the violation and its exit code when TLC finds the path open only with guards ignored", async () => {
+  it("keeps the violation in graph.json but not in the exit code when TLC finds the path open only with guards ignored", async () => {
     const root = await exampleWith(NO_LOCK, {
       id: "no-lock-state",
       kind: "invariant",
       expr: "state != ロック",
     });
     const java = await fakeJava(await allOk());
-    runCli(["check", "--tlc", root], root, java.env);
+    const checked = runCli(["check", "--tlc", root], root, java.env);
 
     const plain = runCli(["check", root]);
 
-    assert.equal(plain.status, 1, plain.stdout);
+    assert.equal(checked.status, 0, checked.stdout);
+    assert.equal(plain.status, 1, "a stored result.json alone never clears the exit code");
     const graph = await readGraph(root);
     for (const id of ["no-lock", "no-lock-state"]) {
       const property = resultOf(graph, id);

@@ -37,7 +37,7 @@ declare function resolveRoute(table: RouteTable, path: string): StateName | null
 
 実装中に決めたこと。観測だけの遷移の `type` を `flow` にしないのは、`properties.ts` と `tla/` を変えずにモデルから外すため（どちらも `type: "flow"` で絞っている）。自分へ戻る呼び出し（`/reset` の画面が `/reset` へ）も、宣言が無ければ乖離にする。flow が自己ループを許すのと揃えた。行き先の分からないパスと曖昧なパターンは警告にしない。外部リンクや他チームの画面への遷移で警告が埋まるため。パターンは `:名前` が 1 セグメントに当たるものだけで、`*` は受け付けない。コメント行は行頭が `//`・`/*`・`*` のものだけを飛ばし、行末のコメントは読む。`href` は `href=` と続けて書いた属性だけで、`location.href = "/x"` や `const href = "/x"` は読まない。テストファイルと `@state-hidden` のファイルは、ルートも呼び出しも出さない。履歴（`history.jsonl`）は観測のエッジを持たない。ビューアの `parseHistory` と前回の graph.json を読む `readWorkspace` が flow と dep の参照しか受けないため。乖離を生んだ・消したファイルの変化は `updated` に残る。`stats.edges` は観測のエッジも数える（`edges.length` と一致させる）。`example/src/auth/reset.ts` のタグは見出しの下の空行に置き、README が指す 4 行目と 42 行目を動かさない。`skill/SKILL.md` は規則 1 に `@state-route` を足し、`SPEC.md` §14.1 と同じ 11 項目を保つ。型に必須の項目が増えたので `test/helpers/ui-fixtures.ts` の `flow()` と `graph()` に `declared`・`observed`・`drift` を足した。
 
-残る穴。`src/cli.ts` の要約は `依存` を「全エッジ − flow」で数えるので、乖離があると観測のエッジの数だけ `依存` が多く出る（例: 乖離 1 件の example のコピーで「依存 6」）。直すのは `src/cli.ts` の担当で、`type === "dep"` で数え、乖離の件数を足す。
+残る穴。`src/cli.ts` の要約は `依存` を「全エッジ − flow」で数えるので、乖離があると観測のエッジの数だけ `依存` が多く出る（例: 乖離 1 件の example のコピーで「依存 6」）。直すのは `src/cli.ts` の担当で、`type === "dep"` で数え、乖離の件数を足す。`docs/specs/viewer-drift.md` で直した（「依存 5、乖離 1」）。
 
 ## 非目標
 - Next.js の `pages/`・`app/` や Express の `app.get('/x')` からのルート推定。`SPEC.md` §17.1 の推奨どおりタグ必須で始め、フレームワーク検出は後で足す
