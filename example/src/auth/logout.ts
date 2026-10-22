@@ -3,6 +3,7 @@
 // @state-status wip
 // @state-desc ログアウトしたことを伝えてログイン画面に戻す
 // @state-next ログイン
+// @state-route /logout
 
 import { navigate, type Transition } from "../router.js";
 

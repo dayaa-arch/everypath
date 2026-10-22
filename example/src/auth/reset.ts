@@ -5,7 +5,7 @@
 // @state-next パスワードリセット on:code_invalid
 // @state-next ログイン on:cancel
 // @state-risk リセット完了後にセッションを発行しているか未確認
-
+// @state-route /reset
 import { findUser, saveUser } from "../db.js";
 import { navigate, type Transition } from "../router.js";
 

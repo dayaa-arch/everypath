@@ -3,6 +3,7 @@
 // @state-desc 登録メールの確認とログアウト
 // @state-next Home on:back
 // @state-next ログアウト on:logout set:authed=FALSE
+// @state-route /mypage
 
 import { clearSession, currentSession } from "./db.js";
 import { navigate, type Transition } from "./router.js";

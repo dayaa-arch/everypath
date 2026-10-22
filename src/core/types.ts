@@ -168,6 +168,9 @@ export type FlowEdge = {
   /** Everything after `@state-next`, as written. Two declarations with the same text are one edge. */
   readonly text: string;
   readonly via: readonly string[];
+  readonly declared: true;
+  /** A navigation call in the source's files reaches the target. `false` is no evidence of absence. */
+  readonly observed: boolean;
 };
 
 export type DepEdge = {
@@ -177,7 +180,29 @@ export type DepEdge = {
   readonly via: readonly string[];
 };
 
-export type Edge = FlowEdge | DepEdge;
+/**
+ * A navigation call no `@state-next` declares. A type of its own because the BFS and TLC lanes read
+ * `flow` edges only, so drift never enters the model: the model is the declaration.
+ */
+export type ObservedEdge = {
+  readonly type: "observed";
+  readonly from: StateName;
+  readonly to: StateName;
+  readonly declared: false;
+  readonly observed: true;
+  /** The files that make the call. */
+  readonly via: readonly string[];
+};
+
+export type Edge = FlowEdge | DepEdge | ObservedEdge;
+
+/** Where the code and the declaration disagree. A declared flow the code never takes is not drift. */
+export type Drift = {
+  readonly kind: "observed-not-declared";
+  readonly from: StateName;
+  readonly to: StateName;
+  readonly via: readonly string[];
+};
 
 export type GraphModel = {
   readonly initial: StateName | null;
@@ -292,6 +317,7 @@ export type Graph = {
   readonly edges: readonly Edge[];
   readonly model: GraphModel;
   readonly properties: readonly PropertyResult[];
+  readonly drift: readonly Drift[];
   readonly warnings: readonly ScanWarning[];
 };
 
@@ -311,9 +337,9 @@ export type ReviewFile = {
   readonly approvals: Readonly<Record<string, Approval>>;
 };
 
-/** An edge as `history.jsonl` identifies it. A dep has no event. */
+/** An edge as `history.jsonl` identifies it. A dep has no event. History records no drift. */
 export type EdgeRef = {
-  readonly type: Edge["type"];
+  readonly type: (FlowEdge | DepEdge)["type"];
   readonly from: StateName;
   readonly to: StateName;
   readonly event: EventName | null;
