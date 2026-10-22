@@ -25,6 +25,7 @@ import { listed } from "./listing.js";
 import { resolveNext, type VarTable } from "./model.js";
 import { proofOf } from "./proofs.js";
 import { checkProperties, violationsOf } from "./properties.js";
+import { conflictWarnings, type ReviewState, verdictOf } from "./review.js";
 import { navigationPaths, resolveRoute, routeTable } from "./routes.js";
 import { generateTla, type Unmodeled } from "./tla/generate.js";
 import { withTlcResults } from "./tla/result.js";
@@ -132,7 +133,7 @@ export async function scanWithHistory(
 /**
  * The server's rescan: `scanWithHistory`, except that a graph equal to `last` but for the times every
  * scan renews writes nothing and answers `null`. Nothing a viewer reads changed, so there is nothing
- * to send; the server's own writes to `review.json` and `result.json` end here when they come back.
+ * to send; the server's own approval records and `result.json` end here when they come back.
  */
 export async function rescanWithHistory(
   root: string,
@@ -196,7 +197,7 @@ function fold(
   const built = collectNodes(members, tree.nodes, hierarchy, {
     tested: testedFiles(facts),
     findings: groupBy([...workspace.findings].sort(compareFindings), (finding) => finding.file),
-    approvals: workspace.approvals,
+    review: workspace.review,
     proofs: workspace.proofs,
     previous: workspace.previous,
     at,
@@ -258,6 +259,7 @@ function fold(
       ...flat.ambiguous.map((id) => ambiguityWarning(id, hierarchy, tree.locate)),
       ...(tla.ok || tla.kind !== "too-large" ? [] : [tooLargeWarning(tla, tree.locate)]),
       ...checked.warnings,
+      ...nodes.flatMap((node) => conflictWarnings(node.id, node.review)),
     ].sort(compareWarnings),
   };
   return { graph, flat };
@@ -627,7 +629,7 @@ function testedFiles(facts: readonly FileFacts[]): ReadonlySet<string> {
 type NodeContext = {
   readonly tested: ReadonlySet<string>;
   readonly findings: ReadonlyMap<string, readonly Finding[]>;
-  readonly approvals: ReadonlyMap<string, string>;
+  readonly review: ReviewState;
   readonly proofs: ReadonlyMap<string, ProofEntry>;
   readonly previous: Previous | null;
   readonly at: string;
@@ -662,7 +664,7 @@ function buildNode(
   context: NodeContext,
 ): StateNode {
   const hash = sha1(files.map((file) => file.bytes));
-  const approved = context.approvals.get(id);
+  const verdict = verdictOf(context.review, id, hash);
   const findings = files.flatMap((file) => context.findings.get(file.path) ?? []);
   const before = context.previous?.nodes.get(id);
   const descriptions = files.flatMap((file) => file.notes.desc);
@@ -686,11 +688,12 @@ function buildNode(
       planned: files.length === 0 && !container,
       requireProof: files.some((file) => file.notes.requireProof),
       proof: proved.status,
-      reviewed: approved === hash,
-      changedSinceReview: approved !== undefined && approved !== hash,
+      reviewed: verdict.reviewed,
+      changedSinceReview: verdict.changedSinceReview,
     },
     spec: files.flatMap((file) => file.notes.specs),
     ...(proved.proof === null ? {} : { proof: proved.proof }),
+    ...(verdict.review === undefined ? {} : { review: verdict.review }),
     risks: files.flatMap((file) =>
       file.notes.risks.map((message) => ({ file: file.path, message })),
     ),

@@ -6,8 +6,8 @@ import {
   commitTlc,
   removeServeRecord,
   type ServeRecord,
-  writeApproval,
   writeLayout,
+  writeReviewChange,
   writeServeRecord,
 } from "../core/workspace.js";
 
@@ -110,13 +110,23 @@ export async function openWriter(
         if (isContainer(node)) return "container";
         if (job.hash !== null && job.hash !== node.hash) return "stale-hash";
         const at = new Date().toISOString();
-        await writeApproval(root, node.id, { hash: node.hash, at, by: reviewer, note: job.note });
+        const { hash, id } = node;
+        await writeReviewChange(root, {
+          kind: "approve",
+          node: id,
+          hash,
+          at,
+          by: reviewer,
+          note: job.note,
+        });
         return rescan("approve");
       }
-      case "revoke":
+      case "revoke": {
         if (nodeOf(job.id) === undefined) return "missing-node";
-        await writeApproval(root, job.id, null);
+        const at = new Date().toISOString();
+        await writeReviewChange(root, { kind: "revoke", node: job.id, at, by: reviewer });
         return rescan("revoke");
+      }
       case "layout":
         await writeLayout(root, job.body);
         return "done";

@@ -9,9 +9,12 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { hasFlow, serveUntilExit } from "../scripts/serve-client.js";
+import { parseStateName } from "../src/core/expr.js";
+import { foldReview, planChange } from "../src/core/review.js";
 import type { Graph } from "../src/core/types.js";
 import { flows, makeRepo, node, runCli, ts, writeFiles } from "./helpers/repo.js";
 import {
+  approvalOf,
   connect,
   GIT_USER,
   hasNode,
@@ -19,9 +22,9 @@ import {
   propertyOf,
   rawRequest,
   readOutput,
-  readReview,
   ready,
   request,
+  reviewFiles,
   reviewPath,
   serveEnv,
   serveRepo,
@@ -197,7 +200,7 @@ describe("serve: /events", () => {
 });
 
 describe("serve: review", () => {
-  it("writes the approval with hash, at and by, shows reviewed, flags a later edit and revokes", async () => {
+  it("records the approval with hash, at and by, shows reviewed, flags a later edit and revokes", async () => {
     const root = await makeRepo(small);
     const serve = await serveRepo(root);
     const events = await ready(serve);
@@ -206,23 +209,24 @@ describe("serve: review", () => {
     let since = events.received.length;
 
     const approved = await request(serve, "POST", reviewPath("Home"), {
-      body: { note: "仕様確認済み" },
+      body: { note: "仕様確認済み", by: "mallory" },
     });
     assert.ok(succeeded(approved), `${approved.status} ${approved.text}`);
     const reviewed = await events.graph((graph) => node(graph, "Home").status.reviewed, { since });
 
     assert.equal(node(reviewed.graph, "Home").hash, hash);
     assert.equal(node(reviewed.graph, "ログイン").status.reviewed, false);
-    const file = await readReview(root);
-    assert.equal(file.version, 1);
-    const entry = file.approvals.Home;
-    assert.ok(entry, "an approval for Home");
+    assert.equal((await reviewFiles(root)).length, 1);
+    const review = node(reviewed.graph, "Home").review;
+    assert.ok(review !== undefined && "approval" in review, "an approval for Home");
+    const { approval } = review;
     assert.deepEqual(
-      { hash: entry.hash, by: entry.by, note: entry.note },
+      { hash: approval.hash, by: approval.by, note: approval.note },
       { hash, by: GIT_USER, note: "仕様確認済み" },
+      "the body cannot name the approver",
     );
-    const at = Date.parse(entry.at);
-    assert.ok(at >= started - 2_000 && at <= Date.now() + 2_000, `at ${entry.at}`);
+    const at = Date.parse(approval.at);
+    assert.ok(at >= started - 2_000 && at <= Date.now() + 2_000, `at ${approval.at}`);
 
     since = events.received.length;
     await writeFile(join(root, "src", "home.ts"), `${HOME_SOURCE}// 変更\n`);
@@ -230,7 +234,7 @@ describe("serve: review", () => {
       since,
     });
     assert.equal(node(changed.graph, "Home").status.reviewed, false);
-    assert.equal((await readReview(root)).approvals.Home?.hash, hash);
+    assert.equal((await approvalOf(serve, "Home"))?.hash, hash);
 
     since = events.received.length;
     const revoked = await request(serve, "DELETE", reviewPath("Home"));
@@ -240,8 +244,8 @@ describe("serve: review", () => {
         !node(graph, "Home").status.changedSinceReview && !node(graph, "Home").status.reviewed,
       { since },
     );
-    assert.equal(node(cleared.graph, "Home").status.reviewed, false);
-    assert.equal((await readReview(root)).approvals.Home, undefined);
+    assert.equal("review" in node(cleared.graph, "Home"), false);
+    assert.equal((await reviewFiles(root)).length, 2, "a revocation is one more record");
   });
 
   it("answers 404 for a node that does not exist and records nothing", async () => {
@@ -251,7 +255,7 @@ describe("serve: review", () => {
     const reply = await request(serve, "POST", reviewPath("存在しない"), { body: { note: "x" } });
 
     assert.equal(reply.status, 404);
-    assert.deepEqual((await readReview(root)).approvals, {});
+    assert.deepEqual(await reviewFiles(root), []);
   });
 
   it("answers 400 for a body that is not {note} and records nothing", async () => {
@@ -263,7 +267,7 @@ describe("serve: review", () => {
       const reply = await request(serve, "POST", reviewPath("Home"), { raw });
       assert.equal(reply.status, 400, `${raw} -> ${reply.status} ${reply.text}`);
     }
-    assert.deepEqual((await readReview(root)).approvals, {});
+    assert.deepEqual(await reviewFiles(root), []);
   });
 
   it("answers 409 in Japanese to approving a container, which has no file, and records nothing", async () => {
@@ -278,7 +282,7 @@ describe("serve: review", () => {
     const refused = await request(serve, "POST", reviewPath("Ghost"), { body: { note: "x" } });
     assert.equal(refused.status, 409, refused.text);
     assert.match(refused.text, JAPANESE);
-    assert.deepEqual((await readReview(root)).approvals, {});
+    assert.deepEqual(await reviewFiles(root), []);
     const child = await request(serve, "POST", reviewPath("C"), { body: { note: "x" } });
     assert.ok(succeeded(child), `${child.status} ${child.text}`);
   });
@@ -294,13 +298,13 @@ describe("serve: review", () => {
       body: { note: "x", hash: "0".repeat(40) },
     });
     assert.equal(unknown.status, 409);
-    assert.deepEqual((await readReview(root)).approvals, {});
+    assert.deepEqual(await reviewFiles(root), []);
 
     const current = await request(serve, "POST", reviewPath("Home"), {
       body: { note: "x", hash: oldHash },
     });
     assert.ok(succeeded(current), `${current.status} ${current.text}`);
-    assert.equal((await readReview(root)).approvals.Home?.hash, oldHash);
+    assert.equal((await approvalOf(serve, "Home"))?.hash, oldHash);
 
     const since = events.received.length;
     await writeFile(join(root, "src", "home.ts"), edited);
@@ -309,13 +313,53 @@ describe("serve: review", () => {
       body: { note: "x", hash: oldHash },
     });
     assert.equal(stale.status, 409);
-    assert.equal((await readReview(root)).approvals.Home?.hash, oldHash);
+    assert.equal((await reviewFiles(root)).length, 1, "nothing recorded for the stale hash");
 
     const renewed = await request(serve, "POST", reviewPath("Home"), {
       body: { note: "x", hash: sha1(edited) },
     });
     assert.ok(succeeded(renewed), `${renewed.status} ${renewed.text}`);
-    assert.equal((await readReview(root)).approvals.Home?.hash, sha1(edited));
+    assert.equal((await approvalOf(serve, "Home"))?.hash, sha1(edited));
+  });
+
+  it("approving a node in conflict through serve ends the conflict", async () => {
+    const home = parseStateName("Home");
+    assert.ok(home.ok);
+    const other = planChange(foldReview({ files: [], legacy: null }).state, {
+      kind: "approve",
+      node: home.value,
+      hash: "0".repeat(40),
+      by: "someone",
+      at: "2026-10-22T01:00:00.000Z",
+      note: "",
+    });
+    assert.ok(other !== null);
+    const root = await makeRepo({
+      ...small,
+      ".everypath/review.json": JSON.stringify({
+        version: 1,
+        approvals: {
+          Home: { hash: sha1(HOME_SOURCE), at: "2026-10-21T00:00:00.000Z", by: "old", note: "" },
+        },
+      }),
+      [`.everypath/review/${other.name}`]: other.text,
+    });
+    const serve = await serveRepo(root);
+    const events = await ready(serve);
+    const shown = (await request(serve, "GET", "/graph.json")).json() as Graph;
+    const before = node(shown, "Home").review;
+    assert.ok(before !== undefined && "conflict" in before, "Home starts in conflict");
+    const since = events.received.length;
+
+    const approved = await request(serve, "POST", reviewPath("Home"), { body: { note: "" } });
+
+    assert.ok(succeeded(approved), `${approved.status} ${approved.text}`);
+    const resolved = await events.graph((graph) => node(graph, "Home").status.reviewed, { since });
+    assert.equal((await approvalOf(serve, "Home"))?.by, GIT_USER);
+    assert.ok(
+      resolved.graph.warnings.every((w) => !w.message.includes("承認が食い違っています")),
+      "no conflict warning is left",
+    );
   });
 });
 
@@ -646,6 +690,8 @@ describe("serve: what triggers a rescan", () => {
     await writeFiles(root, {
       ".everypath/graph.json.0f1e2d3c.tmp": "{}",
       ".everypath/review.json.0f1e2d3c.tmp": "{}",
+      ".everypath/review/0123456789abcdef.jsonl.0f1e2d3c.tmp": "{}",
+      ".everypath/.gitignore": "!review/\n",
       ".everypath/tla/result.json.0f1e2d3c.tmp": "{}",
       "everypath.properties.json.0f1e2d3c.tmp": "{}",
     });
@@ -734,6 +780,29 @@ describe("serve: what triggers a rescan", () => {
       seen: (graph) => node(graph, "Home").status.proof === "passed",
     },
   ];
+  it("rescans and broadcasts when a record arrives in .everypath/review/, as git pull adds one", async () => {
+    const root = await makeRepo(small);
+    const serve = await serveRepo(root);
+    const events = await ready(serve);
+    const since = events.received.length;
+    const home = parseStateName("Home");
+    assert.ok(home.ok);
+    const record = planChange(foldReview({ files: [], legacy: null }).state, {
+      kind: "approve",
+      node: home.value,
+      hash: sha1(HOME_SOURCE),
+      by: "ci",
+      at: "2026-10-21T04:50:00Z",
+      note: "",
+    });
+    assert.ok(record !== null);
+
+    await writeFiles(root, { [`.everypath/review/${record.name}`]: record.text });
+
+    await events.graph((graph) => node(graph, "Home").status.reviewed, { since });
+    assert.equal((await approvalOf(serve, "Home"))?.by, "ci");
+  });
+
   for (const { file, content, seen } of triggers) {
     it(`rescans and broadcasts when ${file} changes`, async () => {
       const root = await makeRepo(small);
@@ -791,7 +860,7 @@ describe("serve: request bodies", () => {
     assert.equal((await rawRequest(serve, "PUT", "/layout.json", json, layout)).status, 413);
     assert.equal(await chunkedRequest(serve, "POST", reviewPath("Home"), note), 413);
 
-    assert.deepEqual((await readReview(root)).approvals, {});
+    assert.deepEqual(await reviewFiles(root), []);
     await assert.rejects(readOutput(root, "layout.json"), { code: "ENOENT" });
     assert.equal((await request(serve, "GET", "/graph.json")).status, 200);
   });
@@ -815,7 +884,7 @@ describe("serve: request bodies", () => {
       body: { note: "あ".repeat(2_001) },
     });
     assert.equal(long.status, 400, long.text);
-    assert.deepEqual((await readReview(root)).approvals, {});
+    assert.deepEqual(await reviewFiles(root), []);
 
     const fits = await request(serve, "POST", reviewPath("Home"), {
       body: { note: "😀".repeat(2_000) },
@@ -882,7 +951,7 @@ describe("serve: guards on state-changing requests", () => {
         );
       }
     }
-    assert.deepEqual((await readReview(root)).approvals, {});
+    assert.deepEqual(await reviewFiles(root), []);
     await assert.rejects(readOutput(root, "layout.json"), { code: "ENOENT" });
 
     const json = { "content-type": "application/json; charset=utf-8" };
@@ -908,7 +977,7 @@ describe("serve: guards on state-changing requests", () => {
         assert.equal(reply.status, 403, `${method} ${path} as ${host} -> ${reply.status}`);
       }
     }
-    assert.deepEqual((await readReview(root)).approvals, {});
+    assert.deepEqual(await reviewFiles(root), []);
     await assert.rejects(readOutput(root, "layout.json"), { code: "ENOENT" });
 
     const port = new URL(serve.url).port;
@@ -937,7 +1006,7 @@ describe("serve: guards on state-changing requests", () => {
         assert.equal(reply.status, 403, `${method} ${path} from ${origin} -> ${reply.status}`);
       }
     }
-    assert.deepEqual((await readReview(root)).approvals, {});
+    assert.deepEqual(await reviewFiles(root), []);
     await assert.rejects(readOutput(root, "layout.json"), { code: "ENOENT" });
 
     for (const origin of [`http://localhost:${port}`, `http://127.0.0.1:${port}`]) {

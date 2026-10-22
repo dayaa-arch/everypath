@@ -9,10 +9,14 @@ import { makeRepo, readGraph, runCli, writeFiles } from "./helpers/repo.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
-/** The five files of `docs/specs/init.md` condition 2. */
+/**
+ * The five files of `docs/specs/init.md` condition 2, and `.everypath/.gitignore`, which keeps the
+ * approval records tracked (`docs/specs/team-review.md` condition 11).
+ */
 const HANDED_OUT = [
   ".claude/settings.example.json",
   ".claude/skills/everypath/SKILL.md",
+  ".everypath/.gitignore",
   ".gitignore",
   "everypath.config.json",
   "everypath.properties.json",
@@ -46,7 +50,7 @@ function init(root: string) {
 
 /** The one stdout line that names `path`. */
 function lineFor(stdout: string, path: string): string {
-  const lines = stdout.split("\n").filter((line) => line.includes(path));
+  const lines = stdout.split("\n").filter((line) => line.startsWith(`${path} `));
   assert.equal(lines.length, 1, `one line names ${path}:\n${stdout}`);
   return lines[0] ?? "";
 }
@@ -69,7 +73,7 @@ const allAs = (verb: RegExp): Record<string, RegExp> =>
 const IGNORE_LINES = ".everypath/*\n!.everypath/review.json\n";
 
 describe("everypath init: an empty directory", () => {
-  it("creates the five files and no other path", async () => {
+  it("creates the six files and no other path", async () => {
     const root = await makeRepo({});
 
     const { stdout } = init(root);
@@ -80,12 +84,18 @@ describe("everypath init: an empty directory", () => {
       ".claude/skills/",
       ".claude/skills/everypath/",
       ".claude/skills/everypath/SKILL.md",
+      ".everypath/",
+      ".everypath/.gitignore",
       ".gitignore",
       "everypath.config.json",
       "everypath.properties.json",
     ]);
     assertReported(stdout, allAs(CREATED));
     assert.equal(await readFile(join(root, ".gitignore"), "utf8"), IGNORE_LINES);
+    assert.equal(
+      await readFile(join(root, ".everypath/.gitignore"), "utf8"),
+      "!review/\nreview/*.tmp\n",
+    );
     assert.deepEqual(
       await readFile(join(root, ".claude/skills/everypath/SKILL.md")),
       await readFile(join(repoRoot, "skill/SKILL.md")),
@@ -394,6 +404,7 @@ describe("init: a .gitignore line that hides review.json (decision 0003)", () =>
 
       assert.match(stderr, new RegExp(`${line.replaceAll("*", "\\*").replaceAll(".", "\\.")}`));
       assert.match(stderr, /review\.json/);
+      assert.match(stderr, /\.everypath\/review\//);
       assert.ok(
         (await readFile(join(root, ".gitignore"), "utf8")).startsWith(original),
         "the person's own lines stay as they were",

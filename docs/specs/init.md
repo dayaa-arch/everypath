@@ -6,7 +6,7 @@
 
 ## 完了条件
 - [x] 1. `npm run typecheck`、`npm run lint`、`npm test` がすべて exit 0（実行して確認）
-- [x] 2. 空のディレクトリに `everypath init <dir>` を実行すると、`everypath.config.json`、`everypath.properties.json`、`.claude/skills/everypath/SKILL.md`、`.claude/settings.example.json`、`.gitignore` の 5 つだけができ、それ以外のパスは作られない（`test/init.test.ts`）
+- [x] 2. 空のディレクトリに `everypath init <dir>` を実行すると、`everypath.config.json`、`everypath.properties.json`、`.claude/skills/everypath/SKILL.md`、`.claude/settings.example.json`、`.gitignore` の 5 つだけができ、それ以外のパスは作られない（`test/init.test.ts`）。決定 0004 で `.everypath/.gitignore` が足され 6 つになった（`docs/specs/team-review.md` 条件 11）
 - [x] 3. 2 回目の実行はどのファイルのバイトも変えない。既存のファイルは上書きせず、作ったものと飛ばしたものを日本語で 1 行ずつ出す。既存の `.gitignore` には `.everypath/*` と `!.everypath/review.json` を、無い行だけ末尾に足し、元の内容を保つ（決定 0003）（`test/init.test.ts`）
 - [x] 4. 雛形の `everypath.properties.json` は `parseProperties` で警告なしに読め、`everypath.config.json` は `parseConfig` で読め、`settings.example.json` は `PostToolUse` に `npx everypath scan --quiet` の hook を持つ JSON である（`test/init.test.ts`）
 - [x] 5. `skill/SKILL.md` は `SPEC.md` §14.1 の 11 項目をすべて日本語で書き、各項目に理由を添える。frontmatter の `name` は `everypath`。§5.2 の記法例を含み、例のアノテーションは `everypath scan` で警告なしに読める（`test/init.test.ts` が例を抜き出してスキャンする）

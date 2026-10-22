@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { after } from "node:test";
@@ -9,11 +9,11 @@ import {
   openEvents,
   type Serve,
 } from "../../scripts/serve-client.js";
-import type { Graph, PropertyResult, ReviewFile } from "../../src/core/types.js";
+import type { Approval, Graph, PropertyResult } from "../../src/core/types.js";
 import { makeRepo } from "./repo.js";
 import { type FakeJava, type FakeJavaScript, fixture, forExample } from "./tlc.js";
 
-/** `user.name` in the HOME every served process gets, so `by` in review.json is known. */
+/** `user.name` in the HOME every served process gets, so the `by` of an approval is known. */
 export const GIT_USER = "Taro Tester";
 
 const servers: Serve[] = [];
@@ -142,15 +142,20 @@ export const sha1 = (...contents: string[]): string =>
 
 const OUTPUT = ".everypath";
 
-export async function readReview(root: string): Promise<ReviewFile> {
-  try {
-    return JSON.parse(await readFile(join(root, OUTPUT, "review.json"), "utf8")) as ReviewFile;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return { version: 1, approvals: {} };
-    }
+/** The approval records under `.everypath/review/`, sorted by name. */
+export async function reviewFiles(root: string): Promise<string[]> {
+  const names = await readdir(join(root, OUTPUT, "review")).catch((error: unknown) => {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
     throw error;
-  }
+  });
+  return names.filter((name) => name.endsWith(".jsonl")).sort();
+}
+
+/** The approval the server's current graph shows for `id`, or undefined without one. */
+export async function approvalOf(serve: Serve, id: string): Promise<Approval | undefined> {
+  const graph = (await request(serve, "GET", "/graph.json")).json() as Graph;
+  const review = graph.nodes.find((node) => node.id === id)?.review;
+  return review !== undefined && "approval" in review ? review.approval : undefined;
 }
 
 export const readOutput = (root: string, ...path: string[]): Promise<string> =>

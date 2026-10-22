@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { describe, it } from "node:test";
+import { isScanInput } from "../src/core/workspace.js";
 import { type OpenWatch, type Watcher, watchRepository } from "../src/server/watch.js";
 import { makeRepo, ts } from "./helpers/repo.js";
 
@@ -97,6 +98,8 @@ describe("watch: which directories", () => {
     "generated/out/g.ts": "",
     "everypath.config.json": JSON.stringify({ ignore: ["generated/**"] }),
     ".everypath/review.json": "{}",
+    ".everypath/review/0123456789abcdef.jsonl": "{}\n",
+    ".everypath/review/stray/x.jsonl": "",
     ".everypath/tla/result.json": "{}",
     ".everypath/cache/x": "",
   };
@@ -107,12 +110,13 @@ describe("watch: which directories", () => {
 
     const watcher = watchRepository(root, () => {}, { platform: "linux", open, warn: () => {} });
     try {
-      await until(() => opened.length >= 5, "five watchers");
+      await until(() => opened.length >= 6, "six watchers");
       await delay(100);
 
       assert.deepEqual(opened.sort(), [
         ["", false],
         [".everypath", false],
+        [".everypath/review", false],
         [".everypath/tla", false],
         ["src", false],
         ["src/auth", false],
@@ -159,6 +163,29 @@ describe("watch: which directories", () => {
       assert.ok(opened.every(([, recursive]) => !recursive));
     } finally {
       watcher.close();
+    }
+  });
+});
+
+describe("watch: approval records (docs/specs/team-review.md)", () => {
+  it("counts the records and their directory as scan inputs, and not temporary files or .gitignore", () => {
+    const inputs = [
+      [".everypath/review", false],
+      [".everypath/review", true],
+      [".everypath/review/0123456789abcdef.jsonl", false],
+      [".everypath/review.json", false],
+    ] as const;
+    const others = [
+      [".everypath/review/0123456789abcdef.jsonl.0f1e2d3c.tmp", false],
+      [".everypath/review/stray", true],
+      [".everypath/.gitignore", false],
+    ] as const;
+
+    for (const [path, isDirectory] of inputs) {
+      assert.equal(isScanInput(path, isDirectory), true, path);
+    }
+    for (const [path, isDirectory] of others) {
+      assert.equal(isScanInput(path, isDirectory), false, path);
     }
   });
 });
