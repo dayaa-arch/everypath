@@ -270,8 +270,9 @@ function describeWarning({ file, line, message }: ScanWarning): string {
 }
 
 function summarize(graph: Graph, by: Scanned["by"]): string {
-  const flows = graph.edges.filter((edge) => edge.type === "flow").length;
-  const counts = `状態 ${graph.nodes.length}、遷移 ${flows}、依存 ${graph.edges.length - flows}、警告 ${graph.warnings.length}`;
+  const count = (type: Graph["edges"][number]["type"]): number =>
+    graph.edges.filter((edge) => edge.type === type).length;
+  const counts = `状態 ${graph.nodes.length}、遷移 ${count("flow")}、依存 ${count("dep")}、乖離 ${graph.drift.length}、警告 ${graph.warnings.length}`;
   const wrote = by === "cli" ? "" : "起動中の everypath serve が ";
   return `スキャン完了: ${counts}（${wrote}.everypath/graph.json に書きました）`;
 }
@@ -317,13 +318,7 @@ function describeProperty({
   staleModel,
 }: PropertyResult): string[] {
   const title = `${STATUS_WORDS[result]} ${id} [${kind}]${description === null ? "" : ` ${description}`}`;
-  if (result === "pending") {
-    const reason =
-      checkedBy === "tlc"
-        ? "TLC の検査待ちです（everypath check --tlc）"
-        : `${kind} の簡易検査はまだありません`;
-    return [title, `  ${reason}`];
-  }
+  if (result === "pending") return [title, "  TLC の検査待ちです（everypath check --tlc）"];
   const describe = (example: Counterexample): string[] =>
     checkedBy === "bfs" ? [`  ${formatPath(example)}`] : describeSteps(example);
   const stale = staleModel
