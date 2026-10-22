@@ -63,4 +63,4 @@ type ProveOutcome = { kind: "unconfigured"; warnings: ScanWarning[] }
 - proofs.json の git 管理と `stats.proven`（`.gitignore` は `init` のまま）
 
 ## 検証方法
-`test/proofs.test.ts`（スキャンと設定）、`test/prove-readers.test.ts`（引用した出力）、`test/prove.test.ts`（偽のコマンドで CLI を走らせる）、`test/proofs-viewer.test.ts`（色、パネル、指示文）、`test/requirements.test.ts`、`test/server.test.ts`、`test/single-writer.test.ts` に足す。作る。Dafny と Verus は手元に無いので、読み手は引用した出力だけで確かめる。
+`test/proofs.test.ts`（スキャンと設定）、`test/prove-readers.test.ts`（引用した出力）、`test/prove.test.ts`（偽のコマンドで CLI を走らせる）、`test/proofs-viewer.test.ts`（色、パネル、指示文）、`test/requirements.test.ts`、`test/server.test.ts`、`test/single-writer.test.ts` に足す。作る。Dafny と Verus は手元に無いので、読み手は引用した出力だけで確かめる。作者の判断（2026-10-23）で、実物での確認は Dafny か Verus を実際に使う時まで行わない。それまでは README に「実物では未確認」と書き、確かめ済みの経路は `command` とする。

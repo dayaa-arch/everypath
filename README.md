@@ -141,6 +141,8 @@ npx everypath check --tlc
 | `verus` | `verus {files}` | その状態の `.rs` | `error:` の見出し、場所、`failed …` の印が指すコードを残す |
 | `command` | なし（必須） | その状態のすべてのファイル | 終了コード 0 なら成功 |
 
+`dafny` と `verus` の読み方は、各ツールの公式リポジトリにある出力例でだけ確かめたもので、実物のツールでは確かめていません。結果がおかしいと感じたら、`command` に切り替えて終了コードだけで判定してください。
+
 ```bash
 npx everypath prove
 npx everypath check --require-proof
