@@ -18,6 +18,14 @@ import {
 } from "./core/tla/run.js";
 import type { Counterexample, Graph, PropertyResult, ScanWarning } from "./core/types.js";
 import { serializeGraph } from "./core/workspace.js";
+import {
+  findServer,
+  type Handoff,
+  handOffScan,
+  handOffTlc,
+  type Route,
+  type ServedGraph,
+} from "./server/client.js";
 import { startServer } from "./server/server.js";
 
 const USAGE = [
@@ -230,10 +238,11 @@ function describeWarning({ file, line, message }: ScanWarning): string {
   return `  警告 ${place}${message}`;
 }
 
-function summarize(graph: Graph): string {
+function summarize(graph: Graph, by: Scanned["by"]): string {
   const flows = graph.edges.filter((edge) => edge.type === "flow").length;
   const counts = `状態 ${graph.nodes.length}、遷移 ${flows}、依存 ${graph.edges.length - flows}、警告 ${graph.warnings.length}`;
-  return `スキャン完了: ${counts}（.everypath/graph.json に書きました）`;
+  const wrote = by === "cli" ? "" : "起動中の everypath serve が ";
+  return `スキャン完了: ${counts}（${wrote}.everypath/graph.json に書きました）`;
 }
 
 const STATUS_WORDS: Readonly<Record<PropertyResult["result"], string>> = {
@@ -375,14 +384,66 @@ async function main(args: readonly string[]): Promise<number> {
   }
 }
 
+/** A graph of this run, and who wrote `graph.json` for it: this process, or the running serve. */
+type Scanned =
+  | { readonly by: "cli"; readonly graph: Graph }
+  | ({ readonly by: "serve" } & ServedGraph);
+
+const graphText = (scanned: Scanned): string =>
+  scanned.by === "serve" ? scanned.text : serializeGraph(scanned.graph);
+
+/** A hand-off's answer, or `null` when nothing listened there and the CLI writes itself. */
+function answered<T>(handed: Handoff<T>): Result<T> | null {
+  switch (handed.kind) {
+    case "answered":
+      return accept(handed.value);
+    case "failed":
+      return refuse(handed.message);
+    case "refused":
+      return null;
+  }
+}
+
+/**
+ * With a running serve its queue is the only writer, so the scan is handed over and nothing is
+ * written here. A serve that answers with an error is an error: writing around it would race it.
+ */
+async function scanVia(root: string, route: Route, reason: string): Promise<Result<Scanned>> {
+  if (route.kind === "server") {
+    const handed = answered(await handOffScan(route.url));
+    if (handed !== null) return handed.ok ? accept({ by: "serve", ...handed.value }) : handed;
+  }
+  return accept({ by: "cli", graph: await scan(root, { reason }) });
+}
+
+/** TLC runs in the serve's environment when one is running, so its Java and jar are the ones used. */
+async function checkTlcVia(
+  root: string,
+  route: Route,
+  options: { readonly timeoutMs?: number },
+): Promise<Result<TlcSummary>> {
+  if (route.kind === "server") {
+    const handed = answered(await handOffTlc(route.url, options));
+    if (handed !== null) return handed;
+  }
+  return accept(summarizeTlc(await checkTlc(root, options)));
+}
+
+function fail(message: string): number {
+  process.stderr.write(`${message}\n`);
+  return 1;
+}
+
 async function runScan(
   root: string,
   { json, quiet }: Extract<Command, { readonly kind: "scan" }>,
 ): Promise<number> {
-  const graph = await scan(root);
-  if (json) process.stdout.write(serializeGraph(graph));
+  const scanned = await scanVia(root, await findServer(root), "scan");
+  if (!scanned.ok) return fail(scanned.message);
+  const { graph, by } = scanned.value;
+  if (json) process.stdout.write(graphText(scanned.value));
   if (!quiet) {
-    const lines = [summarize(graph), ...graph.warnings.map(describeWarning)];
+    const lines = [summarize(graph, by), ...graph.warnings.map(describeWarning)];
     process.stderr.write(`${lines.join("\n")}\n`);
   }
   return 0;
@@ -399,8 +460,13 @@ async function runCheck(
   root: string,
   tlc: { readonly timeoutMs?: number } | null,
 ): Promise<number> {
-  const summary = tlc === null ? null : summarizeTlc(await checkTlc(root, tlc));
-  const graph = await scan(root, { reason: "check" });
+  const route = await findServer(root);
+  const run = tlc === null ? accept(null) : await checkTlcVia(root, route, tlc);
+  if (!run.ok) return fail(run.message);
+  const scanned = await scanVia(root, route, "check");
+  if (!scanned.ok) return fail(scanned.message);
+  const summary = run.value;
+  const { graph } = scanned.value;
   const warnings = [
     ...graph.warnings,
     ...(summary?.kind === "checked" ? rejectionWarnings(summary.rejected) : []),
