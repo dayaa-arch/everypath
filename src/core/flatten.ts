@@ -112,8 +112,8 @@ export type Flat = {
   /** Names in the properties file that the graph does not have; the quick check words the warnings. */
   readonly unknown: readonly UnknownName[];
   /**
-   * Parents with several children and no `@state-initial` that a transition, `model.initial` or the
-   * file's `entry` enters, in id order. Entering one lands on every child.
+   * Parents with several children and no `@state-initial` that a transition enters, or that behavior
+   * starts in (the file's `entry`, else `model.initial`), in id order. Entering one lands on every child.
    */
   readonly ambiguous: readonly StateName[];
 };
@@ -374,11 +374,8 @@ export function flatten(graph: ModelShape, file: PropertiesFile): Flat {
       }
     }
   }
-  const entered = [
-    ...flowsOf(graph).map((edge) => edge.to),
-    ...(graph.model.initial === null ? NONE : [graph.model.initial]),
-    ...(file.entry ?? NONE),
-  ];
+  const start = file.entry ?? (graph.model.initial === null ? NONE : [graph.model.initial]);
+  const entered = [...flowsOf(graph).map((edge) => edge.to), ...start];
   return {
     model,
     entry: entryOf(model, file),
