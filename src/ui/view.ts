@@ -8,8 +8,9 @@ import type {
   StateNode,
   Value,
 } from "../core/types.js";
-import { type Box, boxAt, type Point, route } from "./layout.js";
-import { isLiveViolation, replayOf, type ViewState } from "./state.js";
+import { isLiveViolation, selectedIds } from "./facts.js";
+import { type Box, boxAt, labelBoxes, overlaps, type Point, route } from "./layout.js";
+import { replayOf, type ViewState } from "./state.js";
 
 export type Tone =
   | "danger"
@@ -270,8 +271,12 @@ export type SceneItem =
       readonly kind: "line";
       readonly look: "flow" | "dep" | "trail";
       readonly points: readonly Point[];
-      /** Parallel flow edges between one pair are one line; their labels join with " / ". */
-      readonly label: string | null;
+      /**
+       * Parallel flow edges between one pair are one line; their labels join with " / ". `box` is
+       * where the text is centred: it overlaps no node and no label placed before it, if any spot
+       * of the line allows that.
+       */
+      readonly label: { readonly text: string; readonly box: Box } | null;
     }
   | {
       readonly kind: "callout";
@@ -357,19 +362,20 @@ export function sceneOf(
     return point === undefined ? undefined : boxAt(point);
   };
   const replay = replayOf(state);
-  const selected = state.selection.kind === "node" ? state.selection.id : null;
+  const selected = new Set(selectedIds(state.selection));
   const items: { readonly item: SceneItem; readonly touches: readonly StateName[] }[] = [];
+  /** What a label may not cover: every node, then each label as it is placed. */
+  const taken = graph.nodes.flatMap(({ id }) => boxOf(id) ?? []);
 
   const lines = (look: "flow" | "dep" | "trail", pairs: readonly Pair[], lane: number): void => {
     for (const { from, to, labels } of pairs) {
       const a = boxOf(from);
       const b = boxOf(to);
       if (a === undefined || b === undefined) continue;
-      const label = labels.length === 0 ? null : labels.join(" / ");
-      items.push({
-        item: { kind: "line", look, points: route(a, b, lane), label },
-        touches: [from, to],
-      });
+      const points = route(a, b, lane);
+      const label = labels.length === 0 ? null : placeLabel(labels.join(" / "), points, taken);
+      if (label !== null) taken.push(label.box);
+      items.push({ item: { kind: "line", look, points, label }, touches: [from, to] });
     }
   };
   if (state.showDeps) {
@@ -399,7 +405,7 @@ export function sceneOf(
         tone,
         title: fitTitle(node.id),
         caption: rowOf(tone).label,
-        selected: node.id === selected,
+        selected: selected.has(node.id),
         current: replay?.current.state === node.id,
         age: age >= 0 && age < PULSE_MS ? age : null,
       },
@@ -434,6 +440,20 @@ export function sceneOf(
     live: items.filter(({ touches }) => moving(touches)).map(({ item }) => item),
     bounds: boundsOf(boxes),
   };
+}
+
+/** The first place for the text that covers nothing in `taken`; the best place if there is none. */
+function placeLabel(
+  text: string,
+  points: readonly Point[],
+  taken: readonly Box[],
+): { readonly text: string; readonly box: Box } {
+  const boxes = labelBoxes(text, points);
+  const box =
+    boxes.find((candidate) => taken.every((other) => !overlaps(candidate, other))) ??
+    boxes[0] ??
+    boxAt({ x: 0, y: 0 });
+  return { text, box };
 }
 
 function boundsOf(boxes: readonly Box[]): Box | null {

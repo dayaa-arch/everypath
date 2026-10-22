@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { Graph } from "../src/core/types.js";
+import { PROMPT_KINDS, type PromptTemplates } from "../src/core/prompts.js";
+import type { Graph, HistoryEntry } from "../src/core/types.js";
 import { relayout } from "../src/ui/layout.js";
 import { type Action, initialState, reduce, replayOf, type ViewState } from "../src/ui/state.js";
 import type { Layout } from "../src/ui/wire.js";
@@ -81,7 +82,9 @@ const graphAction = (g: Graph, reason = "watch"): Action => ({
 const select = (id: string | null): Action => ({
   kind: "select",
   id: id === null ? null : name(id),
+  extend: false,
 });
+const shift = (id: string): Action => ({ kind: "select", id: name(id), extend: true });
 const forward: Action = { kind: "step", delta: 1 };
 const back: Action = { kind: "step", delta: -1 };
 
@@ -108,6 +111,12 @@ describe("the first state", () => {
       selection: { kind: "none" },
       showDeps: true,
       notice: null,
+      panelTab: "detail",
+      dockTab: "queue",
+      history: [],
+      model: { kind: "unknown" },
+      templates: null,
+      prompt: null,
     });
   });
 });
@@ -440,5 +449,137 @@ describe("the dependency toggle and the notice", () => {
     const refused = fresh({ kind: "notice", text: "画面に出ていない版は承認できません" });
     assert.equal(refused.notice, "画面に出ていない版は承認できません");
     assert.equal(reduce(refused, { kind: "notice", text: null }).notice, null);
+  });
+});
+
+const TEMPLATES = Object.fromEntries(
+  PROMPT_KINDS.map((kind) => [kind, { text: `${kind}: {{TARGETS}}`, source: "default" }]),
+) as PromptTemplates;
+
+function entry(at: string, added: readonly string[] = []): HistoryEntry {
+  return {
+    at,
+    reason: "watch",
+    added: added.map(name),
+    removed: [],
+    updated: [],
+    addedEdges: [],
+    removedEdges: [],
+  };
+}
+
+describe("selecting more than one node (docs/specs/viewer-panels.md condition 7)", () => {
+  it("adds with Shift, removes with Shift again and falls back to one node", () => {
+    const g = authGraph();
+    const many = fresh(graphAction(g), select("Login"), shift("Settings"));
+    assert.deepEqual(many.selection, { kind: "many", ids: ["Login", "Settings"] });
+
+    const three = run(many, shift("Home"));
+    assert.deepEqual(three.selection, { kind: "many", ids: ["Login", "Settings", "Home"] });
+
+    const one = run(three, shift("Settings"), shift("Home"));
+    assert.equal(one.selection.kind, "node");
+    assert.equal(one.selection.kind === "node" ? one.selection.id : null, "Login");
+  });
+
+  it("starts a selection with Shift when nothing is selected", () => {
+    const state = fresh(graphAction(authGraph()), shift("Home"));
+    assert.equal(state.selection.kind, "node");
+  });
+
+  it("selects one node again without Shift", () => {
+    const state = fresh(graphAction(authGraph()), select("Login"), shift("Home"), select("Reset"));
+    assert.equal(state.selection.kind === "node" ? state.selection.id : null, "Reset");
+  });
+
+  it("drops a node that disappears and falls back to one node", () => {
+    const g = authGraph();
+    const state = fresh(graphAction(g), select("Login"), shift("Settings"));
+    const without = graph({ ...g, nodes: g.nodes.filter((n) => n.id !== "Settings") });
+    const after = run(state, graphAction(without));
+    assert.equal(after.selection.kind === "node" ? after.selection.id : null, "Login");
+  });
+});
+
+describe("the change log", () => {
+  it("keeps one copy of each entry, oldest first, and the latest 200", () => {
+    const entries = Array.from({ length: 210 }, (_, i) =>
+      entry(
+        `2026-10-22T00:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.000Z`,
+      ),
+    );
+    const state = fresh(
+      { kind: "history", entries: entries.slice(0, 150) },
+      { kind: "history", entries: entries.slice(100) },
+    );
+    assert.equal(state.history.length, 200);
+    assert.deepEqual(state.history, entries.slice(10));
+  });
+
+  it("adds the diff of a graph event and no copy when history brings it again", () => {
+    const g = authGraph();
+    const diff = entry("2026-10-22T01:00:00.000Z", ["Settings"]);
+    const state = fresh(
+      { kind: "history", entries: [entry("2026-10-22T00:00:00.000Z")] },
+      { kind: "graph", event: { ...graphEvent(g), diff } },
+      { kind: "history", entries: [entry("2026-10-22T00:00:00.000Z"), diff] },
+    );
+    assert.deepEqual(
+      state.history.map((e) => e.at),
+      ["2026-10-22T00:00:00.000Z", "2026-10-22T01:00:00.000Z"],
+    );
+  });
+});
+
+describe("generating an instruction", () => {
+  it("does nothing before the templates arrive", () => {
+    const before = fresh(graphAction(authGraph()), select("Login"));
+    assert.equal(reduce(before, { kind: "generate", prompt: "write-tests" }), before);
+  });
+
+  it("keeps the text made from the selection and the templates, until the selection changes", () => {
+    const state = fresh(
+      graphAction(authGraph()),
+      { kind: "templates", templates: TEMPLATES },
+      select("Login"),
+      shift("Home"),
+      { kind: "generate", prompt: "propose-properties" },
+    );
+    assert.equal(state.prompt?.kind, "propose-properties");
+    assert.ok(state.prompt?.text.includes("Login"), state.prompt?.text);
+    assert.ok(state.prompt?.text.includes("Home"), state.prompt?.text);
+
+    assert.equal(run(state, { kind: "dismiss-prompt" }).prompt, null);
+    assert.equal(run(state, select("Reset")).prompt, null);
+  });
+
+  it("does nothing for a kind no selected node takes", () => {
+    const before = fresh(
+      graphAction(authGraph()),
+      { kind: "templates", templates: TEMPLATES },
+      select("Settings"),
+    );
+    assert.equal(reduce(before, { kind: "generate", prompt: "fix-counterexample" }), before);
+  });
+});
+
+describe("tabs and the model text", () => {
+  it("switches the panel tab and the dock tab apart", () => {
+    const state = fresh({ kind: "tab", panel: "model" }, { kind: "tab", dock: "log" });
+    assert.equal(state.panelTab, "model");
+    assert.equal(state.dockTab, "log");
+  });
+
+  it("holds the latest Model.tla answer", () => {
+    const loaded = fresh({
+      kind: "model",
+      model: { kind: "loaded", text: "---- MODULE Model ----" },
+    });
+    assert.deepEqual(loaded.model, { kind: "loaded", text: "---- MODULE Model ----" });
+    const missing = run(loaded, {
+      kind: "model",
+      model: { kind: "missing", message: "まだありません" },
+    });
+    assert.equal(missing.model.kind, "missing");
   });
 });

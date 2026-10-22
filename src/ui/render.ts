@@ -1,15 +1,21 @@
-import type { NodeStatus, PropertyResult, StateName, StateNode } from "../core/types.js";
-import { type Box, labelAt, type Point } from "./layout.js";
-import {
-  type Action,
-  isLiveViolation,
-  type Replay,
-  replayOf,
-  type TlcView,
-  type ViewState,
-} from "./state.js";
+import { PROMPT_KINDS, type PromptKind } from "../core/prompts.js";
+import type {
+  EdgeRef,
+  Graph,
+  HistoryEntry,
+  NodeStatus,
+  PropertyResult,
+  StateName,
+  StateNode,
+} from "../core/types.js";
+import { isLiveViolation, selectedIds } from "./facts.js";
+import { type Box, boxAt, type Point } from "./layout.js";
+import { modelSlice } from "./model.js";
+import { type Prompt, promptLabel, promptTargets } from "./prompt.js";
+import { type Action, type Replay, replayOf, type TlcView, type ViewState } from "./state.js";
 import {
   headerCounts,
+  reviewQueue,
   rowOf,
   type SceneItem,
   sceneOf,
@@ -26,6 +32,9 @@ export type Commands = {
   readonly approve: (node: StateNode) => void;
   readonly revoke: (node: StateNode) => void;
   readonly runTlc: () => void;
+  /** Builds the instruction of this kind for the selection and puts it on the clipboard. */
+  readonly generate: (kind: PromptKind) => void;
+  readonly copy: (text: string) => void;
 };
 
 export type Viewer = {
@@ -125,6 +134,8 @@ export function mount(commands: Commands): Viewer {
   const base = find("base", SVGGElement);
   const live = find("live", SVGGElement);
   const panel = find("panel", HTMLElement);
+  const dockTabs = find("dock-tabs", HTMLElement);
+  const dockList = find("dock-list", HTMLElement);
   find("legend", HTMLElement).replaceChildren(...legend());
 
   let latest: ViewState | null = null;
@@ -177,7 +188,8 @@ export function mount(commands: Commands): Viewer {
     paint(live, scene.live);
     if (fresh) {
       header.replaceChildren(...headerOf(state, commands, controls));
-      panel.replaceChildren(...panelOf(state, commands));
+      paintPanel(state, painted.state);
+      paintDock(state, painted.state);
     }
     if (!fitted && scene.bounds !== null) {
       const { width, height } = canvas.getBoundingClientRect();
@@ -186,6 +198,42 @@ export function mount(commands: Commands): Viewer {
       applyViewport();
     }
     painted = { state, dragId: drag?.id ?? null };
+  }
+
+  /** A new selection or tab starts at the top; any other change leaves the person where they were reading. */
+  function paintPanel(state: ViewState, previous: ViewState | null): void {
+    const top = panel.scrollTop;
+    panel.replaceChildren(...panelOf(state, commands));
+    const same =
+      previous !== null &&
+      previous.panelTab === state.panelTab &&
+      selectedIds(previous.selection).join("\n") === selectedIds(state.selection).join("\n");
+    panel.scrollTop = same ? top : 0;
+    if (state.prompt !== null && state.prompt !== previous?.prompt) {
+      panel.querySelector("#prompt-output")?.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function paintDock(state: ViewState, previous: ViewState | null): void {
+    const top = dockList.scrollTop;
+    dockTabs.replaceChildren(...dockTabsOf(state, commands));
+    dockList.replaceChildren(...dockListOf(state, jump));
+    dockList.scrollTop = previous?.dockTab === state.dockTab ? top : 0;
+  }
+
+  /** Selects the node and brings its box to the middle of the canvas, at the zoom it has now. */
+  function jump(id: StateName): void {
+    commands.dispatch({ kind: "select", id, extend: false });
+    const point = latest?.layout[id];
+    if (point === undefined) return;
+    const box = boxAt(point);
+    const { width, height } = canvas.getBoundingClientRect();
+    viewport = {
+      ...viewport,
+      x: width / 2 - (box.x + box.width / 2) * viewport.k,
+      y: height / 2 - (box.y + box.height / 2) * viewport.k,
+    };
+    applyViewport();
   }
 
   const nodeAt = (target: EventTarget | null): StateName | null => {
@@ -232,9 +280,13 @@ export function mount(commands: Commands): Viewer {
     canvas.classList.remove("panning");
     request();
     if (!commit) return;
-    if (ended.kind === "press") commands.dispatch({ kind: "select", id: ended.id });
+    if (ended.kind === "press") {
+      commands.dispatch({ kind: "select", id: ended.id, extend: event.shiftKey });
+    }
     if (ended.kind === "drag") commands.dispatch({ kind: "move", id: ended.id, to: ended.at });
-    if (ended.kind === "pan" && !ended.moved) commands.dispatch({ kind: "select", id: null });
+    if (ended.kind === "pan" && !ended.moved) {
+      commands.dispatch({ kind: "select", id: null, extend: false });
+    }
   };
   canvas.addEventListener("pointerup", (event) => release(event, true));
   canvas.addEventListener("lostpointercapture", (event) => release(event, false));
@@ -261,7 +313,7 @@ export function mount(commands: Commands): Viewer {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     if (event.key === "ArrowLeft") commands.dispatch({ kind: "step", delta: -1 });
     if (event.key === "ArrowRight") commands.dispatch({ kind: "step", delta: 1 });
-    if (event.key === "Escape") commands.dispatch({ kind: "select", id: null });
+    if (event.key === "Escape") commands.dispatch({ kind: "select", id: null, extend: false });
   });
 
   return {
@@ -303,10 +355,6 @@ function draw(item: SceneItem): SVGElement {
       return drawBox(item);
     case "line": {
       const d = `M ${item.points.map((p) => `${p.x} ${p.y}`).join(" L ")}`;
-      const where = labelAt(item.points);
-      const upright = item.points.some(
-        (point, index) => point.x === where.x && item.points[index + 1]?.x === where.x,
-      );
       return svg(
         "g",
         { class: `line ${item.look}` },
@@ -322,11 +370,11 @@ function draw(item: SceneItem): SVGElement {
           : svg(
               "text",
               {
-                class: upright ? "label upright" : "label",
-                x: upright ? where.x + 6 : where.x,
-                y: where.y,
+                class: "label",
+                x: item.label.box.x + item.label.box.width / 2,
+                y: item.label.box.y + item.label.box.height / 2,
               },
-              item.label,
+              item.label.text,
             ),
       );
     }
@@ -553,11 +601,16 @@ function formatTime(iso: string): string {
 function panelOf(state: ViewState, commands: Commands): Content[] {
   const { graph, selection } = state;
   if (graph === null) return [html("p", { class: "hint" }, "サーバーから図を受け取っています…")];
+  if (selection.kind === "many") return manyOf(state, graph, selection.ids, commands);
   const node =
     selection.kind === "node" ? graph.nodes.find((n) => n.id === selection.id) : undefined;
   if (node === undefined) {
     return [
-      html("p", { class: "hint" }, "箱を選ぶと、ここに詳細が出ます。"),
+      html(
+        "p",
+        { class: "hint" },
+        "箱を選ぶと、ここに詳細が出ます。Shift+クリックで複数を選べます。",
+      ),
       html(
         "p",
         { class: "hint" },
@@ -565,13 +618,32 @@ function panelOf(state: ViewState, commands: Commands): Content[] {
       ),
     ];
   }
+  return [
+    html("h2", {}, node.id),
+    chip(rowOf(toneOf(node, graph.properties))),
+    html(
+      "div",
+      { class: "tabs" },
+      toggle("詳細", state.panelTab === "detail", () =>
+        commands.dispatch({ kind: "tab", panel: "detail" }),
+      ),
+      toggle("モデル", state.panelTab === "model", () =>
+        commands.dispatch({ kind: "tab", panel: "model" }),
+      ),
+    ),
+    ...(state.panelTab === "model"
+      ? modelOf(state, node, commands)
+      : detailOf(state, graph, node, commands)),
+  ];
+}
+
+/** The tab "詳細": the node as the scanner and the checkers know it, and what can be made of it. */
+function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Commands): Content[] {
   const { status } = node;
   const touching = node.violations.flatMap((id) => graph.properties.filter((p) => p.id === id));
   const live = touching.filter(isLiveViolation);
   const stale = touching.length - live.length;
   return [
-    html("h2", {}, node.id),
-    chip(rowOf(toneOf(node, graph.properties))),
     node.desc === null ? null : html("p", {}, node.desc),
     status.changedSinceReview
       ? html("p", { class: "alert" }, "承認時からの変更あり（hash 不一致）")
@@ -614,6 +686,7 @@ function panelOf(state: ViewState, commands: Commands): Content[] {
         ? button("承認を取り消す", () => commands.revoke(node))
         : null,
     ),
+    ...generateOf("指示を生成", state, graph, [node.id], commands),
     ...section(
       "仕様",
       node.spec.length === 0
@@ -653,6 +726,211 @@ function panelOf(state: ViewState, commands: Commands): Content[] {
           ),
         )),
   ].filter((child) => child !== null);
+}
+
+/** One button per kind that applies to at least one of `ids`, then the instruction made last. */
+function generateOf(
+  title: string,
+  state: ViewState,
+  graph: Graph,
+  ids: readonly StateName[],
+  commands: Commands,
+): Content[] {
+  const ready = state.templates !== null;
+  const buttons = PROMPT_KINDS.map((kind) => ({
+    kind,
+    count: promptTargets(kind, graph, ids).length,
+  }))
+    .filter(({ count }) => ids.length > 1 || count > 0)
+    .map(({ kind, count }) =>
+      button(
+        ids.length > 1 ? `${promptLabel(kind)}（${count}/${ids.length}）` : promptLabel(kind),
+        () => commands.generate(kind),
+        count === 0 || !ready,
+      ),
+    );
+  return [
+    ...section(
+      title,
+      ready ? null : html("p", { class: "hint" }, "テンプレートを読み込み中…"),
+      html("div", { class: "actions" }, ...buttons),
+    ),
+    ...(state.prompt === null ? [] : promptOf(state.prompt, commands)),
+  ];
+}
+
+/** The text on the clipboard, in a box to copy from by hand when the clipboard refused it. */
+function promptOf(prompt: Prompt, commands: Commands): Content[] {
+  const text = html("textarea", {
+    id: "prompt-output",
+    readonly: "",
+    rows: 12,
+    "aria-label": "生成した指示",
+  });
+  text.value = prompt.text;
+  return section(
+    "生成した指示",
+    html("p", { class: "hint" }, `${promptLabel(prompt.kind)}（${prompt.targets.length} ノード）`),
+    text,
+    html(
+      "div",
+      { class: "actions" },
+      button("もう一度コピー", () => commands.copy(prompt.text)),
+      button("閉じる", () => commands.dispatch({ kind: "dismiss-prompt" })),
+    ),
+  );
+}
+
+/** Several boxes selected: who they are, and what can be made of all of them at once. */
+function manyOf(
+  state: ViewState,
+  graph: Graph,
+  ids: readonly StateName[],
+  commands: Commands,
+): Content[] {
+  return [
+    html("h2", {}, `${ids.length} 個を選択中`),
+    html(
+      "div",
+      { class: "actions" },
+      ...ids.map((id) =>
+        button(id, () => commands.dispatch({ kind: "select", id, extend: false })),
+      ),
+    ),
+    ...generateOf("まとめて生成", state, graph, ids, commands),
+  ];
+}
+
+const MODEL_GROUPS = [
+  ["init", "初期状態"],
+  ["out", "出ていく遷移"],
+  ["in", "入ってくる遷移"],
+  ["property", "性質"],
+] as const;
+
+/** The tab "モデル": the TLA+ of the last model that mentions this box, as generated. */
+function modelOf(state: ViewState, node: StateNode, commands: Commands): Content[] {
+  const { model } = state;
+  switch (model.kind) {
+    case "unknown":
+      return [html("p", { class: "hint" }, "読み込み中…")];
+    case "missing":
+      return [
+        html("p", {}, model.message),
+        html("p", { class: "hint" }, "ヘッダの「全探索を実行」を押すとモデルが作られます。"),
+      ];
+    case "loaded": {
+      const slice = modelSlice(model.text, node.id);
+      if (slice === null) {
+        return [
+          html("p", {}, "この状態は最後に生成したモデルにありません。全探索を実行し直してください"),
+        ];
+      }
+      return [
+        html("p", {}, `TLA+ での名前: ${slice.ident}`),
+        ...MODEL_GROUPS.flatMap(([kind, title]) => {
+          const blocks = slice.blocks.filter((block) => block.kind === kind);
+          return blocks.length === 0
+            ? []
+            : section(title, ...blocks.map((block) => html("pre", {}, block.text)));
+        }),
+        html(
+          "div",
+          { class: "actions" },
+          button(
+            "このモデルを説明させる",
+            () => commands.generate("explain-model"),
+            state.templates === null,
+          ),
+        ),
+        ...(state.prompt === null ? [] : promptOf(state.prompt, commands)),
+      ];
+    }
+    default: {
+      const _exhaustive: never = model;
+      return _exhaustive;
+    }
+  }
+}
+
+/** The bottom dock's two tabs. The queue counts the boxes that are not settled yet. */
+function dockTabsOf(state: ViewState, commands: Commands): Content[] {
+  const waiting = state.graph === null ? 0 : reviewQueue(state.graph).length;
+  return [
+    toggle(`未レビュー一覧（${waiting}）`, state.dockTab === "queue", () =>
+      commands.dispatch({ kind: "tab", dock: "queue" }),
+    ),
+    toggle("変更ログ", state.dockTab === "log", () =>
+      commands.dispatch({ kind: "tab", dock: "log" }),
+    ),
+  ];
+}
+
+function dockListOf(state: ViewState, jump: (id: StateName) => void): Content[] {
+  const { graph } = state;
+  if (graph === null) return [html("p", { class: "hint" }, "サーバーから図を受け取っています…")];
+  if (state.dockTab === "queue") {
+    const queue = reviewQueue(graph);
+    return queue.length === 0
+      ? [html("p", { class: "hint" }, "未レビューの箱はありません")]
+      : queue.map(({ node, tone }) =>
+          html(
+            "div",
+            { class: "row" },
+            chip(rowOf(tone)),
+            button(node.id, () => jump(node.id)),
+          ),
+        );
+  }
+  if (state.history.length === 0) return [html("p", { class: "hint" }, "まだ変更はありません")];
+  return [...state.history].reverse().map((entry) => logRow(entry, graph, jump));
+}
+
+const REASON = new Map([
+  ["serve", "起動"],
+  ["scan", "スキャン"],
+  ["watch", "保存"],
+  ["rescan", "再スキャン"],
+]);
+
+/** One entry of the change log: when, why, then each box and arrow it added, removed or changed. */
+function logRow(entry: HistoryEntry, graph: Graph, jump: (id: StateName) => void): HTMLElement {
+  const node = (sign: string, id: StateName): HTMLElement =>
+    html(
+      "span",
+      { class: "change" },
+      `${sign} `,
+      graph.nodes.some((n) => n.id === id) ? button(id, () => jump(id)) : id,
+    );
+  const edge = (sign: string, ref: EdgeRef): HTMLElement =>
+    html(
+      "span",
+      { class: "change" },
+      `${sign} ${ref.type === "dep" ? "依存" : "遷移"} ${ref.from} → ${ref.to}${ref.event === null ? "" : `（on:${ref.event}）`}`,
+    );
+  return html(
+    "div",
+    { class: "row" },
+    html("span", { class: "time" }, formatClock(entry.at)),
+    html("span", { class: "reason" }, REASON.get(entry.reason) ?? entry.reason),
+    ...entry.added.map((id) => node("+", id)),
+    ...entry.removed.map((id) => node("−", id)),
+    ...entry.updated.map((id) => node("~", id)),
+    ...entry.addedEdges.map((ref) => edge("+", ref)),
+    ...entry.removedEdges.map((ref) => edge("−", ref)),
+  );
+}
+
+function formatClock(iso: string): string {
+  const time = Date.parse(iso);
+  return Number.isNaN(time) ? iso : new Date(time).toLocaleTimeString("ja-JP");
+}
+
+/** A button that stays pressed while its tab is the one shown. */
+function toggle(text: string, pressed: boolean, onClick: () => void): HTMLButtonElement {
+  const element = button(text, onClick);
+  element.setAttribute("aria-pressed", String(pressed));
+  return element;
 }
 
 function propertyOf(property: PropertyResult, state: ViewState, commands: Commands): Content[] {

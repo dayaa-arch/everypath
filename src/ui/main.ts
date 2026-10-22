@@ -1,7 +1,9 @@
+import type { PromptKind } from "../core/prompts.js";
 import type { StateNode } from "../core/types.js";
 import { parseLayout, toPersist } from "./layout.js";
+import { parseHistory, parseTemplates } from "./parse.js";
 import { mount } from "./render.js";
-import { type Action, initialState, reduce } from "./state.js";
+import { type Action, initialState, type ModelText, reduce } from "./state.js";
 import type { Layout, ServerEvent } from "./wire.js";
 
 const RETRY_MS = 2_000;
@@ -13,16 +15,25 @@ async function main(): Promise<void> {
   let state = initialState(saved);
   let lastSaved = saved;
   let saving = false;
-  const viewer = mount({ dispatch, approve, revoke, runTlc });
+  const viewer = mount({
+    dispatch,
+    approve,
+    revoke,
+    runTlc,
+    generate,
+    copy: (text) => void copy(text),
+  });
   viewer.show(state);
   connect();
 
   function dispatch(action: Action): void {
+    const before = state;
     const next = reduce(state, action);
     if (next === state) return;
     state = next;
     viewer.show(state);
     void persist();
+    if (before.panelTab !== "model" && next.panelTab === "model") void loadModel();
   }
 
   /** The server's first frame on every stream is the current graph, so a reconnect needs no catch-up. */
@@ -32,6 +43,10 @@ async function main(): Promise<void> {
       const event = readEvent(message.data);
       if (event === null) return;
       dispatch(event.type === "graph" ? { kind: "graph", event } : { kind: "tlc", event });
+      if (event.type === "graph" && event.reason === "connect") {
+        void Promise.all([loadHistory(), loadTemplates(), loadModel()]);
+      }
+      if (event.type === "tlc" && event.status !== "running") void loadModel();
     };
     source.onerror = () => {
       source.close();
@@ -73,6 +88,66 @@ async function main(): Promise<void> {
   async function runTlc(): Promise<void> {
     dispatch({ kind: "notice", text: await send("POST", "/check/tlc", {}) });
   }
+
+  /**
+   * The reducer builds the text in the click's own task, and the clipboard write follows in that
+   * same task: a browser allows it only while the click is still being handled.
+   */
+  function generate(kind: PromptKind): void {
+    const before = state.prompt;
+    dispatch({ kind: "generate", prompt: kind });
+    if (state.prompt !== null && state.prompt !== before) void copy(state.prompt.text);
+  }
+
+  async function copy(text: string): Promise<void> {
+    const count = state.prompt?.text === text ? `（${state.prompt.targets.length} ノード）` : "";
+    const copied = await navigator.clipboard.writeText(text).then(
+      () => true,
+      () => copyBySelection(text),
+    );
+    dispatch({
+      kind: "notice",
+      text: copied
+        ? `クリップボードにコピーしました${count}`
+        : "クリップボードに書けませんでした。下の欄から写してください",
+    });
+  }
+
+  async function loadHistory(): Promise<void> {
+    const response = await get("/history.json");
+    if (response?.ok !== true) return;
+    dispatch({ kind: "history", entries: parseHistory(await response.json().catch(() => null)) });
+  }
+
+  async function loadTemplates(): Promise<void> {
+    const response = await get("/templates.json");
+    if (response?.ok !== true) return;
+    const templates = parseTemplates(await response.json().catch(() => null));
+    if (templates !== null) dispatch({ kind: "templates", templates });
+  }
+
+  async function loadModel(): Promise<void> {
+    dispatch({ kind: "model", model: await readModel() });
+  }
+}
+
+const GET_FAILED = "サーバーに届きませんでした。everypath serve が動いているか確かめてください";
+
+function get(path: string): Promise<Response | null> {
+  return fetch(path, { cache: "no-store" }).catch(() => null);
+}
+
+/** GET /tla/Model.tla: the text, or why there is none (404 before the first full search). */
+async function readModel(): Promise<ModelText> {
+  const response = await get("/tla/Model.tla");
+  if (response === null) return { kind: "missing", message: GET_FAILED };
+  const text = await response.text().catch(() => "");
+  if (response.ok) return { kind: "loaded", text };
+  const message = text.trim();
+  return {
+    kind: "missing",
+    message: message === "" ? `サーバーが ${response.status} を返しました` : message,
+  };
 }
 
 /** GET /layout.json through parseLayout. Retries until the server answers; a broken body is empty. */
@@ -130,6 +205,27 @@ async function send(
     const text = (await response.text()).trim();
     return text === "" ? `サーバーが ${response.status} を返しました` : text;
   } catch {
-    return "サーバーに届きませんでした。everypath serve が動いているか確かめてください";
+    return GET_FAILED;
+  }
+}
+
+/**
+ * Some browsers deny `clipboard-write` to a page they embed while still honouring the older copy
+ * command inside the same click, so that is tried before the person is asked to copy by hand.
+ */
+function copyBySelection(text: string): boolean {
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.append(area);
+  area.select();
+  try {
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    area.remove();
   }
 }
