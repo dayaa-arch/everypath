@@ -8,6 +8,7 @@ import { type InitAction, initRepository, linesHidingReview } from "./core/init.
 import { errorMessage } from "./core/json.js";
 import { toMermaid } from "./core/mermaid.js";
 import { PROPERTIES_FILE } from "./core/properties.js";
+import { type NodeRun, prove } from "./core/prove.js";
 import { analyze, scan } from "./core/scan.js";
 import { rejectionWarnings } from "./core/tla/result.js";
 import {
@@ -23,6 +24,7 @@ import type {
   Graph,
   PropertyResult,
   ScanWarning,
+  StateNode,
   TlcVerdict,
 } from "./core/types.js";
 import { isGuardOnly, isLiveViolation } from "./core/verdict.js";
@@ -40,7 +42,8 @@ import { startServer } from "./server/server.js";
 const USAGE = [
   "使い方: everypath init [dir]",
   "        everypath scan [dir] [--json] [--quiet]",
-  "        everypath check [dir] [--tlc [--timeout 秒]]",
+  "        everypath check [dir] [--tlc [--timeout 秒]] [--require-proof]",
+  "        everypath prove [dir] [--timeout 秒]",
   "        everypath export [dir] --mermaid",
   "        everypath tla export [dir]",
   "        everypath tla install",
@@ -53,13 +56,22 @@ const UI_PATH = fileURLToPath(new URL("../dist/ui.html", import.meta.url));
 /** `templates/prompts/` of this package, found the same way. */
 const PROMPTS_DIR = fileURLToPath(new URL("../templates/prompts/", import.meta.url));
 
-type Label = "init" | "scan" | "check" | "export" | "tla export" | "tla install" | "serve";
+type Label =
+  | "init"
+  | "scan"
+  | "check"
+  | "prove"
+  | "export"
+  | "tla export"
+  | "tla install"
+  | "serve";
 
 /** The options each command takes; `--help` goes with every one. */
 const ACCEPTS: Readonly<Record<Label, readonly string[]>> = {
   init: [],
   scan: ["json", "quiet"],
-  check: ["tlc", "timeout"],
+  check: ["tlc", "timeout", "require-proof"],
+  prove: ["timeout"],
   export: ["mermaid"],
   "tla export": [],
   "tla install": [],
@@ -81,6 +93,14 @@ type Command =
       readonly directory: string;
       /** `timeoutMs` is absent without `--timeout`: the run's own default applies. */
       readonly tlc: { readonly timeoutMs?: number } | null;
+      /** `--require-proof`: a node that requires a proof without a passed one fails the check. */
+      readonly requireProof: boolean;
+    }
+  | {
+      readonly kind: "prove";
+      readonly directory: string;
+      /** Per node. Absent without `--timeout`: the run's own default applies. */
+      readonly timeoutMs?: number;
     }
   | {
       readonly kind: "serve";
@@ -146,17 +166,40 @@ function parseCheck(positionals: readonly string[], values: Values): Result<Comm
   if (extra.length > 0) return unknownCommand(positionals);
   const refused = unaccepted("check", values);
   if (refused !== null) return refused;
+  const requireProof = values["require-proof"] === true;
   if (values.tlc !== true) {
     return values.timeout === undefined
-      ? accept({ kind: "check", directory, tlc: null })
+      ? accept({ kind: "check", directory, tlc: null, requireProof })
       : refuse("--timeout は --tlc と一緒に使います");
   }
+  const timeout = parseTimeout(values);
+  if (!timeout.ok) return timeout;
+  const tlc = timeout.value === undefined ? {} : { timeoutMs: timeout.value };
+  return accept({ kind: "check", directory, tlc, requireProof });
+}
+
+/** `--timeout` in whole seconds, as milliseconds. `undefined` when it is not given. */
+function parseTimeout(values: Values): Result<number | undefined> {
   const seconds = values.timeout;
-  if (seconds === undefined) return accept({ kind: "check", directory, tlc: {} });
+  if (seconds === undefined) return accept(undefined);
   if (typeof seconds !== "string" || !/^[1-9]\d*$/.test(seconds)) {
     return refuse("--timeout は 1 以上の整数（秒）にしてください");
   }
-  return accept({ kind: "check", directory, tlc: { timeoutMs: Number(seconds) * 1000 } });
+  return accept(Number(seconds) * 1000);
+}
+
+function parseProve(positionals: readonly string[], values: Values): Result<Command> {
+  const [, directory = ".", ...extra] = positionals;
+  if (extra.length > 0) return unknownCommand(positionals);
+  const refused = unaccepted("prove", values);
+  if (refused !== null) return refused;
+  const timeout = parseTimeout(values);
+  if (!timeout.ok) return timeout;
+  return accept(
+    timeout.value === undefined
+      ? { kind: "prove", directory }
+      : { kind: "prove", directory, timeoutMs: timeout.value },
+  );
 }
 
 function parseExport(positionals: readonly string[], values: Values): Result<Command> {
@@ -238,6 +281,7 @@ function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Result<C
         tlc: { type: "boolean" },
         mermaid: { type: "boolean" },
         timeout: { type: "string" },
+        "require-proof": { type: "boolean" },
         port: { type: "string" },
         open: { type: "boolean" },
         help: { type: "boolean", short: "h" },
@@ -257,6 +301,8 @@ function parseCommand(args: readonly string[], env: NodeJS.ProcessEnv): Result<C
         return parseScan(positionals, values);
       case "check":
         return parseCheck(positionals, values);
+      case "prove":
+        return parseProve(positionals, values);
       case "export":
         return parseExport(positionals, values);
       case "tla":
@@ -437,7 +483,9 @@ async function main(args: readonly string[]): Promise<number> {
     case "scan":
       return runScan(root, command);
     case "check":
-      return runCheck(root, command.tlc);
+      return runCheck(root, command);
+    case "prove":
+      return runProve(root, command);
     case "export":
       return runMermaid(root);
     case "tla-export":
@@ -542,7 +590,7 @@ async function runScan(
  */
 async function runCheck(
   root: string,
-  tlc: { readonly timeoutMs?: number } | null,
+  { tlc, requireProof }: Extract<Command, { readonly kind: "check" }>,
 ): Promise<number> {
   const route = await findServer(root);
   const run = tlc === null ? accept(null) : await checkTlcVia(root, route, tlc);
@@ -568,11 +616,109 @@ async function runCheck(
   }
   if (summary?.kind === "missing") stderr.push(...summary.guide);
   if (stderr.length > 0) process.stderr.write(`${stderr.join("\n")}\n`);
-  process.stdout.write(`${reportChecks(graph, warnings, failure ?? []).join("\n")}\n`);
+  const unproved = graph.nodes.filter(
+    (node) => node.status.requireProof && node.status.proof !== "passed",
+  );
+  const report = [
+    ...reportChecks(graph, warnings, failure ?? []),
+    ...reportProofs(graph, unproved),
+  ];
+  process.stdout.write(`${report.join("\n")}\n`);
 
   const rejected = warnings.some((warning) => warning.file === PROPERTIES_FILE);
   const violated = graph.properties.some(isLiveViolation) || storedOnly.length > 0;
-  return rejected || violated || failure !== null ? 1 : 0;
+  const missingProof = requireProof && unproved.length > 0;
+  return rejected || violated || failure !== null || missingProof ? 1 : 0;
+}
+
+const PROOF_WORDS: Readonly<Record<StateNode["status"]["proof"], string>> = {
+  none: "なし",
+  pending: "検証待ち",
+  passed: "成功",
+  failed: "失敗",
+};
+
+/** The first line of a prover's message: the first failed obligation, or the summary. */
+const firstLine = (message: string): string => message.split("\n")[0] ?? "";
+
+/**
+ * The nodes that require a proof and have no passed one, after the properties. Nothing at all
+ * where no node requires a proof, so such a repository's check prints what it always did.
+ */
+function reportProofs(graph: Graph, unproved: readonly StateNode[]): string[] {
+  const required = graph.nodes.filter((node) => node.status.requireProof).length;
+  if (required === 0) return [];
+  if (unproved.length === 0) return [`証明が必要な状態 ${required} 件: すべて passed`];
+  const lines = unproved.map(({ id, status, proof }) => {
+    if (proof === undefined) return `  ${PROOF_WORDS[status.proof]} ${id}`;
+    if (proof.stale) {
+      return `  古い結果 ${id}（前回は${PROOF_WORDS[proof.result]}。その後ファイルが変わりました）`;
+    }
+    const said = firstLine(proof.message);
+    return `  ${PROOF_WORDS[status.proof]} ${id}（${proof.tool}）${said === "" ? "" : `: ${said}`}`;
+  });
+  return [
+    `証明が必要な状態 ${required} 件のうち、passed でないもの ${unproved.length} 件:`,
+    ...lines,
+    "  everypath prove で検証できます。--require-proof を付けると終了コードに数えます",
+  ];
+}
+
+/** Lines of a failed run's message `prove` prints under it. proofs.json and the panel keep it all. */
+const SHOWN_LINES = 5;
+
+/** A passed node on one line. A failed one with the start of what the prover said, indented. */
+function describeRun(run: NodeRun): string[] {
+  if (run.kind === "skipped") return [`対象外 ${run.id}: ${run.reason}`];
+  const { result, message } = run.entry;
+  if (result === "passed") return [`成功 ${run.id}`];
+  const said = message === "" ? [] : message.split("\n");
+  const shown = said.slice(0, SHOWN_LINES).map((line) => `  ${line}`);
+  const more = said.length > SHOWN_LINES ? [`  …ほか ${said.length - SHOWN_LINES} 行`] : [];
+  return [`${PROOF_WORDS[result]} ${run.id}`, ...shown, ...more];
+}
+
+/**
+ * Runs the configured prover on each node that requires a proof and writes `proofs.json`, the only
+ * file it writes (R-01): `graph.json` takes the result on the next scan, or at once from a running
+ * serve, whose watcher reads the file. Exits 0 only when every one of those nodes passed.
+ */
+async function runProve(
+  root: string,
+  { timeoutMs }: Extract<Command, { readonly kind: "prove" }>,
+): Promise<number> {
+  const outcome = await prove(root, {
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    report: (run) => process.stdout.write(`${describeRun(run).join("\n")}\n`),
+  });
+  switch (outcome.kind) {
+    case "unconfigured":
+      return fail(
+        [
+          '証明のツールが決まっていません。everypath.config.json に「"proof": {"tool": "dafny"}」のように書いてください（tool は dafny、verus、command のどれか。command なら "command": "<命令> {files}" も）',
+          ...outcome.warnings.map(describeWarning),
+        ].join("\n"),
+      );
+    case "missing":
+      return fail(
+        `証明のツール ${outcome.program} が${outcome.reason}。導入するか、everypath.config.json の proof.command を直してください。proofs.json は書いていません`,
+      );
+    case "ran": {
+      const { runs } = outcome;
+      if (runs.length === 0) {
+        process.stdout.write("証明が必要な状態（@state-require proof）がありません\n");
+        return 0;
+      }
+      const written = runs.filter((run) => run.kind === "proved").length;
+      if (written > 0) {
+        process.stdout.write(
+          `.everypath/proofs.json に ${written} 件を書きました（地図には次の scan か、起動中の serve が反映します）\n`,
+        );
+      }
+      const passed = runs.every((run) => run.kind === "proved" && run.entry.result === "passed");
+      return passed ? 0 : 1;
+    }
+  }
 }
 
 /**
