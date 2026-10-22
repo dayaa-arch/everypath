@@ -189,6 +189,22 @@ export function headerCounts(graph: Graph): {
   };
 }
 
+/**
+ * Which lane decided a property, so a reviewer can tell a TLC-only finding from a reachability one
+ * (SPEC §19 item 8). TLC's explored-state count goes with it when TLC reported one.
+ */
+export function checkedByLabel(property: PropertyResult): string {
+  const states = property.statesExplored === null ? "" : `、${property.statesExplored} 状態`;
+  switch (property.checkedBy) {
+    case "bfs":
+      return "簡易検査（変数を見ない到達性）で判定";
+    case "tlc":
+      return `全探索（TLC）で判定${states}`;
+    case "both":
+      return `簡易検査と全探索（TLC）で判定${states}`;
+  }
+}
+
 /** Only step 0 is the initial state; a later step without an event took an event-less transition. */
 export function stepEvent(index: number, event: string | null): string {
   if (event !== null) return event;
