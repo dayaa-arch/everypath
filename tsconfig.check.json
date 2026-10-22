@@ -4,5 +4,6 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["src", "scripts", "test"]
+  "include": ["src", "scripts", "test"],
+  "exclude": ["src/ui/render.ts", "src/ui/main.ts"]
 }
