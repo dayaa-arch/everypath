@@ -459,7 +459,10 @@ semgrep 形式（`results[].path, extra.message, extra.severity, start.line, che
    - JS/TS: `import … from 'x'`, `import 'x'`, `require('x')`, `import('x')`。相対パスと `config.aliases` のみ解決し、拡張子補完（`.ts .tsx .js .jsx .mjs .cjs`）、`index.*`、`.js → .ts` の読み替えを行う。外部パッケージは無視。
    - Python: `from a.b import`, `import a.b`。ファイルのディレクトリ、ルート、`src/`, `app/` を基点に `a/b.py` または `a/b/__init__.py` を探す。
    - Ruby: `require_relative`。
-   - Go/Rust/Java/Kotlin: 初期スコープでは解決しない。`@state-next` で遷移を宣言する運用。
+   - Go: ルートと入れ子の `go.mod` の `module` パスで引く（`go.work` と `replace` は読まない）。`import "m/p"` と `import ( … )` は、パスに一致する最長のモジュールのディレクトリにある `_test.go` 以外の全 `.go` に解決する。`_test.go` は import 先に加えて、同じディレクトリの全ファイルもテスト済みにする。標準ライブラリと第三者のパスは無視。
+   - Rust: `mod foo;` は宣言したファイルの隣の `foo.rs` か `foo/mod.rs`（2018 版の規則。入れ子の `mod a { mod b; }` と、入れ子の外の単純な `#[path = "…"]` を含む）。`use` は `crate::`、`self::`、`super::`、宣言済みの子モジュール、`Cargo.toml` の `[package] name`（`-` は `_`）か `[lib] name` のクレート名で始まるパスを、たどれる一番深いモジュールのファイルに解決する。外部クレートは無視。`tests/` のファイルはテスト。
+   - Java/Kotlin: ソースルート `src/main/java`、`src/main/kotlin`、`src/test/java`、`src/test/kotlin`（`app/src/…` のような入れ子のモジュールを含む）とリポジトリのルートから、`import a.b.C` を `a/b/C.java` か `.kt` に解決する。入れ子クラスと静的メンバーは一番長く一致するクラスのファイル、`a.b.*` は `a/b/` 直下の全ファイル。自分のモジュールを先に探し、`src/main` のファイルは `src/test` を見ない。同じパッケージの参照（import なし）と Kotlin のトップレベル関数は解決しない。`src/test/…` のファイルはテスト。
+   - Go/Rust/Java/Kotlin 共通: コメントと文字列の中の import は読まない。解決できない import と、候補が 2 つ以上あって決められない import（ファイルが重なる、`lib.rs` と `main.rs` のどちらの根か決まらない、同じ module パスの `go.mod` が 2 つ）は何も記録せず、警告も出さない。詳細は `docs/specs/imports-more.md`。
 5. **観測遷移（observed flow）の抽出**（乖離チェック用、フェーズ 2）: JS/TS で `router.push('/x')`, `redirect('/x')`, `navigate('/x')`, `<Link href="/x">`, Next.js の `pages/`・`app/` パス、Express の `app.get('/x')` などからルートパス → ノードの対応を取る。対応づけには `@state-route /x` タグ（§17 で要検討）を使う。
 6. **ノード集約**: ファイル → ノード id（`@state` またはファイル名）。`tested` は「ノード内の全ソースファイルがテスト済み」のときのみ true。
 7. **ハッシュ**: ノードの全ファイル内容を相対パス順に連結して sha1。

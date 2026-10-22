@@ -5,6 +5,7 @@ import { join, posix, resolve } from "node:path";
 import { CONFIG_FILE, type Config, DEFAULT_CONFIG, parseConfig } from "./config.js";
 import { parseEventName, parseStateName } from "./expr.js";
 import { parseFindings, rootRelative } from "./findings.js";
+import type { Manifest } from "./imports-common.js";
 import {
   asInteger,
   asItems,
@@ -44,6 +45,8 @@ const IGNORED_DIRECTORIES: ReadonlySet<string> = new Set(
 const SOURCE_EXTENSIONS: ReadonlySet<string> = new Set(
   ".js .jsx .ts .tsx .mjs .cjs .py .go .rb .rs .java .kt".split(" "),
 );
+/** Files that name a package for the import resolvers (`go.mod`, `Cargo.toml`). The walk reads them beside the sources. */
+const MANIFEST_NAMES: ReadonlySet<string> = new Set(["go.mod", "Cargo.toml"]);
 const FINDINGS_FILES: readonly string[] = [
   "everypath.findings.json",
   `${OUTPUT_DIRECTORY}/findings.json`,
@@ -73,6 +76,8 @@ export type Workspace = {
   readonly properties: PropertiesFile;
   /** Root-relative `/` paths, sorted. */
   readonly sources: readonly Source[];
+  /** The package manifests the walk met, sorted by path. */
+  readonly manifests: readonly Manifest[];
   readonly findings: readonly Finding[];
   readonly findingsSource: string | null;
   /** Approved hash by node id, from `review.json`. */
@@ -97,6 +102,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
   const properties = await readProperties(root);
   const walked = await walk(root, configured.config);
   const sources = await readSources(root, walked.paths);
+  const manifests = await readManifests(root, walked.manifests);
   const [findings, review, previous, tlc] = await Promise.all([
     readFindings(root, configured.config),
     readApprovals(root),
@@ -108,6 +114,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
     config: configured.config,
     properties: properties.file,
     sources: sources.sources,
+    manifests: manifests.manifests,
     findings: findings.list,
     findingsSource: findings.source,
     approvals: review.approvals,
@@ -118,6 +125,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
       ...properties.warnings,
       ...walked.warnings,
       ...sources.warnings,
+      ...manifests.warnings,
       ...findings.warnings,
       ...review.warnings,
       ...tlc.warnings,
@@ -233,8 +241,9 @@ export async function readOutput(
  * the layout and every temporary file never start a scan. `review.json` and `tla/result.json` do,
  * though the server writes them too: that rescan finds the graph it already sent and writes nothing.
  * Elsewhere, outside the walk's ignored directories, a source file counts, and so does any JSON file
- * (the config, the properties, every findings file wherever `findings` points) and any name without
- * an extension, which may be a directory moved or removed with its files. `isDirectory` asks whether
+ * (the config, the properties, every findings file wherever `findings` points), a package manifest
+ * (`go.mod`, `Cargo.toml`: they decide what an import resolves to) and any name without an extension,
+ * which may be a directory moved or removed with its files. `isDirectory` asks whether
  * a poller should look inside.
  */
 export function isScanInput(path: string, isDirectory = false): boolean {
@@ -246,7 +255,11 @@ export function isScanInput(path: string, isDirectory = false): boolean {
   if (path.split("/").some((name) => IGNORED_DIRECTORIES.has(name))) return false;
   const extension = posix.extname(path);
   return (
-    isDirectory || extension === "" || extension === ".json" || SOURCE_EXTENSIONS.has(extension)
+    isDirectory ||
+    extension === "" ||
+    extension === ".json" ||
+    SOURCE_EXTENSIONS.has(extension) ||
+    MANIFEST_NAMES.has(posix.basename(path))
   );
 }
 
@@ -418,9 +431,10 @@ export async function watchedDirectories(root: string): Promise<string[]> {
   return found;
 }
 
-/** Source files under `root`, root-relative with `/`, sorted. Symlinks are never followed. */
+/** Source files and package manifests under `root`, root-relative with `/`, sorted. Symlinks are never followed. */
 async function walk(root: string, config: Config) {
   const paths: string[] = [];
+  const manifests: string[] = [];
   const warnings: ScanWarning[] = [];
 
   async function visit(directory: string): Promise<void> {
@@ -435,18 +449,15 @@ async function walk(root: string, config: Config) {
       const path = directory === "" ? entry.name : `${directory}/${entry.name}`;
       if (entry.isDirectory()) {
         if (walksInto(entry.name, path, config)) await visit(path);
-      } else if (
-        entry.isFile() &&
-        SOURCE_EXTENSIONS.has(posix.extname(entry.name)) &&
-        !isIgnored(path, false, config)
-      ) {
-        paths.push(path);
+      } else if (entry.isFile() && !isIgnored(path, false, config)) {
+        if (SOURCE_EXTENSIONS.has(posix.extname(entry.name))) paths.push(path);
+        else if (MANIFEST_NAMES.has(entry.name)) manifests.push(path);
       }
     }
   }
 
   await visit("");
-  return { paths: paths.sort(), warnings };
+  return { paths: paths.sort(), manifests: manifests.sort(), warnings };
 }
 
 async function readSources(root: string, paths: readonly string[]) {
@@ -460,6 +471,19 @@ async function readSources(root: string, paths: readonly string[]) {
     }
   }
   return { sources, warnings };
+}
+
+async function readManifests(root: string, paths: readonly string[]) {
+  const manifests: Manifest[] = [];
+  const warnings: ScanWarning[] = [];
+  for (const path of paths) {
+    try {
+      manifests.push({ path, text: await readFile(join(root, path), "utf8") });
+    } catch (error) {
+      warnings.push(unreadable(path, errorMessage(error)));
+    }
+  }
+  return { manifests, warnings };
 }
 
 /** The first findings file that exists wins, `config.findings` before the defaults. */

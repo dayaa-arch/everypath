@@ -20,7 +20,7 @@ import {
   resolveHierarchy,
   type TreeNode,
 } from "./hierarchy.js";
-import { type ImportContext, resolveImports } from "./imports.js";
+import { type ImportContext, importContext, resolveImports } from "./imports.js";
 import { listed } from "./listing.js";
 import { resolveNext, type VarTable } from "./model.js";
 import { checkProperties, violationsOf } from "./properties.js";
@@ -96,10 +96,11 @@ export async function analyze(
   readonly history: HistoryEntry | null;
 }> {
   const workspace = await readWorkspace(resolve(root));
-  const context: ImportContext = {
-    files: new Set(workspace.sources.map((source) => source.path)),
+  const context = importContext({
+    files: workspace.sources.map((source) => source.path),
     aliases: workspace.config.aliases,
-  };
+    manifests: workspace.manifests,
+  });
   const facts = workspace.sources.map((source) => extractFacts(source, context));
   const { graph, flat } = fold(workspace, facts, options.now ?? new Date());
   return { graph, flat, history: diff(workspace.previous, graph, options.reason ?? "scan") };
