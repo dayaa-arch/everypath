@@ -1,3 +1,4 @@
+import { isContainer } from "../core/hierarchy.js";
 import { fillTemplate, type PromptKind, type Scope } from "../core/prompts.js";
 import type {
   Counterexample,
@@ -36,6 +37,9 @@ const flowsFrom = (graph: Graph, id: StateName): readonly FlowEdge[] =>
 
 const READY = (): null => null;
 
+/** Neither a planned node nor a container has a file to test or to annotate. */
+const hasCode = (node: StateNode): boolean => !node.status.planned && !isContainer(node);
+
 /**
  * When each kind applies and what it waits for, in one place: the panel's buttons, the counts of
  * "まとめて生成" and `buildPrompt` all read it, so a button never offers what cannot be made.
@@ -57,13 +61,13 @@ const KINDS: Readonly<Record<PromptKind, KindRow>> = {
   },
   "write-tests": {
     label: "テストを書く",
-    applies: (node) => !node.status.tested && !node.status.planned,
+    applies: (node) => !node.status.tested && hasCode(node),
     blocker: READY,
   },
   "draw-model": {
     label: "モデルを描かせる",
     applies: (node, graph) =>
-      !node.status.planned &&
+      hasCode(node) &&
       !flowsFrom(graph, node.id).some((edge) => edge.guard !== null || edge.set.length > 0),
     blocker: READY,
   },

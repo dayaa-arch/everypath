@@ -55,6 +55,23 @@ hook を使うときは、`settings.example.json` の `hooks` を `.claude/setti
 
 `@state` が状態の名前、`@state-next` が遷移先です。`on:` はイベント、`if:` は条件、`set:` は遷移で変わる変数を書きます。タグの一覧は `.claude/skills/everypath/SKILL.md` にあります。
 
+画面をまとめるときは、子のファイルに `@state-parent <親の状態>` を書きます。親に書いた `@state-next` は中のすべての状態から出る遷移になり、図では親が子を囲む枠になります。
+
+`src/authed.ts`
+
+```ts
+// @state 認証済み
+// @state-next ログイン on:logout set:authed=FALSE
+```
+
+`src/mypage.ts`
+
+```ts
+// @state マイページ
+// @state-parent 認証済み
+// @state-next Home on:back
+```
+
 ## 図を開く
 
 ```bash

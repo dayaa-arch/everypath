@@ -7,8 +7,8 @@ import { exampleRepo } from "./helpers/tlc.js";
 import { name } from "./helpers/ui-fixtures.js";
 
 async function exampleTla(): Promise<string> {
-  const { graph, properties } = await analyze(await exampleRepo());
-  const generated = generateTla(graph, properties);
+  const { flat } = await analyze(await exampleRepo());
+  const generated = generateTla(flat);
   assert.ok(generated.ok);
   return generated.model.tla;
 }

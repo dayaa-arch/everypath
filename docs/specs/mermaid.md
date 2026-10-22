@@ -6,7 +6,7 @@
 
 ## 完了条件
 - [x] 1. `npm run typecheck`、`npm run lint`、`npm test` がすべて exit 0（実行して確認）
-- [x] 2. 1 行目は `stateDiagram-v2`。出す行は 6 種類（ヘッダ、`classDef`、`sN : 表示名`、`[*] --> sN`、`sA --> sB` と任意の ` : ラベル`、`class sN,… 印`）だけで、末尾は改行 1 つ。flow だけを出し、dep は出さない（`test/mermaid.test.ts`）
+- [x] 2. 1 行目は `stateDiagram-v2`。出す行は 8 種類（ヘッダ、`classDef`、`sN : 表示名`、`[*] --> sN`、`sA --> sB` と任意の ` : ラベル`、`class sN,… 印`、親の `state sN {` と `}`。親は `docs/specs/hierarchy.md`）だけで、末尾は改行 1 つ。flow だけを出し、dep は出さない（`test/mermaid.test.ts`）
 - [x] 3. 状態の id は `graph.nodes` の順に `s1`、`s2`、…（ASCII）。各状態は `sN : 状態名` の 1 行で宣言し、状態名は宣言行にしか現れない。`end`、`note`、`class` などの予約語の状態名も崩れない（同上）
 - [x] 4. `model.initial` があれば `[*] --> sN` を 1 行、無ければ出さない（同上）
 - [x] 5. flow 1 本が 1 行になり、ラベルはビューアの `edgeLabel` と同じ（イベント、空白、`[ガード]`）。イベントもガードも無い遷移は ` : ` ごと省く。ガードの全演算子を含む repo で、全 flow がビューアの文字列と一致する（同上。ビューアの `edgeLabel` を import して比べる）
@@ -27,7 +27,7 @@ type Mark = "violated" | "planned"; // 印の表は 1 つ。行の並びが優�
 ## 非目標
 - dep エッジ（点線）を出すこと。出す option も作らない（要るときに足す）
 - `set:` の代入、変数、性質の本文を図に載せること（ビューアのラベルも載せない）
-- 階層状態（`state X { }`）、`direction`、README への自動挿入
+- `direction`、README への自動挿入
 
 ## 検証方法
 `test/mermaid.test.ts`（`analyze` の実物に `toMermaid` を通す。出力の各行を文法の形に照らして解釈し直してから確かめる）。条件 10 は手で確かめる。

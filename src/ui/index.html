@@ -98,6 +98,11 @@ label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
 
 .group .frame { fill: var(--chrome); fill-opacity: 0.6; stroke: var(--group); stroke-width: 1; stroke-dasharray: 6 4; }
 .group .name { font-size: 13px; fill: var(--muted); dominant-baseline: middle; }
+.parent { cursor: pointer; }
+.parent .frame { fill-opacity: 0.35; }
+.parent.container .frame { fill: var(--paper); fill-opacity: 0.5; stroke: var(--ink); stroke-width: 1.5; }
+.parent .name { font-size: 13px; font-weight: 600; fill: var(--ink); dominant-baseline: middle; }
+.parent .ring { fill: none; stroke: var(--ink); stroke-width: 2; stroke-dasharray: 5 3; }
 .box { cursor: pointer; }
 .box .title { font-size: 15px; font-weight: 600; text-anchor: middle; }
 .box .caption { font-size: 13px; text-anchor: middle; }

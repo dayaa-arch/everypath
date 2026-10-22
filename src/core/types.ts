@@ -8,8 +8,15 @@ export type StateName = Brand<string, "StateName">;
 /** A member of an enum variable's domain, as written in `{a,b,c}` or in value position. */
 export type MemberName = Brand<string, "MemberName">;
 
+declare const leaf: unique symbol;
+/**
+ * A state of the flat model: a node with no child. A transition goes from a leaf to a leaf, a property
+ * is judged on leaves, and TLA+ has one `S` constant per leaf. Minted only by `src/core/hierarchy.ts`.
+ */
+export type Leaf = StateName & { readonly [leaf]: true };
+
 export type NonEmpty<T> = readonly [T, ...T[]];
-type AtLeastTwo<T> = readonly [T, T, ...T[]];
+export type AtLeastTwo<T> = readonly [T, T, ...T[]];
 
 export type ParseWarning = {
   readonly message: string;
@@ -31,7 +38,7 @@ export type Value =
   | { readonly kind: "member"; readonly name: MemberName };
 
 /** A bare `authed` is parsed as `authed == TRUE`. Ordering compares with an integer only. */
-type VarAtom =
+export type VarAtom =
   | {
       readonly kind: "cmp";
       readonly op: "==" | "!=";
@@ -48,7 +55,7 @@ type VarAtom =
 /** `state == A` is `{A}`; `state != A` is `not({A})`. Members are distinct. */
 type StateAtom = { readonly kind: "state-in"; readonly states: NonEmpty<StateName> };
 
-type Expr<Atom, Implication extends boolean> =
+export type Expr<Atom, Implication extends boolean> =
   | Atom
   | { readonly kind: "not"; readonly operand: Expr<Atom, Implication> }
   | { readonly kind: "and"; readonly operands: AtLeastTwo<Expr<Atom, Implication>> }
@@ -140,11 +147,24 @@ export type Finding = {
 /** A `@state-risk` the agent declared about itself. Kept apart from scanner findings. */
 export type Risk = { readonly file: string; readonly message: string };
 
+/**
+ * The three fields of `@state-parent` are written only when they are set, so the graph.json of a
+ * repository without it is what it was before it existed.
+ */
 export type StateNode = {
   readonly id: StateName;
+  /** The state this one is inside. Absent at the top level. Acyclic, at most `MAX_DEPTH` deep. */
+  readonly parent?: StateName;
+  /** On a state with children: the child `@state-initial` marks. The top level's mark is `model.initial`. */
+  readonly initialChild?: StateName;
+  /**
+   * A state with children that no file claims: a frame round them and nothing else. It is not
+   * `planned`, and has nothing to test, review or approve.
+   */
+  readonly container?: true;
   readonly group: string | null;
   readonly desc: string | null;
-  /** Root-relative, `/`-separated, sorted. Empty for a planned node. */
+  /** Root-relative, `/`-separated, sorted. Empty for a planned node and a container. */
   readonly files: readonly string[];
   readonly lines: number;
   /** sha1 of the node's file contents concatenated in `files` order. Approvals match against it. */
@@ -210,7 +230,10 @@ export type GraphModel = {
   readonly events: readonly EventName[];
 };
 
-/** `tested`, `untested` and `unreviewed` count real nodes only: a planned node has no code to test or review. */
+/**
+ * `tested`, `untested` and `unreviewed` count real nodes only: a planned node and a container have
+ * no code to test or review. `planned` counts no container.
+ */
 export type GraphStats = {
   readonly nodes: number;
   readonly edges: number;

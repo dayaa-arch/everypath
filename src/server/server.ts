@@ -523,6 +523,10 @@ const ANSWERS: Readonly<Record<JobResult, readonly [number, string]>> = {
     409,
     "ノードが表示中の版から変わっています。最新の図を確かめてから承認してください",
   ],
+  container: [
+    409,
+    "そのノードは中の状態を囲む枠で、ファイルがありません。承認するのは中の状態です",
+  ],
 };
 
 function answer(response: ServerResponse, result: JobResult): void {

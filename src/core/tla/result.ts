@@ -3,15 +3,13 @@ import { asInteger, asItems, asText, isRecord } from "../json.js";
 import { PROPERTIES_FILE } from "../properties.js";
 import type {
   Counterexample,
-  Graph,
-  PropertiesFile,
   PropertyResult,
   ScanWarning,
   StateName,
   Step,
   VarName,
 } from "../types.js";
-import { generateTla, modelKey, TLC_KINDS, type TlaNames } from "./generate.js";
+import { type Generated, modelKey, TLC_KINDS, type TlaNames } from "./generate.js";
 import type { TlcSummary } from "./run.js";
 
 /**
@@ -187,17 +185,16 @@ function awaitsTlc({ checkedBy, result }: PropertyResult): boolean {
  * verdict on a definition of the same id and kind counts. It fills a result the quick check left to
  * TLC, and it goes beside a violation the quick check found, in `tlc`: an `ok` or `violated` the
  * quick check reached is never replaced, whatever `result.json` says. A quick-check `ok` gets none,
- * because no behavior takes a path the graph does not have. When the current model has a key other
- * than the one TLC checked, the verdict is marked `staleModel`. `checkedBy` stays the quick lane's.
+ * because no behavior takes a path the graph does not have. When this scan's model (`generated`)
+ * has a key other than the one TLC checked, or there is none, the verdict is marked `staleModel`.
+ * `checkedBy` stays the quick lane's.
  */
 export function withTlcResults(
-  graph: Pick<Graph, "nodes" | "edges" | "model">,
-  file: PropertiesFile,
+  generated: Generated,
   quick: readonly PropertyResult[],
   stored: StoredVerdicts | null,
 ): readonly PropertyResult[] {
   if (stored === null) return quick;
-  const generated = generateTla(graph, file);
   const fresh = generated.ok && modelKey(generated.model) === stored.key;
   const stale: { readonly staleModel?: true } = fresh ? {} : { staleModel: true };
   return quick.map((result): PropertyResult => {

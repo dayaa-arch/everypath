@@ -266,6 +266,23 @@ describe("serve: review", () => {
     assert.deepEqual((await readReview(root)).approvals, {});
   });
 
+  it("answers 409 in Japanese to approving a container, which has no file, and records nothing", async () => {
+    const root = await makeRepo({
+      ...small,
+      "src/c.ts": ts("@state C", "@state-parent Ghost"),
+    });
+    const serve = await serveRepo(root);
+    const shown = (await request(serve, "GET", "/graph.json")).json() as Graph;
+    assert.equal(node(shown, "Ghost").container, true);
+
+    const refused = await request(serve, "POST", reviewPath("Ghost"), { body: { note: "x" } });
+    assert.equal(refused.status, 409, refused.text);
+    assert.match(refused.text, JAPANESE);
+    assert.deepEqual((await readReview(root)).approvals, {});
+    const child = await request(serve, "POST", reviewPath("C"), { body: { note: "x" } });
+    assert.ok(succeeded(child), `${child.status} ${child.text}`);
+  });
+
   it("answers 409 for a hash that is not the node's current hash, and approves the current one", async () => {
     const root = await makeRepo(small);
     const serve = await serveRepo(root);

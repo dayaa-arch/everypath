@@ -1,3 +1,4 @@
+import { hierarchyOf, isContainer } from "../core/hierarchy.js";
 import { PROMPT_KINDS, type PromptKind } from "../core/prompts.js";
 import type {
   EdgeRef,
@@ -10,7 +11,7 @@ import type {
 } from "../core/types.js";
 import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
 import { driftsFrom, fixOf, selectedIds } from "./facts.js";
-import { type Box, boxAt, type Point } from "./layout.js";
+import { type Box, boxAt, type Point, pointIn } from "./layout.js";
 import { modelSlice } from "./model.js";
 import { type Prompt, promptBlocker, promptLabel, promptTargets } from "./prompt.js";
 import {
@@ -75,6 +76,8 @@ type Gesture =
       readonly start: Point;
       readonly from: Viewport;
       readonly moved: boolean;
+      /** A parent's frame pressed: a click selects it. A frame is never dragged; its boxes are. */
+      readonly frame: StateName | null;
     };
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -244,7 +247,7 @@ export function mount(commands: Commands): Viewer {
   /** Selects the node and brings its box to the middle of the canvas, at the zoom it has now. */
   function jump(id: StateName): void {
     commands.dispatch({ kind: "select", id, extend: false });
-    const point = latest?.layout[id];
+    const point = latest === null ? undefined : pointIn(latest.layout, id);
     if (point === undefined) return;
     const box = boxAt(point);
     const { width, height } = canvas.getBoundingClientRect();
@@ -262,15 +265,27 @@ export function mount(commands: Commands): Viewer {
     return latest?.graph?.nodes.find((node) => node.id === id)?.id ?? null;
   };
 
+  const isFrame = (target: EventTarget | null): boolean =>
+    target instanceof Element && target.closest("[data-id]")?.classList.contains("parent") === true;
+
   canvas.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || gesture.kind !== "idle") return;
     const start = { x: event.clientX, y: event.clientY };
     const id = nodeAt(event.target);
-    const origin = id === null ? undefined : latest?.layout[id];
+    const frame = isFrame(event.target) ? id : null;
+    const origin =
+      id === null || frame !== null || latest === null ? undefined : pointIn(latest.layout, id);
     if (id !== null && origin !== undefined) {
       gesture = { kind: "press", pointer: event.pointerId, id, start, origin, at: origin };
     } else {
-      gesture = { kind: "pan", pointer: event.pointerId, start, from: viewport, moved: false };
+      gesture = {
+        kind: "pan",
+        pointer: event.pointerId,
+        start,
+        from: viewport,
+        moved: false,
+        frame,
+      };
       canvas.classList.add("panning");
     }
     canvas.setPointerCapture(event.pointerId);
@@ -305,7 +320,11 @@ export function mount(commands: Commands): Viewer {
     }
     if (ended.kind === "drag") commands.dispatch({ kind: "move", id: ended.id, to: ended.at });
     if (ended.kind === "pan" && !ended.moved) {
-      commands.dispatch({ kind: "select", id: null, extend: false });
+      commands.dispatch({
+        kind: "select",
+        id: ended.frame,
+        extend: ended.frame !== null && event.shiftKey,
+      });
     }
   };
   canvas.addEventListener("pointerup", (event) => release(event, true));
@@ -390,6 +409,8 @@ function draw(item: SceneItem): SVGElement {
         svg("text", { class: "name", x: label.x + 4, y: label.y + label.height / 2 }, item.name),
       );
     }
+    case "parent":
+      return drawParent(item);
     case "box":
       return drawBox(item);
     case "line": {
@@ -436,6 +457,44 @@ function draw(item: SceneItem): SVGElement {
       return _exhaustive;
     }
   }
+}
+
+/**
+ * A parent's frame in the tone its own files give it, solid, so it never reads as a group (dashed
+ * grey) or as planned. A container has no file and no tone: plain ink. It carries the parent's id, so
+ * a click on it selects the parent.
+ */
+function drawParent(item: Extract<SceneItem, { kind: "parent" }>): SVGElement {
+  const row = item.tone === null ? null : rowOf(item.tone);
+  const { box, label } = item;
+  const paint =
+    row === null ? {} : { fill: row.fill, stroke: row.stroke, "stroke-width": row.width };
+  return svg(
+    "g",
+    { class: row === null ? "parent container" : "parent", "data-id": item.id },
+    svg("rect", { class: "frame", ...box, rx: 10, ...paint }),
+    item.selected
+      ? svg("rect", {
+          class: "ring",
+          x: box.x - 6,
+          y: box.y - 6,
+          width: box.width + 12,
+          height: box.height + 12,
+          rx: 16,
+        })
+      : null,
+    svg(
+      "text",
+      {
+        class: "name",
+        x: label.x + 4,
+        y: label.y + label.height / 2,
+        ...(row === null ? {} : { fill: row.text }),
+      },
+      item.id,
+    ),
+    svg("title", {}, item.id),
+  );
 }
 
 function drawBox(item: Extract<SceneItem, { kind: "box" }>): SVGElement {
@@ -705,7 +764,9 @@ function panelOf(state: ViewState, commands: Commands): Content[] {
   }
   return [
     html("h2", {}, node.id),
-    chip(rowOf(toneOf(node, graph.properties))),
+    isContainer(node)
+      ? html("span", { class: "chip" }, "中の状態を囲む枠（ファイルなし）")
+      : chip(rowOf(toneOf(node, graph.properties))),
     html(
       "div",
       { class: "tabs" },
@@ -733,8 +794,21 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
     ...(stale === 0 ? [] : [`古いモデルに対する結果 ${stale} 件`]),
     ...(guardOnly === 0 ? [] : [`ガードを無視したときだけの経路 ${guardOnly} 件`]),
   ];
+  const tree = hierarchyOf(graph.nodes);
+  const parent = tree.parentOf(node.id);
+  const children = tree.childrenOf(node.id);
+  const container = isContainer(node);
   return [
     node.desc === null ? null : html("p", {}, node.desc),
+    children.length === 0
+      ? null
+      : html(
+          "p",
+          { class: "hint" },
+          container
+            ? "中の状態をまとめる枠です。遷移を書くには、この名前の @state を持つファイルを作ります。"
+            : "この状態の @state-next は、中のすべての状態から出る遷移になります。",
+        ),
     status.changedSinceReview
       ? html("p", { class: "alert" }, "承認時からの変更あり（hash 不一致）")
       : null,
@@ -746,9 +820,11 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
         "dd",
         {},
         ...(node.files.length === 0
-          ? ["なし（計画のみ）"]
+          ? [container ? "なし（中の状態を囲む枠だけ）" : "なし（計画のみ）"]
           : node.files.map((file) => html("div", { class: "mono" }, file))),
       ),
+      ...(parent === null ? [] : [html("dt", {}, "親"), html("dd", {}, parent)]),
+      ...(children.length === 0 ? [] : [html("dt", {}, "子"), html("dd", {}, children.join("、"))]),
       html("dt", {}, "グループ"),
       html("dd", {}, node.group ?? "なし"),
       html("dt", {}, "最終変更"),
@@ -770,14 +846,16 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
         `${PROOF[status.proof]}${status.requireProof && status.proof !== "passed" ? "（証明必須）" : ""}`,
       ),
     ),
-    html(
-      "div",
-      { class: "actions" },
-      status.reviewed ? null : button("仕様を承認", () => commands.approve(node)),
-      status.reviewed || status.changedSinceReview
-        ? button("承認を取り消す", () => commands.revoke(node))
-        : null,
-    ),
+    container
+      ? null
+      : html(
+          "div",
+          { class: "actions" },
+          status.reviewed ? null : button("仕様を承認", () => commands.approve(node)),
+          status.reviewed || status.changedSinceReview
+            ? button("承認を取り消す", () => commands.revoke(node))
+            : null,
+        ),
     ...driftOf(state, graph, node, commands),
     ...generateOf("指示を生成", state, graph, [node.id], commands),
     ...section(
@@ -952,6 +1030,17 @@ function modelOf(state: ViewState, node: StateNode, commands: Commands): Content
         html("p", { class: "hint" }, "ヘッダの「全探索を実行」を押すとモデルが作られます。"),
       ];
     case "loaded": {
+      const children =
+        state.graph === null ? [] : hierarchyOf(state.graph.nodes).childrenOf(node.id);
+      if (children.length > 0) {
+        return [
+          html(
+            "p",
+            {},
+            `親の状態は TLA+ の状態になりません。中の状態（${children.join("、")}）を選ぶと、そのモデルが出ます`,
+          ),
+        ];
+      }
       const slice = modelSlice(model.text, node.id);
       if (slice === null) {
         return [

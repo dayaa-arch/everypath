@@ -1,16 +1,13 @@
 import { createHash } from "node:crypto";
+import type { Flat, FlatArc, FlatModel, FlatPropertyDef, LeafExpr } from "../flatten.js";
+import { listed } from "../listing.js";
 import { checkComparison, type VarTable } from "../model.js";
-import { entryOf } from "../properties.js";
 import type {
   Assignment,
   EventName,
-  FlowEdge,
-  Graph,
+  Leaf,
   MemberName,
   ModelVar,
-  PropExpr,
-  PropertiesFile,
-  PropertyDef,
   PropertyId,
   StateName,
   Value,
@@ -19,6 +16,21 @@ import type {
 
 /** The name of the range check. Property checks are `P`, a digit and a name, so none can be it. */
 export const TYPE_OK = "TypeOK";
+
+/**
+ * The most arcs Model.tla gets one action each for. TLC tries every action in every state, so its
+ * time grows with arcs times states. Measured with TLC 1.7.4 (`-workers auto`) on a guarded
+ * self-loop of a parent: 10,000 arcs took 5 s, 20,000 took 8 s (a 4 MB Model.tla, 565 states; 42 s
+ * in one run beside other work) and 30,000 took 22 s, against the default 120 s budget. A parent
+ * multiplies: a self-loop on one with 1,000 unmarked children is 1,000,000 arcs, a 148 MB Model.tla.
+ */
+export const MAX_ARCS = 20_000;
+
+/**
+ * The most bytes Model.tla may take: twice what `MAX_ARCS` arcs took at the measured 200 bytes each,
+ * so only long guards reach it. An inherited arc carries the negation of every inner rival's guard.
+ */
+export const MAX_TLA_BYTES = 8 * 1024 * 1024;
 
 /** ASCII identifier to display name. TLC prints only the keys; `result.json` stores the whole table. */
 export type TlaNames = {
@@ -46,7 +58,7 @@ export type TlaModel = {
   readonly rejected: readonly { readonly id: PropertyId; readonly reason: string }[];
 };
 
-type Kind = PropertyDef["kind"];
+type Kind = FlatPropertyDef["kind"];
 
 /**
  * The kinds SPEC §6.3 gives to TLC, and so the kinds a verdict in `result.json` may be about. The
@@ -58,10 +70,10 @@ export const TLC_KINDS = [
   "never-reach",
 ] as const satisfies readonly Kind[];
 
-type TlcDef = Extract<PropertyDef, { readonly kind: (typeof TLC_KINDS)[number] }>;
-type NeverReach = Extract<PropertyDef, { readonly kind: "never-reach" }>;
+type TlcDef = Extract<FlatPropertyDef, { readonly kind: (typeof TLC_KINDS)[number] }>;
+type NeverReach = Extract<FlatPropertyDef, { readonly kind: "never-reach" }>;
 
-function isTlcDef(def: PropertyDef): def is TlcDef {
+function isTlcDef(def: FlatPropertyDef): def is TlcDef {
   return TLC_KINDS.some((kind) => kind === def.kind);
 }
 
@@ -96,12 +108,12 @@ function tableOf<T extends string>(prefix: Prefix, displays: readonly T[]): Tabl
 
 /**
  * A variable that says whether the behavior has been in one of a never-reach's `avoid` states. Only a
- * never-reach with an avoid state that is a node has one.
+ * never-reach whose `avoid` names a state of the graph has one.
  */
-type History = { readonly name: string; readonly avoid: readonly StateName[] };
+type History = { readonly name: string; readonly avoid: readonly Leaf[] };
 
 type Naming = {
-  readonly states: Table<StateName>;
+  readonly states: Table<Leaf>;
   readonly vars: Table<VarName>;
   readonly events: Table<EventName>;
   readonly members: Table<MemberName>;
@@ -111,25 +123,22 @@ type Naming = {
 };
 
 /** The only place names are minted. `H` takes its check's position, so `H5_x` belongs to `P5_x`. */
-function allocate(graph: Pick<Graph, "nodes" | "model">, accepted: readonly TlcDef[]): Naming {
-  const members = graph.model.vars.flatMap((decl) => (decl.kind === "enum" ? decl.members : []));
-  const states = tableOf(
-    "S",
-    graph.nodes.map((node) => node.id),
-  );
+function allocate(model: FlatModel, accepted: readonly TlcDef[]): Naming {
+  const members = model.vars.flatMap((decl) => (decl.kind === "enum" ? decl.members : []));
+  const states = tableOf("S", model.states);
   const history = new Map<PropertyId, History>();
   for (const [index, def] of accepted.entries()) {
     if (def.kind !== "never-reach") continue;
-    const avoid = def.avoid.filter((state) => states.id.has(state));
+    const { avoid } = def;
     if (avoid.length > 0) history.set(def.id, { name: identifier("H", index + 1, def.id), avoid });
   }
   return {
     states,
     vars: tableOf(
       "v",
-      graph.model.vars.map((decl) => decl.name),
+      model.vars.map((decl) => decl.name),
     ),
-    events: tableOf("e", graph.model.events),
+    events: tableOf("e", model.events),
     members: tableOf("m", [...new Set(members)]),
     checks: tableOf(
       "P",
@@ -154,7 +163,7 @@ const OPERATORS = {
   "<=": "<=",
   ">": ">",
   ">=": ">=",
-} as const satisfies Record<Extract<PropExpr, { readonly kind: "cmp" }>["op"], string>;
+} as const satisfies Record<Extract<LeafExpr, { readonly kind: "cmp" }>["op"], string>;
 
 function literal(value: Value, naming: Naming): string {
   switch (value.kind) {
@@ -167,7 +176,7 @@ function literal(value: Value, naming: Naming): string {
   }
 }
 
-function problemIn(expr: PropExpr, vars: VarTable): string | null {
+function problemIn(expr: LeafExpr, vars: VarTable): string | null {
   switch (expr.kind) {
     case "cmp":
       return checkComparison(expr, vars);
@@ -183,7 +192,7 @@ function problemIn(expr: PropExpr, vars: VarTable): string | null {
   }
 }
 
-function firstOf(exprs: readonly PropExpr[], vars: VarTable): string | null {
+function firstOf(exprs: readonly LeafExpr[], vars: VarTable): string | null {
   for (const expr of exprs) {
     const problem = problemIn(expr, vars);
     if (problem !== null) return problem;
@@ -193,10 +202,10 @@ function firstOf(exprs: readonly PropExpr[], vars: VarTable): string | null {
 
 /**
  * Guards and property expressions share this one switch: `GuardExpr` is assignable to `PropExpr`.
- * Every compound is parenthesized and atoms are bare, so TLA+ precedence never matters. A state that
- * is no node is dropped from its set. Callers pass only expressions whose variables are declared.
+ * Every compound is parenthesized and atoms are bare, so TLA+ precedence never matters. Callers pass
+ * only expressions whose variables are declared.
  */
-function formula(expr: PropExpr, naming: Naming): string {
+function formula(expr: LeafExpr, naming: Naming): string {
   switch (expr.kind) {
     case "cmp":
       return `${nameOf(naming.vars, expr.name)} ${OPERATORS[expr.op]} ${literal(expr.value, naming)}`;
@@ -219,10 +228,9 @@ function formula(expr: PropExpr, naming: Naming): string {
   }
 }
 
-/** A state that is no node is left out. */
-function stateSet(states: readonly StateName[], naming: Naming): string {
-  const known = states.filter((state) => naming.states.id.has(state));
-  return setOf(known.map((state) => quoted(nameOf(naming.states, state))));
+/** Leaves only: `flatten` has already turned a state with children into the leaves inside it. */
+function stateSet(states: readonly Leaf[], naming: Naming): string {
+  return setOf(states.map((state) => quoted(nameOf(naming.states, state))));
 }
 
 function assignedValue(value: Assignment["value"], naming: Naming): string {
@@ -267,15 +275,16 @@ function conjuncts(items: readonly string[]): string[] {
   return items.map((item) => `  /\\ ${item}`);
 }
 
-function action(edge: FlowEdge, name: string, graph: Pick<Graph, "model">, naming: Naming): string {
-  const assigned = new Map(edge.set.map(({ target, value }) => [target, value]));
-  const unchanged = graph.model.vars.filter((decl) => !assigned.has(decl.name));
-  const event = edge.event === null ? "tau" : nameOf(naming.events, edge.event);
+/** One action per arc. An arc a parent's `@state-next` gave a leaf says so in its comment. */
+function action(arc: FlatArc, name: string, model: FlatModel, naming: Naming): string {
+  const assigned = new Map(arc.set.map(({ target, value }) => [target, value]));
+  const unchanged = model.vars.filter((decl) => !assigned.has(decl.name));
+  const event = arc.event === null ? "tau" : nameOf(naming.events, arc.event);
   const lines = [
-    `state = ${quoted(nameOf(naming.states, edge.from))}`,
-    ...(edge.guard === null ? [] : [formula(edge.guard, naming)]),
-    `state' = ${quoted(nameOf(naming.states, edge.to))}`,
-    ...graph.model.vars.flatMap(({ name: target }) => {
+    `state = ${quoted(nameOf(naming.states, arc.from))}`,
+    ...(arc.guard === null ? [] : [formula(arc.guard, naming)]),
+    `state' = ${quoted(nameOf(naming.states, arc.to))}`,
+    ...model.vars.flatMap(({ name: target }) => {
       const value = assigned.get(target);
       return value === undefined
         ? []
@@ -286,8 +295,10 @@ function action(edge: FlowEdge, name: string, graph: Pick<Graph, "model">, namin
       ? []
       : [`UNCHANGED <<${unchanged.map((decl) => nameOf(naming.vars, decl.name)).join(", ")}>>`]),
   ];
+  const { declared } = arc;
+  const inherited = declared.from === arc.from ? "" : `（${declared.from} から継承）`;
   return [
-    comment(`${edge.via.join(", ")}: @state-next ${edge.text}`),
+    comment(`${declared.via.join(", ")}: @state-next ${declared.text}${inherited}`),
     `${name} ==`,
     ...conjuncts(lines),
   ].join("\n");
@@ -350,14 +361,14 @@ function nextOf(actions: readonly string[], history: readonly History[], naming:
   ];
 }
 
+/** Model.tla, or `null` as soon as it would pass `MAX_TLA_BYTES`. */
 function render(
-  graph: Pick<Graph, "nodes" | "edges" | "model">,
-  entry: readonly StateName[],
+  model: FlatModel,
+  entry: readonly Leaf[],
   accepted: readonly TlcDef[],
   naming: Naming,
-): string {
-  const { vars } = graph.model;
-  const flows = graph.edges.filter((edge): edge is FlowEdge => edge.type === "flow");
+): string | null {
+  const { vars } = model;
   const names = (table: Table<string>) => [...table.id.values()];
   const history = [...naming.history.values()];
   const variables = [
@@ -366,7 +377,15 @@ function render(
     "lastEvent",
     ...history.map(({ name }) => name),
   ].join(", ");
-  const actions = flows.map((edge, index) => ({ edge, name: `A${index + 1}` }));
+  const actions = model.arcs.map((arc, index) => ({ arc, name: `A${index + 1}` }));
+  const written: string[][] = [];
+  let bytes = 0;
+  for (const { arc, name } of actions) {
+    const text = action(arc, name, model, naming);
+    bytes += Buffer.byteLength(text);
+    if (bytes > MAX_TLA_BYTES) return null;
+    written.push([text]);
+  }
   const blocks = [
     [
       "---- MODULE Model ----",
@@ -374,12 +393,12 @@ function render(
       "EXTENDS Naturals",
     ],
     [
-      ...graph.nodes.map((node) => comment(`${nameOf(naming.states, node.id)} = ${node.id}`)),
-      `States == ${setOf(graph.nodes.map((node) => quoted(nameOf(naming.states, node.id))))}`,
+      ...model.states.map((state) => comment(`${nameOf(naming.states, state)} = ${state}`)),
+      `States == ${setOf(model.states.map((state) => quoted(nameOf(naming.states, state))))}`,
     ],
     [
       comment("tau = イベント無しの遷移"),
-      ...graph.model.events.map((event) => comment(`${nameOf(naming.events, event)} = ${event}`)),
+      ...model.events.map((event) => comment(`${nameOf(naming.events, event)} = ${event}`)),
       `Events == ${setOf(["tau", ...names(naming.events)].map(quoted))}`,
     ],
     [
@@ -410,7 +429,7 @@ function render(
         ...history.map(({ name, avoid }) => `${name} = (state \\in ${stateSet(avoid, naming)})`),
       ]),
     ],
-    ...actions.map(({ edge, name }) => [action(edge, name, graph, naming)]),
+    ...written,
     nextOf(
       actions.map(({ name }) => name),
       history,
@@ -419,7 +438,8 @@ function render(
     ["Spec == Init /\\ [][Next]_vars /\\ WF_vars(Next)"],
     ...accepted.map((def) => [definition(def, nameOf(naming.checks, def.id), naming)]),
   ];
-  return `${blocks.map((block) => block.join("\n")).join("\n\n")}\n====\n`;
+  const tla = `${blocks.map((block) => block.join("\n")).join("\n\n")}\n====\n`;
+  return Buffer.byteLength(tla) > MAX_TLA_BYTES ? null : tla;
 }
 
 /**
@@ -432,46 +452,100 @@ export function modelKey({ tla, names }: Pick<TlaModel, "tla" | "names">): strin
   return createHash("sha1").update(read.join("\n")).update(JSON.stringify(names)).digest("hex");
 }
 
+/** Why no Model.tla was made. `too-large` names the parents whose arcs made it so, most arcs first. */
+export type Unmodeled =
+  | { readonly ok: false; readonly kind: "no-entry"; readonly reason: string }
+  | {
+      readonly ok: false;
+      readonly kind: "too-large";
+      readonly reason: string;
+      readonly parents: readonly StateName[];
+    };
+
+export type Generated = { readonly ok: true; readonly model: TlaModel } | Unmodeled;
+
+/**
+ * The parents a transition was declared on or into, by how many arcs they spread it to, most first.
+ * An arc a leaf declared to a leaf counts for none.
+ */
+function spreading(model: FlatModel): { readonly id: StateName; readonly arcs: number }[] {
+  const counts = new Map<StateName, number>();
+  for (const { declared } of model.arcs) {
+    for (const end of new Set([declared.from, declared.to])) {
+      if (!model.hierarchy.isLeaf(end)) counts.set(end, (counts.get(end) ?? 0) + 1);
+    }
+  }
+  return [...counts]
+    .map(([id, arcs]) => ({ id, arcs }))
+    .sort((a, b) => b.arcs - a.arcs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+function tooLarge(model: FlatModel, over: string): Unmodeled {
+  const parents = spreading(model);
+  const named =
+    parents.length === 0
+      ? ""
+      : `。遷移を増やしている親: ${listed(
+          parents.map(({ id, arcs }) => `${id}（${arcs} 本）`),
+          "、",
+        )}`;
+  return {
+    ok: false,
+    kind: "too-large",
+    reason: `${over}ので、Model.tla を作りません（TLC は動かず、簡易検査だけで判定します）${named}`,
+    parents: parents.map(({ id }) => id),
+  };
+}
+
 /**
  * SPEC §10.1. `invariant`, `leads-to` and `never-reach` become TLA+; every other kind stays with the
  * BFS lane. A never-reach is checked with the invariants, where TLC follows the guards the BFS lane
- * ignores. Fails as a whole only without an entry state: Init would be empty and TLC would call that
- * a success.
+ * ignores. Fails as a whole without an entry state (Init would be empty and TLC would call that a
+ * success) and past `MAX_ARCS` or `MAX_TLA_BYTES`, which it finds before building the text. Never
+ * throws: every scan with a stored TLC result calls it.
  */
-export function generateTla(
-  graph: Pick<Graph, "nodes" | "edges" | "model">,
-  file: PropertiesFile,
-):
-  | { readonly ok: true; readonly model: TlaModel }
-  | { readonly ok: false; readonly reason: string } {
-  const entry = entryOf(graph, file);
+export function generateTla(flat: Flat): Generated {
+  const entry = flat.entry;
   if (entry.length === 0) {
     return {
       ok: false,
+      kind: "no-entry",
       reason:
         "入口にする状態がありません（entry も @state-initial も入エッジの無い状態も無い）。TLA+ の Init を作れません",
     };
   }
-  const vars: VarTable = new Map(graph.model.vars.map((decl) => [decl.name, decl]));
+  const { arcs } = flat.model;
+  if (arcs.length > MAX_ARCS) {
+    return tooLarge(
+      flat.model,
+      `平らにした遷移が ${arcs.length} 本で、上限 ${MAX_ARCS} 本を超える`,
+    );
+  }
+  const vars: VarTable = new Map(flat.model.vars.map((decl) => [decl.name, decl]));
   const accepted: TlcDef[] = [];
   const rejected: { id: PropertyId; reason: string }[] = [];
-  for (const def of file.properties.filter(isTlcDef)) {
+  for (const def of flat.properties.filter(isTlcDef)) {
     const problem = problemOfDef(def, vars);
     if (problem === null) accepted.push(def);
     else
       rejected.push({ id: def.id, reason: `性質 ${def.id} の式を TLA+ にできません: ${problem}` });
   }
 
-  const naming = allocate(graph, accepted);
+  const naming = allocate(flat.model, accepted);
   const checkName = (def: TlcDef) => nameOf(naming.checks, def.id);
   const invariants = [...accepted.filter((def) => def.kind !== "leads-to").map(checkName), TYPE_OK];
   const temporal = accepted.filter((def) => def.kind === "leads-to").map(checkName);
   const events: Record<string, EventName | null> = { tau: null, ...naming.events.back };
+  const tla = render(flat.model, entry, accepted, naming);
+  if (tla === null) {
+    const limit = MAX_TLA_BYTES / 1024 / 1024;
+    return tooLarge(flat.model, `Model.tla が上限 ${limit} MB を超える`);
+  }
 
   return {
     ok: true,
     model: {
-      tla: render(graph, entry, accepted, naming),
+      tla,
       cfg: (checks) => {
         const invariant = checks.filter((check) => invariants.includes(check));
         return `${[

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { flatten } from "../src/core/flatten.js";
 import { checkProperties, PROPERTIES_FILE, parseProperties } from "../src/core/properties.js";
 import { scan } from "../src/core/scan.js";
 import type { Graph, PropertyResult } from "../src/core/types.js";
-import { makeRepo, node, readGraph, runCli, ts } from "./helpers/repo.js";
+import { deps, flows, makeRepo, node, readGraph, runCli, ts } from "./helpers/repo.js";
 
 const T1 = new Date("2026-10-21T00:00:00.000Z");
 
@@ -483,7 +484,14 @@ describe("properties: speed", () => {
     assert.deepEqual(warnings, []);
 
     const started = performance.now();
-    const checked = checkProperties(graph, file, graph.generatedAt);
+    const declared: Parameters<typeof flatten>[0] = {
+      nodes: graph.nodes,
+      flows: flows(graph),
+      unreadGuards: new Set(),
+      deps: deps(graph),
+      model: graph.model,
+    };
+    const checked = checkProperties(flatten(declared, file), graph.generatedAt);
     const elapsed = performance.now() - started;
 
     assert.equal(checked.properties.length, 4);

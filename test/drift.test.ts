@@ -369,7 +369,7 @@ describe("drift: model", () => {
     const noAdmin = after.graph.properties.find((result) => result.id === "no-admin");
     assert.equal(noAdmin?.result, "ok");
     const tla = (analyzed: typeof before) => {
-      const generated = generateTla(analyzed.graph, analyzed.properties);
+      const generated = generateTla(analyzed.flat);
       assert.ok(generated.ok);
       return generated.model.tla;
     };

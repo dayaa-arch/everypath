@@ -202,8 +202,8 @@ const EXPECTED_EXAMPLE_RUNS = [
 ];
 
 async function generatedFrom(files: Readonly<Record<string, string>>) {
-  const { graph, properties } = await analyze(await makeRepo(files));
-  return generateTla(graph, properties);
+  const { flat } = await analyze(await makeRepo(files));
+  return generateTla(flat);
 }
 
 async function modelOf(files: Readonly<Record<string, string>>) {
@@ -258,15 +258,15 @@ describe("tla: generating Model.tla and Model.cfg", () => {
     assert.ok(!(await readdir(root)).includes(".everypath"));
     assert.deepEqual(analyzed.graph, await scan(root, { now }));
     assert.deepEqual(
-      analyzed.properties.properties.map((p) => p.id),
+      analyzed.flat.properties.map((p) => p.id),
       ["no-unauth-home", "lock-after-3", "logout-eventually-login", "no-dead-end"],
     );
     assert.equal(analyzed.history?.reason, "scan");
   });
 
   it("writes the example as ASCII identifiers with the display names in comments", async () => {
-    const { graph, properties } = await analyze(await exampleRepo());
-    const generated = generateTla(graph, properties);
+    const { flat } = await analyze(await exampleRepo());
+    const generated = generateTla(flat);
 
     assert.ok(generated.ok);
     const { model } = generated;
@@ -279,8 +279,8 @@ describe("tla: generating Model.tla and Model.cfg", () => {
   });
 
   it("adds CONSTRAINT TypeOK to a cfg that does not check TypeOK", async () => {
-    const { graph, properties } = await analyze(await exampleRepo());
-    const generated = generateTla(graph, properties);
+    const { flat } = await analyze(await exampleRepo());
+    const generated = generateTla(flat);
     assert.ok(generated.ok);
     const { cfg } = generated.model;
 
@@ -1021,8 +1021,8 @@ async function exampleWith(...definitions: readonly unknown[]): Promise<string> 
 }
 
 async function exampleModel(...definitions: readonly unknown[]) {
-  const { graph, properties } = await analyze(await exampleWith(...definitions));
-  const generated = generateTla(graph, properties);
+  const { flat } = await analyze(await exampleWith(...definitions));
+  const generated = generateTla(flat);
   assert.ok(generated.ok, generated.ok ? "" : generated.reason);
   return generated.model;
 }

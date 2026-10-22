@@ -93,12 +93,12 @@ export async function runTlc(
   }: { readonly timeoutMs?: number; readonly signal?: AbortSignal } = {},
 ): Promise<TlcOutcome> {
   const at = new Date();
-  const { graph, properties } = await analyze(root, { now: at });
+  const { graph, flat } = await analyze(root, { now: at });
   const jar = jarPath();
   const absent = await missingTool(jar);
   if (absent !== null) return { kind: "missing", guide: installGuide(absent) };
 
-  const generated = generateTla(graph, properties);
+  const generated = generateTla(flat);
   if (!generated.ok) return { kind: "unmodeled", reason: generated.reason };
   const { model } = generated;
   const directory = await mkdtemp(join(tmpdir(), "everypath-tla-"));
@@ -156,8 +156,8 @@ export async function exportTla(root: string): Promise<
     }
   | { readonly ok: false; readonly reason: string }
 > {
-  const { graph, properties } = await analyze(root);
-  const generated = generateTla(graph, properties);
+  const { graph, flat } = await analyze(root);
+  const generated = generateTla(flat);
   if (!generated.ok) return { ok: false, reason: generated.reason };
   await writeTlaModel(graph.root, { tla: generated.model.tla, cfg: everyCheck(generated.model) });
   return { ok: true, directory: `${OUTPUT_DIRECTORY}/tla`, rejected: generated.model.rejected };
