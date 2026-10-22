@@ -9,7 +9,14 @@ import type {
   StateNode,
 } from "../core/types.js";
 import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
-import { driftsFrom, fixOf, formatTime, proofSummary, selectedIds } from "./facts.js";
+import {
+  driftsFrom,
+  fixOf,
+  formatTime,
+  proofSummary,
+  reviewSummary,
+  selectedIds,
+} from "./facts.js";
 import { type Box, boxAt, type Point, pointIn } from "./layout.js";
 import { modelSlice } from "./model.js";
 import { type Prompt, promptBlocker, promptLabel, promptTargets } from "./prompt.js";
@@ -787,6 +794,7 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
   const children = tree.childrenOf(node.id);
   const container = isContainer(node);
   const proved = proofSummary(node);
+  const approval = reviewSummary(node);
   return [
     node.desc === null ? null : html("p", {}, node.desc),
     children.length === 0
@@ -798,9 +806,7 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
             ? "中の状態をまとめる枠です。遷移を書くには、この名前の @state を持つファイルを作ります。"
             : "この状態の @state-next は、中のすべての状態から出る遷移になります。",
         ),
-    status.changedSinceReview
-      ? html("p", { class: "alert" }, "承認時からの変更あり（hash 不一致）")
-      : null,
+    approval.alert === null ? null : html("p", { class: "alert" }, approval.alert),
     html(
       "dl",
       {},
@@ -830,16 +836,17 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
       ),
       html("dt", {}, "証明"),
       html("dd", {}, proved.summary),
+      ...(container
+        ? []
+        : approval.rows.flatMap(([label, text]) => [html("dt", {}, label), html("dd", {}, text)])),
     ),
     container
       ? null
       : html(
           "div",
           { class: "actions" },
-          status.reviewed ? null : button("仕様を承認", () => commands.approve(node)),
-          status.reviewed || status.changedSinceReview
-            ? button("承認を取り消す", () => commands.revoke(node))
-            : null,
+          approval.approve ? button("仕様を承認", () => commands.approve(node)) : null,
+          approval.revoke ? button("承認を取り消す", () => commands.revoke(node)) : null,
         ),
     ...driftOf(state, graph, node, commands),
     ...generateOf("指示を生成", state, graph, [node.id], commands),
