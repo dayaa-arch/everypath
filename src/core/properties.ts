@@ -72,6 +72,12 @@ function optionalStateNames(raw: unknown, field: string): Parsed<readonly StateN
   return raw == null ? ok([]) : stateNames(raw, field);
 }
 
+/** Compared with `@state-group` as the scanner keeps it: trimmed, nothing else. */
+function groupName(raw: unknown, field: string): Parsed<string> {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  return text === "" ? fail(`${field} は空でないグループ名の文字列にしてください`) : ok(text);
+}
+
 function expression(raw: unknown, field: string): Parsed<PropertyExpr> {
   if (typeof raw !== "string") return fail(`${field} は式の文字列にしてください`);
   const parsed = parseProperty(raw);
@@ -108,7 +114,20 @@ const BODY_PARSERS = {
     const except = optionalStateNames(raw.except, "except");
     return except.ok ? ok({ kind: "no-dead-end", except: except.value }) : except;
   },
-  "dep-only-via": () => ok({ kind: "dep-only-via" }),
+  "dep-only-via": (raw) => {
+    const fromGroup = groupName(raw.from_group, "from_group");
+    if (!fromGroup.ok) return fromGroup;
+    const target = nonEmptyStateNames(raw.target, "target");
+    if (!target.ok) return target;
+    const via = nonEmptyStateNames(raw.via, "via");
+    if (!via.ok) return via;
+    return ok({
+      kind: "dep-only-via",
+      fromGroup: fromGroup.value,
+      target: target.value,
+      via: via.value,
+    });
+  },
 } satisfies BodyParsers;
 
 function isKind(value: unknown): value is Kind {
@@ -188,15 +207,26 @@ export function parseProperties(raw: unknown): {
   return { file: { entry, properties }, warnings };
 }
 
+/** One way out of a state. A dep edge has no event. */
+type Arc = { readonly to: StateName; readonly event: EventName | null };
+/** By source state, in `graph.edges` order, so a search takes the same path on every run. */
+type Arcs = ReadonlyMap<StateName, readonly Arc[]>;
+
 /** The flow edges of the graph, indexed once per check. Dep edges play no part. */
 type Flow = {
   /** Every node, planned ones included. */
   readonly states: ReadonlySet<StateName>;
   /** The nodes with code behind them, in id order. */
   readonly real: readonly StateName[];
-  /** In `graph.edges` order, so a search takes the same path on every run. */
-  readonly outgoing: ReadonlyMap<StateName, readonly FlowEdge[]>;
+  readonly outgoing: Arcs;
   readonly incoming: ReadonlyMap<StateName, readonly StateName[]>;
+};
+
+/** The dep edges and the groups, which only `dep-only-via` reads. */
+type Deps = {
+  readonly outgoing: Arcs;
+  /** The states of each `@state-group`, in id order. */
+  readonly groups: ReadonlyMap<string, readonly StateName[]>;
 };
 
 const NONE: readonly never[] = [];
@@ -206,6 +236,18 @@ function append<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   const list = map.get(key);
   if (list === undefined) map.set(key, [value]);
   else list.push(value);
+}
+
+function depsOf({ nodes, edges }: Pick<Graph, "nodes" | "edges">): Deps {
+  const outgoing = new Map<StateName, Arc[]>();
+  for (const edge of edges) {
+    if (edge.type === "dep") append(outgoing, edge.from, { to: edge.to, event: null });
+  }
+  const groups = new Map<string, StateName[]>();
+  for (const node of nodes) {
+    if (node.group !== null) append(groups, node.group, node.id);
+  }
+  return { outgoing, groups };
 }
 
 function flowOf({ nodes, edges }: Pick<Graph, "nodes" | "edges">): Flow {
@@ -254,7 +296,7 @@ type Reached = ReadonlyMap<StateName, Arrival>;
  */
 function search(
   starts: readonly StateName[],
-  outgoing: Flow["outgoing"],
+  outgoing: Arcs,
   isGoal: (state: StateName) => boolean,
   blocked: ReadonlySet<StateName> = NO_STATES,
 ): { readonly goal: StateName | null; readonly reached: Reached } {
@@ -312,11 +354,19 @@ function holds(expr: StatePred, state: StateName): boolean {
 /** What a check says about one property. */
 type Verdict = Pick<PropertyResult, "checkedBy" | "result" | "counterexamples" | "statesExplored">;
 
-type Context = { readonly flow: Flow; readonly entry: readonly StateName[] };
+type Context = {
+  readonly flow: Flow;
+  readonly entry: readonly StateName[];
+  readonly deps: Deps;
+};
 
-function pending(checkedBy: Verdict["checkedBy"]): Verdict {
-  return { checkedBy, result: "pending", counterexamples: [], statesExplored: null };
-}
+/** Only TLC can judge a property that reads a variable or speaks of time. */
+const AWAITS_TLC: Verdict = {
+  checkedBy: "tlc",
+  result: "pending",
+  counterexamples: [],
+  statesExplored: null,
+};
 
 function settled(counterexamples: readonly Counterexample[], statesExplored: number): Verdict {
   const result = counterexamples.length > 0 ? "violated" : "ok";
@@ -344,6 +394,19 @@ function neverReach(
 ): Verdict {
   return settledBySearch(
     search(entry, flow.outgoing, (state) => target.includes(state), new Set(avoid)),
+  );
+}
+
+type DepOnlyVia = Extract<PropertyDef, { readonly kind: "dep-only-via" }>;
+
+/**
+ * never-reach's search on the dep edges: from every state of the group at once, with the via states
+ * taken out. A state of the group that is itself a target is a path of that state alone.
+ */
+function depOnlyVia({ fromGroup, target, via }: DepOnlyVia, { deps }: Context): Verdict {
+  const starts = deps.groups.get(fromGroup) ?? NONE;
+  return settledBySearch(
+    search(starts, deps.outgoing, (state) => target.includes(state), new Set(via)),
   );
 }
 
@@ -383,9 +446,9 @@ function noDeadEnd(except: readonly StateName[], { flow }: Context): Verdict {
 function judge(def: PropertyDef, context: Context): Verdict {
   switch (def.kind) {
     case "invariant":
-      return def.expr.mentionsVars ? pending("tlc") : invariant(def.expr.expr, context);
+      return def.expr.mentionsVars ? AWAITS_TLC : invariant(def.expr.expr, context);
     case "leads-to":
-      return pending("tlc");
+      return AWAITS_TLC;
     case "never-reach":
       return neverReach(def.target, def.avoid, context);
     case "always-reach":
@@ -393,7 +456,7 @@ function judge(def: PropertyDef, context: Context): Verdict {
     case "no-dead-end":
       return noDeadEnd(def.except, context);
     case "dep-only-via":
-      return pending("bfs");
+      return depOnlyVia(def, context);
   }
 }
 
@@ -433,7 +496,10 @@ function references(def: PropertyDef): readonly (readonly [string, readonly Stat
     case "no-dead-end":
       return [["except", def.except]];
     case "dep-only-via":
-      return [];
+      return [
+        ["target", def.target],
+        ["via", def.via],
+      ];
   }
 }
 
@@ -449,6 +515,15 @@ function unknownStateWarnings(def: PropertyDef, flow: Flow): ScanWarning[] {
     }
   }
   return warnings;
+}
+
+function unknownGroupWarnings(def: PropertyDef, deps: Deps): ScanWarning[] {
+  if (def.kind !== "dep-only-via" || deps.groups.has(def.fromGroup)) return [];
+  return [
+    warn(
+      `性質 ${def.id} の from_group にある ${def.fromGroup} は、どの状態のグループにもありません`,
+    ),
+  ];
 }
 
 function entryWarnings(
@@ -489,8 +564,9 @@ export function violationsOf(results: readonly PropertyResult[]): Map<StateName,
 
 /**
  * The quick lane of SPEC §9: every property is judged on the flow edges alone, guards taken as always
- * true. `graph.nodes` is in id order, as `scan` builds it. A property that needs a variable or a
- * time-ordered argument stays `pending` for TLC.
+ * true, except `dep-only-via`, which is judged on the dep edges alone. `graph.nodes` is in id order,
+ * as `scan` builds it. A property that needs a variable or a time-ordered argument stays `pending`
+ * for TLC.
  */
 export function checkProperties(
   graph: Pick<Graph, "nodes" | "edges" | "model">,
@@ -503,12 +579,13 @@ export function checkProperties(
 } {
   const flow = flowOf(graph);
   const entry = entryOf(graph, file, flow);
+  const deps = depsOf(graph);
   const properties = file.properties.map(
     (def): PropertyResult => ({
       id: def.id,
       kind: def.kind,
       description: def.description,
-      ...judge(def, { flow, entry }),
+      ...judge(def, { flow, entry, deps }),
       checkedAt,
     }),
   );
@@ -517,7 +594,10 @@ export function checkProperties(
     violations: violationsOf(properties),
     warnings: [
       ...entryWarnings(file, entry, flow),
-      ...file.properties.flatMap((def) => unknownStateWarnings(def, flow)),
+      ...file.properties.flatMap((def) => [
+        ...unknownGroupWarnings(def, deps),
+        ...unknownStateWarnings(def, flow),
+      ]),
     ],
   };
 }

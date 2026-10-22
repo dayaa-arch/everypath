@@ -383,7 +383,8 @@ function decisions(
 /**
  * The record's results: each property TLC decided, in file order. `checkedBy` follows from what the
  * quick check did, which `analyzed` still says because an earlier record never changes `checkedBy`:
- * a variable-free invariant it settled is `both`, one it left to TLC is `tlc`.
+ * a property it settled (a never-reach, a variable-free invariant) is `both`, one it left to TLC is
+ * `tlc`.
  */
 function recorded(
   analyzed: readonly PropertyResult[],
