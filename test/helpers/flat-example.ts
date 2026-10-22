@@ -1,4 +1,4 @@
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,17 +11,39 @@ const example = fileURLToPath(new URL("../../example", import.meta.url));
 const ROOT = "<root>";
 
 /**
+ * `example/`'s properties file with each name of `entry`, a never-reach's `target` and its `avoid`
+ * written twice. The code before `@state-parent` kept such names as written.
+ */
+export const DUPLICATED_NAMES = {
+  entry: ["ログイン", "ログイン"],
+  properties: [
+    {
+      id: "no-lock-past-home",
+      kind: "never-reach",
+      target: ["ロック", "ロック"],
+      avoid: ["Home", "Home"],
+    },
+  ],
+};
+
+/**
  * What a repository with no `@state-parent` hands every reader, from a copy of `example/` scanned at a
  * pinned instant: `graph.json` as `scan` writes it (the copy's path replaced by `<root>`), `Model.tla`
  * and `Model.cfg` as `tla export` writes them, the Mermaid text, and the viewer's coordinates from
- * `relayout` and from `place` with every other point missing. `test/fixtures/flat-example/` holds the
- * output of the code before `@state-parent` existed.
+ * `relayout` and from `place` with every other point missing. `properties` replaces the copy's
+ * properties file. `test/fixtures/flat-example/` (and `flat-example-duplicates/` for
+ * `DUPLICATED_NAMES`) holds the output of the code before `@state-parent` existed.
  */
-export async function flatExampleOutputs(): Promise<Readonly<Record<string, string>>> {
+export async function flatExampleOutputs(
+  properties?: unknown,
+): Promise<Readonly<Record<string, string>>> {
   const root = await mkdtemp(join(tmpdir(), "everypath-flat-example-"));
   try {
     await cp(example, root, { recursive: true });
     await rm(join(root, ".everypath"), { recursive: true, force: true });
+    if (properties !== undefined) {
+      await writeFile(join(root, "everypath.properties.json"), JSON.stringify(properties));
+    }
     const graph = await scan(root, { now: new Date("2026-10-22T00:00:00.000Z") });
     const written = await readFile(join(root, ".everypath/graph.json"), "utf8");
     const exported = await exportTla(root);

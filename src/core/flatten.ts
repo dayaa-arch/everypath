@@ -212,14 +212,17 @@ function guardAt(
   return edge.guard === null ? negated : { kind: "and", operands: [edge.guard, negated] };
 }
 
-/** `P` in a predicate or a target is every leaf inside P; a leaf is itself. */
+/**
+ * `P` in a predicate or a target is every leaf inside P; a leaf is itself. Nothing is deduplicated: a
+ * name written twice stays twice in Model.tla, as it did before `@state-parent`.
+ */
 function leavesIn(names: readonly StateName[], hierarchy: Hierarchy): Leaf[] {
-  return [...new Set(names.flatMap((name) => hierarchy.within(name)))];
+  return names.flatMap((name) => hierarchy.within(name));
 }
 
 /** `P` in `dep-only-via` is P and every state under it: dependencies are between files. */
 function nodesIn(names: readonly StateName[], hierarchy: Hierarchy): StateName[] {
-  return [...new Set(names.flatMap((name) => hierarchy.subtree(name)))];
+  return names.flatMap((name) => hierarchy.subtree(name));
 }
 
 function mapTwo<T, U>(operands: AtLeastTwo<T>, f: (item: T) => U): AtLeastTwo<U> {
@@ -389,7 +392,7 @@ export function flatten(graph: ModelShape, file: PropertiesFile): Flat {
 
 function entryOf(model: FlatModel, file: PropertiesFile): readonly Leaf[] {
   const { hierarchy } = model;
-  if (file.entry !== null) return [...new Set(file.entry.flatMap((name) => hierarchy.enter(name)))];
+  if (file.entry !== null) return file.entry.flatMap((name) => hierarchy.enter(name));
   if (model.initial.length > 0) return model.initial;
   const entered = new Set(model.arcs.filter((arc) => arc.from !== arc.to).map((arc) => arc.to));
   return model.real.filter((leaf) => !entered.has(leaf));

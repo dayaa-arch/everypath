@@ -6,7 +6,7 @@ AI エージェントが「ログイン後のどの画面からもログアウ�
 
 ## 完了条件
 - [x] 1. `npm run typecheck`、`npm run lint`、`npm test`、`npm run build` が exit 0（実行して確認）
-- [x] 2. 互換。`@state-parent` の無いリポジトリでは、`graph.json`、`Model.tla`、`Model.cfg`、Mermaid、`relayout` と `place` の座標が変更前と 1 バイトも違わない。変更前の `example/` の出力を `test/fixtures/flat-example/` に保存し、変更後の出力と比べる（`test/hierarchy-compat.test.ts`）
+- [x] 2. 互換。`@state-parent` の無いリポジトリでは、`graph.json`、`Model.tla`、`Model.cfg`、Mermaid、`relayout` と `place` の座標が変更前と 1 バイトも違わない。変更前の `example/` の出力を `test/fixtures/flat-example/` に保存し、変更後の出力と比べる。`entry` と never-reach の `target`・`avoid` に同じ名前を 2 度書いた性質ファイルでも、名前は書いたとおり 2 度出る（`test/fixtures/flat-example-duplicates/`。どれも `test/hierarchy-compat.test.ts`）
 - [x] 3. 注釈。`@state-parent <状態>` は 1 ファイルに 1 回。値が無い、状態名でない、2 回目は `file`・`line` 付きの警告でそのタグを捨てる。`//`、`#`、`/* */`、`"""` で拾い、`@state-hidden` とテストのファイルでは何もしない（`test/hierarchy.test.ts`）
 - [x] 4. 木の誤り（R-04）。自分を親にする、2 つと 3 つの輪、同じ状態の別ファイルが別の親を書く、`MAX_DEPTH`（3）より深い入れ子、どのファイルも名乗らない親は、どれも警告になり、`scan` は exit 0 で、ノードは 1 つも消えない。輪の上の親は外れ、輪にぶら下がる枝の親は残る。名乗るファイルの無い親は `container: true` のノードで、`planned` ではなく、`stats.planned` にも未テスト・未レビューにも数えない（同上。`everypath scan` を実行して exit 0 も確かめる）
 - [x] 5. 継承。親の `@state-next` は親の中のすべての葉から出る遷移になる（認証済み の logout が Home と マイページ の両方から出る。同上）
