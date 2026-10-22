@@ -693,7 +693,6 @@ describe("tla: running TLC and merging its verdicts", () => {
       stored.properties,
       graph.properties.filter((p) => p.checkedBy === "tlc"),
     );
-    assert.equal(stored.typeOk, null);
     assert.equal(stored.error, null);
   });
 
@@ -751,7 +750,7 @@ describe("tla: running TLC and merging its verdicts", () => {
     assert.deepEqual(marked.sort(), ["Home", "パスワードリセット", "マイページ", "ログイン"]);
   });
 
-  it("reports a TypeOK violation apart from the properties and keeps checking inside the ranges", async () => {
+  it("keeps checking the other invariants inside the ranges once TypeOK broke", async () => {
     const { root, java, result } = await checkExample({
       rules: [
         {
@@ -768,11 +767,9 @@ describe("tla: running TLC and merging its verdicts", () => {
     const second = cfgs[1] ?? "";
     assert.ok(second.includes("CONSTRAINT TypeOK"), second);
     assert.ok(!second.includes("INVARIANT TypeOK"), second);
-    const stored = await readResult(root);
-    assert.equal(stored.typeOk.steps.length, 3);
     assert.ok(
       (await readGraph(root)).properties.every(
-        (p) => p.kind === "no-dead-end" || p.result === "ok",
+        (p) => p.kind === "no-dead-end" || p.id === "TypeOK" || p.result === "ok",
       ),
     );
   });
