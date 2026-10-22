@@ -9,8 +9,8 @@ import type {
   StateNode,
 } from "../core/types.js";
 import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
-import { liveViolations, selectedIds } from "./facts.js";
-import type { ReplayRef, ViewState } from "./state.js";
+import { driftsFrom, fixOf, liveViolations, selectedIds } from "./facts.js";
+import type { DriftDecision, ReplayRef, ViewState } from "./state.js";
 
 /** An instruction ready to paste: the nodes it is about (those its kind applies to) and its text. */
 export type Prompt = {
@@ -23,33 +23,52 @@ type KindRow = {
   /** The button's text. */
   readonly label: string;
   readonly applies: (node: StateNode, graph: Graph) => boolean;
+  /** What the person still has to settle before the instruction for `targets` can be made, or null. */
+  readonly blocker: (
+    graph: Graph,
+    targets: readonly StateName[],
+    decisions: readonly DriftDecision[],
+  ) => string | null;
 };
 
 const flowsFrom = (graph: Graph, id: StateName): readonly FlowEdge[] =>
   graph.edges.filter((edge): edge is FlowEdge => edge.type === "flow" && edge.from === id);
 
+const READY = (): null => null;
+
 /**
- * When each kind applies, in one place: the panel's buttons, the counts of "まとめて生成" and
- * `buildPrompt` all read it, so a button never offers what cannot be made.
+ * When each kind applies and what it waits for, in one place: the panel's buttons, the counts of
+ * "まとめて生成" and `buildPrompt` all read it, so a button never offers what cannot be made.
  */
 const KINDS: Readonly<Record<PromptKind, KindRow>> = {
   "fix-counterexample": {
     label: "反例を直す",
     applies: (node, graph) =>
       liveViolations(graph, node).some((property) => property.counterexamples.length > 0),
+    blocker: READY,
+  },
+  "fix-drift": {
+    label: "乖離を直す",
+    applies: (node, graph) => driftsFrom(graph, node.id).length > 0,
+    blocker: (graph, targets, decisions) =>
+      targets.some((id) => driftsFrom(graph, id).some((drift) => fixOf(decisions, drift) === null))
+        ? "宣言とコードのどちらが正しいかを、乖離ごとに選んでください"
+        : null,
   },
   "write-tests": {
     label: "テストを書く",
     applies: (node) => !node.status.tested && !node.status.planned,
+    blocker: READY,
   },
   "draw-model": {
     label: "モデルを描かせる",
     applies: (node, graph) =>
       !node.status.planned &&
       !flowsFrom(graph, node.id).some((edge) => edge.guard !== null || edge.set.length > 0),
+    blocker: READY,
   },
-  "propose-properties": { label: "性質を提案させる", applies: () => true },
-  "explain-model": { label: "モデルを説明させる", applies: () => true },
+  "propose-properties": { label: "性質を提案させる", applies: () => true, blocker: READY },
+  "explain-model": { label: "モデルを説明させる", applies: () => true, blocker: READY },
 };
 
 export function promptLabel(kind: PromptKind): string {
@@ -70,16 +89,33 @@ export function promptTargets(
 }
 
 /**
+ * Why the instruction of `kind` for `ids` cannot be made yet, as the panel says it, or null when
+ * nothing is left for the person to settle.
+ */
+export function promptBlocker(
+  kind: PromptKind,
+  state: ViewState,
+  ids: readonly StateName[],
+): string | null {
+  const { graph } = state;
+  if (graph === null) return null;
+  return KINDS[kind].blocker(graph, promptTargets(kind, graph, ids), state.decisions);
+}
+
+/**
  * The instruction of `kind` for the selected nodes, filled into the template of `state.templates`.
- * `null` when the graph or the templates have not arrived, or no selected node takes this kind.
+ * `null` when the graph or the templates have not arrived, no selected node takes this kind, or
+ * `promptBlocker` names something the person has not settled.
  */
 export function buildPrompt(kind: PromptKind, state: ViewState): Prompt | null {
   const { graph, templates, selection } = state;
   if (graph === null || templates === null) return null;
   const targets = promptTargets(kind, graph, selectedIds(selection));
-  if (targets.length === 0) return null;
+  if (targets.length === 0 || KINDS[kind].blocker(graph, targets, state.decisions) !== null) {
+    return null;
+  }
   const replay = selection.kind === "node" ? selection.replay : null;
-  const scope = scopeOf(kind, graph, targets, replay);
+  const scope = scopeOf(kind, graph, targets, { replay, decisions: state.decisions });
   return { kind, targets, text: fillTemplate(templates[kind].text, scope) };
 }
 
@@ -100,7 +136,7 @@ function scopeOf(
   kind: PromptKind,
   graph: Graph,
   targets: readonly StateName[],
-  replay: ReplayRef | null,
+  { replay, decisions }: Pick<ViewState, "decisions"> & { readonly replay: ReplayRef | null },
 ): Scope {
   const nodes = targets.flatMap((id) => graph.nodes.filter((node) => node.id === id));
   const fixing = kind === "fix-counterexample";
@@ -118,14 +154,32 @@ function scopeOf(
       : "everypath check",
     APPROVED: fixing ? approvedAround(graph, nodes, replay).join("・") : "",
     FOCUS: focusOf(graph, nodes, replay),
-    NODES: nodes.map((node) => nodeScope(graph, node, replay)),
+    NODES: nodes.map((node) => nodeScope(graph, node, { replay, decisions })),
   };
 }
 
-function nodeScope(graph: Graph, node: StateNode, replay: ReplayRef | null): Scope {
+const filesText = (files: readonly string[]): string =>
+  files.length === 0 ? "（ファイルなし）" : files.join("、");
+
+function nodeScope(
+  graph: Graph,
+  node: StateNode,
+  { replay, decisions }: Pick<ViewState, "decisions"> & { readonly replay: ReplayRef | null },
+): Scope {
   return {
     NODE: node.id,
-    FILES: node.files.length === 0 ? "（ファイルなし）" : node.files.join("、"),
+    FILES: filesText(node.files),
+    DRIFTS: driftsFrom(graph, node.id).map((drift) => {
+      const fix = fixOf(decisions, drift);
+      const target = graph.nodes.find((n) => n.id === drift.to);
+      return {
+        TO: drift.to,
+        VIA: drift.via.join("、"),
+        TO_FILES: filesText(target?.files ?? []),
+        REMOVE_CALL: fix === "remove-call" ? "yes" : "",
+        ADD_NEXT: fix === "add-next" ? "yes" : "",
+      };
+    }),
     DESC: node.desc ?? "",
     SPEC: node.spec.join(" / "),
     FINDINGS: node.findings

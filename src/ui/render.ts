@@ -9,11 +9,18 @@ import type {
   StateNode,
 } from "../core/types.js";
 import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
-import { selectedIds } from "./facts.js";
+import { driftsFrom, fixOf, selectedIds } from "./facts.js";
 import { type Box, boxAt, type Point } from "./layout.js";
 import { modelSlice } from "./model.js";
-import { type Prompt, promptLabel, promptTargets } from "./prompt.js";
-import { type Action, type Replay, replayOf, type TlcView, type ViewState } from "./state.js";
+import { type Prompt, promptBlocker, promptLabel, promptTargets } from "./prompt.js";
+import {
+  type Action,
+  type DriftFix,
+  type Replay,
+  replayOf,
+  type TlcView,
+  type ViewState,
+} from "./state.js";
 import {
   checkedByLabel,
   DRIFT,
@@ -324,6 +331,10 @@ export function mount(commands: Commands): Viewer {
 
   document.addEventListener("keydown", (event) => {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
+    // The arrows of a focused radio button move its choice; they must not step the replay too.
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+      return;
+    }
     if (event.key === "ArrowLeft") commands.dispatch({ kind: "step", delta: -1 });
     if (event.key === "ArrowRight") commands.dispatch({ kind: "step", delta: 1 });
     if (event.key === "Escape") commands.dispatch({ kind: "escape" });
@@ -767,6 +778,7 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
         ? button("承認を取り消す", () => commands.revoke(node))
         : null,
     ),
+    ...driftOf(state, graph, node, commands),
     ...generateOf("指示を生成", state, graph, [node.id], commands),
     ...section(
       "仕様",
@@ -809,6 +821,39 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
   ].filter((child) => child !== null);
 }
 
+const DRIFT_FIXES: readonly (readonly [DriftFix, string])[] = [
+  ["remove-call", "宣言が正しい（呼び出しを消す）"],
+  ["add-next", "コードが正しい（@state-next を足す）"],
+];
+
+/** The node's calls no `@state-next` declares, each with the person's choice of the side that is right. */
+function driftOf(state: ViewState, graph: Graph, node: StateNode, commands: Commands): Content[] {
+  const drifts = driftsFrom(graph, node.id);
+  if (drifts.length === 0) return [];
+  return section(
+    "コードにだけある遷移（乖離）",
+    ...drifts.map((drift, index) => {
+      const chosen = fixOf(state.decisions, drift);
+      const choices = DRIFT_FIXES.map(([fix, text]) => {
+        const input = html("input", { type: "radio", name: `drift-${index}`, value: fix });
+        input.checked = chosen === fix;
+        input.addEventListener("change", () => {
+          if (input.checked) {
+            commands.dispatch({ kind: "decide-drift", from: drift.from, to: drift.to, fix });
+          }
+        });
+        return html("label", {}, input, text);
+      });
+      return html(
+        "div",
+        { class: "drift" },
+        html("p", {}, `→ ${drift.to} `, html("span", { class: "mono" }, drift.via.join("、"))),
+        ...choices,
+      );
+    }),
+  );
+}
+
 /** One button per kind that applies to at least one of `ids`, then the instruction made last. */
 function generateOf(
   title: string,
@@ -818,23 +863,29 @@ function generateOf(
   commands: Commands,
 ): Content[] {
   const ready = state.templates !== null;
-  const buttons = PROMPT_KINDS.map((kind) => ({
+  const kinds = PROMPT_KINDS.map((kind) => ({
     kind,
     count: promptTargets(kind, graph, ids).length,
-  }))
-    .filter(({ count }) => ids.length > 1 || count > 0)
-    .map(({ kind, count }) =>
-      button(
-        ids.length > 1 ? `${promptLabel(kind)}（${count}/${ids.length}）` : promptLabel(kind),
-        () => commands.generate(kind),
-        count === 0 || !ready,
-      ),
-    );
+    blocker: promptBlocker(kind, state, ids),
+  })).filter(({ count }) => ids.length > 1 || count > 0);
+  const buttons = kinds.map(({ kind, count, blocker }) =>
+    button(
+      ids.length > 1 ? `${promptLabel(kind)}（${count}/${ids.length}）` : promptLabel(kind),
+      () => commands.generate(kind),
+      count === 0 || !ready || blocker !== null,
+    ),
+  );
+  const waiting = kinds.flatMap(({ kind, count, blocker }) =>
+    count === 0 || blocker === null
+      ? []
+      : [html("p", { class: "hint" }, `${promptLabel(kind)}: ${blocker}`)],
+  );
   return [
     ...section(
       title,
       ready ? null : html("p", { class: "hint" }, "テンプレートを読み込み中…"),
       html("div", { class: "actions" }, ...buttons),
+      ...waiting,
     ),
     ...(state.prompt === null ? [] : promptOf(state.prompt, commands)),
   ];

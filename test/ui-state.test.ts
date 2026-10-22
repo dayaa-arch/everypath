@@ -118,6 +118,7 @@ describe("the first state", () => {
       templates: null,
       prompt: null,
       zoom: null,
+      decisions: [],
     });
   });
 });

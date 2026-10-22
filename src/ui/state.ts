@@ -10,7 +10,7 @@ import type {
   Step,
 } from "../core/types.js";
 import { isLiveViolation } from "../core/verdict.js";
-import { selectedIds } from "./facts.js";
+import { fixOf, selectedIds } from "./facts.js";
 import { type Point, place, relayout, snap } from "./layout.js";
 import { buildPrompt, type Prompt } from "./prompt.js";
 import type { GraphEvent, Layout, TlcEvent } from "./wire.js";
@@ -40,6 +40,18 @@ export type Selection =
   | { readonly kind: "node"; readonly id: StateName; readonly replay: ReplayRef | null }
   | { readonly kind: "many"; readonly ids: readonly [StateName, StateName, ...StateName[]] };
 
+/**
+ * Which side of a drift is right, as the person chose it (SPEC §13): the declaration, so the call
+ * goes, or the code, so a `@state-next` comes. Only a person chooses, never the agent that is told
+ * to fix it, because a drift is how an agent's undeclared transition is caught.
+ */
+export type DriftFix = "remove-call" | "add-next";
+export type DriftDecision = {
+  readonly from: StateName;
+  readonly to: StateName;
+  readonly fix: DriftFix;
+};
+
 /** What the last read of `/tla/Model.tla` found. */
 export type ModelText =
   | { readonly kind: "unknown" }
@@ -54,7 +66,8 @@ export type ModelText =
  * has no action of its own (it is "live" after any graph and "offline" after `offline`); `tlc`
  * splits `finished` into `done` and `error`; `notice` holds the server's answer to a refused request.
  * docs/specs/viewer-panels.md adds the two tabs, the change log, the text of `Model.tla`, the
- * templates and the instruction last generated; docs/specs/viewer-drift.md the open files.
+ * templates and the instruction last generated; docs/specs/viewer-drift.md the open files and the
+ * sides chosen for drifts.
  */
 export type ViewState = {
   readonly graph: Graph | null;
@@ -76,6 +89,8 @@ export type ViewState = {
   readonly prompt: Prompt | null;
   /** The node whose files are open on the canvas (SPEC §12.1's zoom to file granularity). */
   readonly zoom: StateName | null;
+  /** One per drift of the graph the person has chosen a side for; none for a drift that has gone. */
+  readonly decisions: readonly DriftDecision[];
 };
 
 export type Action =
@@ -100,12 +115,13 @@ export type Action =
   | { readonly kind: "generate"; readonly prompt: PromptKind }
   | { readonly kind: "dismiss-prompt" }
   | { readonly kind: "zoom"; readonly id: StateName }
-  | { readonly kind: "escape" };
+  | { readonly kind: "escape" }
+  | ({ readonly kind: "decide-drift" } & DriftDecision);
 
 /**
  * No graph, `saved` as the layout, "connecting", TLC idle, nothing selected, dep edges shown, no
  * notice, the detail and queue tabs, no history, no model text, no templates, no instruction, no
- * files open.
+ * files open, no drift decided.
  */
 export function initialState(saved: Layout): ViewState {
   return {
@@ -123,6 +139,7 @@ export function initialState(saved: Layout): ViewState {
     templates: null,
     prompt: null,
     zoom: null,
+    decisions: [],
   };
 }
 
@@ -159,6 +176,8 @@ const HISTORY_LIMIT = 200;
  * - zoom opens the node's files, or closes them when they are that node's already; an id not in the
  *   graph changes nothing. A graph event without the node closes them. Nothing else moves.
  * - escape closes the files when they are open, and otherwise clears the selection.
+ * - decide-drift records the side for a drift the graph has, replacing an earlier one, and drops an
+ *   instruction to fix drift made before. A graph event forgets the sides of drifts it no longer has.
  */
 export function reduce(state: ViewState, action: Action): ViewState {
   switch (action.kind) {
@@ -177,6 +196,7 @@ export function reduce(state: ViewState, action: Action): ViewState {
         history: diff === null ? state.history : mergeHistory(state.history, [diff]),
         prompt: sameNodes(state.selection, selection) ? state.prompt : null,
         zoom: graph.nodes.some((n) => n.id === state.zoom) ? state.zoom : null,
+        decisions: state.decisions.filter((d) => hasDrift(graph, d)),
       };
     }
     case "offline":
@@ -249,11 +269,26 @@ export function reduce(state: ViewState, action: Action): ViewState {
       return { ...state, zoom: state.zoom === action.id ? null : action.id };
     case "escape":
       return state.zoom === null ? withSelection(state, NONE) : { ...state, zoom: null };
+    case "decide-drift": {
+      const { from, to, fix } = action;
+      if (state.graph === null || !hasDrift(state.graph, action)) return state;
+      if (fixOf(state.decisions, action) === fix) return state;
+      const others = state.decisions.filter((d) => d.from !== from || d.to !== to);
+      return {
+        ...state,
+        decisions: [...others, { from, to, fix }],
+        prompt: state.prompt?.kind === "fix-drift" ? null : state.prompt,
+      };
+    }
     default: {
       const _exhaustive: never = action;
       return _exhaustive;
     }
   }
+}
+
+function hasDrift(graph: Graph, { from, to }: Pick<DriftDecision, "from" | "to">): boolean {
+  return graph.drift.some((drift) => drift.from === from && drift.to === to);
 }
 
 function tlcView(event: TlcEvent): TlcView {
