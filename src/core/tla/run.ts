@@ -4,10 +4,11 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { errorMessage } from "../json.js";
+import { TYPE_OK_PROPERTY } from "../properties.js";
 import { analyze } from "../scan.js";
 import type { Counterexample, PropertyResult } from "../types.js";
 import { commitTlc, OUTPUT_DIRECTORY, replaceFile, writeTlaModel } from "../workspace.js";
-import { generateTla, modelKey, type TlaModel, TYPE_OK } from "./generate.js";
+import { generateTla, modelKey, type TlaModel } from "./generate.js";
 import { parseTlcOutput, type TlcReport } from "./parse.js";
 import type { TlcRecord } from "./result.js";
 
@@ -52,7 +53,6 @@ export type TlcSummary =
   | {
       readonly kind: "checked";
       readonly rejected: readonly string[];
-      readonly typeOk: Counterexample | null;
       readonly error: string | null;
     };
 
@@ -63,9 +63,8 @@ export function summarizeTlc(outcome: TlcOutcome): TlcSummary {
     case "unmodeled":
       return { kind: "unmodeled", reason: outcome.reason };
     case "checked": {
-      const { typeOk, error } = outcome.record;
       const rejected = outcome.rejected.map(({ reason }) => reason);
-      return { kind: "checked", rejected, typeOk, error };
+      return { kind: "checked", rejected, error: outcome.record.error };
     }
   }
 }
@@ -114,7 +113,6 @@ export async function runTlc(
       cfg: everyCheck(model),
       names: model.names,
       properties: recorded(graph.properties, decisions(outcome.verdicts, model), at),
-      typeOk: outcome.verdicts.get(TYPE_OK)?.counterexamples[0] ?? null,
       states: outcome.states,
       error: outcome.error,
     };
@@ -367,8 +365,8 @@ async function verify(
 }
 
 /**
- * Each check's verdict under its property id. A definition the model left out never ran, so it gets
- * none: a stored verdict would outlive the definition it was about.
+ * Each check's verdict under its property id, `TypeOK`'s included. A definition the model left out
+ * never ran, so it gets none: a stored verdict would outlive the definition it was about.
  */
 function decisions(
   verdicts: ReadonlyMap<string, Verdict>,
@@ -377,23 +375,24 @@ function decisions(
   const decided = new Map<string, Verdict>();
   for (const [check, id] of Object.entries(names.checks)) {
     const verdict = verdicts.get(check);
-    if (check !== TYPE_OK && verdict !== undefined) decided.set(id, verdict);
+    if (verdict !== undefined) decided.set(id, verdict);
   }
   return decided;
 }
 
 /**
- * The record's results: each property TLC decided, in file order. `checkedBy` follows from what the
- * quick check did, which `analyzed` still says because an earlier record never changes `checkedBy`:
- * a property it settled (a never-reach, a variable-free invariant) is `both`, one it left to TLC is
- * `tlc`.
+ * The record's results: each property TLC decided, in file order, then `TypeOK`. `checkedBy` follows
+ * from what the quick check did, which `analyzed` still says because an earlier record never changes
+ * `checkedBy`: a property it settled (a never-reach, a variable-free invariant) is `both`, one it
+ * left to TLC is `tlc`. `analyzed` has `TypeOK` only when an earlier record laid it there.
  */
 function recorded(
   analyzed: readonly PropertyResult[],
   decided: ReadonlyMap<string, Verdict>,
   at: Date,
 ): PropertyResult[] {
-  return analyzed.flatMap((result): PropertyResult[] => {
+  const checked = [...analyzed.filter(({ id }) => id !== TYPE_OK_PROPERTY.id), TYPE_OK_PROPERTY];
+  return checked.flatMap((result): PropertyResult[] => {
     const verdict = decided.get(result.id);
     if (verdict === undefined) return [];
     const { id, kind, description } = result;

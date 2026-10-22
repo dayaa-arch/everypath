@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Flat, FlatArc, FlatModel, FlatPropertyDef, LeafExpr } from "../flatten.js";
 import { listed } from "../listing.js";
 import { checkComparison, type VarTable } from "../model.js";
+import { TYPE_OK_PROPERTY } from "../properties.js";
 import type {
   Assignment,
   EventName,
@@ -39,7 +40,8 @@ export type TlaNames = {
   /** `"tau"` is `null`: a transition with no event, and what `lastEvent` starts as. */
   readonly events: Readonly<Record<string, EventName | null>>;
   readonly members: Readonly<Record<string, MemberName>>;
-  readonly checks: Readonly<Record<string, PropertyId | typeof TYPE_OK>>;
+  /** `TypeOK` is `TYPE_OK_PROPERTY`'s id. */
+  readonly checks: Readonly<Record<string, PropertyId>>;
 };
 
 export type TlaModel = {
@@ -560,7 +562,7 @@ export function generateTla(flat: Flat): Generated {
         vars: naming.vars.back,
         events,
         members: naming.members.back,
-        checks: { ...naming.checks.back, [TYPE_OK]: TYPE_OK },
+        checks: { ...naming.checks.back, [TYPE_OK]: TYPE_OK_PROPERTY.id },
       },
       invariants,
       temporal,

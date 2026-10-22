@@ -436,18 +436,14 @@ function reportChecks(
   return [...properties.flatMap(describeProperty), ...extra, summarizeChecks(properties, warnings)];
 }
 
-/** What only TLC can say: a variable out of its range, and its error. `null` when TLC did not fail. */
+/**
+ * What only TLC can say: why it did not run, or its error. `null` when TLC did not fail. A variable
+ * out of its range is the property `TypeOK`, which the report has already.
+ */
 function tlcFailure(summary: TlcSummary | null): string[] | null {
   if (summary === null || summary.kind === "missing") return null;
   if (summary.kind === "unmodeled") return [`エラー TLC: ${summary.reason}`];
-  const { typeOk, error } = summary;
-  if (typeOk === null && error === null) return null;
-  return [
-    ...(typeOk === null
-      ? []
-      : ["違反 TypeOK 変数が宣言した範囲を外れました", ...describeSteps(typeOk)]),
-    ...(error === null ? [] : [`エラー TLC: ${error}`]),
-  ];
+  return summary.error === null ? null : [`エラー TLC: ${summary.error}`];
 }
 
 async function isDirectory(path: string): Promise<boolean> {
