@@ -1,6 +1,7 @@
 import { edgeLabel } from "../core/expr.js";
 import type { Counterexample, Graph, PropertyResult, StateName, StateNode } from "../core/types.js";
-import { isLiveViolation, selectedIds } from "./facts.js";
+import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
+import { selectedIds } from "./facts.js";
 import { type Box, boxAt, labelBoxes, overlaps, type Point, route } from "./layout.js";
 import { replayOf, type ViewState } from "./state.js";
 
@@ -139,8 +140,8 @@ export function rowOf(tone: Tone): ToneRow {
 }
 
 /**
- * Condition 4. A violation counts only while its property is `violated` and not `staleModel`.
- * `proof == "failed"` is `danger` too.
+ * Condition 4. A violation counts only while `isLiveViolation` says so: not on an older model, and
+ * not a path TLC cleared. `proof == "failed"` is `danger` too.
  */
 export function toneOf(node: StateNode, properties: readonly PropertyResult[]): Tone {
   const failing = node.violations.some((id) =>
@@ -202,6 +203,31 @@ export function stepEvent(index: number, event: string | null): string {
   if (event !== null) return event;
   return index === 0 ? "（初期状態）" : "（イベントなし）";
 }
+
+/**
+ * What TLC said about a quick-check violation, for the detail panel; empty without a verdict. A path
+ * TLC cleared on this model is listed as open only with guards ignored, so it is never replayed red.
+ */
+export function tlcLines(property: PropertyResult): readonly string[] {
+  const { tlc } = property;
+  if (tlc === undefined) return [];
+  const count = tlc.statesExplored === null ? "" : `、${tlc.statesExplored} 状態`;
+  if (tlc.staleModel === true) {
+    return [`全探索（TLC）: ${TLC_WORDS[tlc.result]}（古いモデルに対する結果${count}）`];
+  }
+  if (isGuardOnly(property)) {
+    return [
+      `全探索（TLC${count}）では成立。ガードどおりに動くと、この経路は通れません`,
+      ...property.counterexamples.map(
+        (trace) =>
+          `ガードを無視したときだけの経路: ${trace.steps.map((step) => step.state).join(" → ")}`,
+      ),
+    ];
+  }
+  return [`全探索（TLC${count}）: ${TLC_WORDS[tlc.result]}`];
+}
+
+const TLC_WORDS = { ok: "成立", violated: "違反", error: "エラーで判定できませんでした" } as const;
 
 function compare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;

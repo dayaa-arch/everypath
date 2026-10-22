@@ -8,7 +8,8 @@ import type {
   StateName,
   StateNode,
 } from "../core/types.js";
-import { isLiveViolation, liveViolations, selectedIds } from "./facts.js";
+import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
+import { liveViolations, selectedIds } from "./facts.js";
 import type { ReplayRef, ViewState } from "./state.js";
 
 /** An instruction ready to paste: the nodes it is about (those its kind applies to) and its text. */
@@ -156,9 +157,14 @@ function describeVar(decl: ModelVar): string {
 }
 
 function describeProperty(property: PropertyResult): string {
-  const stale = property.staleModel === true ? "（古いモデルに対する結果）" : "";
+  const note =
+    property.staleModel === true
+      ? "（古いモデルに対する結果）"
+      : isGuardOnly(property)
+        ? "（ガードを無視したときだけの経路。TLC では成立）"
+        : "";
   const what = property.description ?? "";
-  return `- ${property.id}（${property.kind}）${what}: ${RESULT[property.result]}${stale}`;
+  return `- ${property.id}（${property.kind}）${what}: ${RESULT[property.result]}${note}`;
 }
 
 /**

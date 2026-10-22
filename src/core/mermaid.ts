@@ -1,5 +1,6 @@
 import { edgeLabel } from "./expr.js";
 import type { FlowEdge, Graph, PropertyId, StateName, StateNode } from "./types.js";
+import { isLiveViolation } from "./verdict.js";
 
 type Mark = {
   readonly name: "violated" | "planned";
@@ -45,11 +46,7 @@ export function toMermaid(graph: Graph): string {
     if (id === undefined) throw new Error(`${name} is on an edge but is not a node of the graph`);
     return id;
   };
-  const live = new Set(
-    graph.properties
-      .filter((property) => property.result === "violated" && property.staleModel !== true)
-      .map((property) => property.id),
-  );
+  const live = new Set(graph.properties.filter(isLiveViolation).map((property) => property.id));
   const markOf = (node: StateNode): Mark["name"] | undefined =>
     MARKS.find((mark) => mark.applies(node, live))?.name;
 

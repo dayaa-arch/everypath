@@ -8,7 +8,8 @@ import type {
   StateName,
   StateNode,
 } from "../core/types.js";
-import { isLiveViolation, selectedIds } from "./facts.js";
+import { isGuardOnly, isLiveViolation } from "../core/verdict.js";
+import { selectedIds } from "./facts.js";
 import { type Box, boxAt, type Point } from "./layout.js";
 import { modelSlice } from "./model.js";
 import { type Prompt, promptLabel, promptTargets } from "./prompt.js";
@@ -23,6 +24,7 @@ import {
   stepEvent,
   TONES,
   type ToneRow,
+  tlcLines,
   toneOf,
   violated,
 } from "./view.js";
@@ -643,7 +645,12 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
   const { status } = node;
   const touching = node.violations.flatMap((id) => graph.properties.filter((p) => p.id === id));
   const live = touching.filter(isLiveViolation);
-  const stale = touching.length - live.length;
+  const guardOnly = touching.filter(isGuardOnly).length;
+  const stale = touching.length - live.length - guardOnly;
+  const notes = [
+    ...(stale === 0 ? [] : [`古いモデルに対する結果 ${stale} 件`]),
+    ...(guardOnly === 0 ? [] : [`ガードを無視したときだけの経路 ${guardOnly} 件`]),
+  ];
   return [
     node.desc === null ? null : html("p", {}, node.desc),
     status.changedSinceReview
@@ -670,7 +677,7 @@ function detailOf(state: ViewState, graph: Graph, node: StateNode, commands: Com
       html(
         "dd",
         {},
-        `${live.length === 0 ? "違反なし" : `違反 ${live.length} 件`}${stale === 0 ? "" : `（古いモデルに対する結果 ${stale} 件）`}`,
+        `${live.length === 0 ? "違反なし" : `違反 ${live.length} 件`}${notes.length === 0 ? "" : `（${notes.join("、")}）`}`,
       ),
       html("dt", {}, "証明"),
       html(
@@ -949,6 +956,8 @@ function propertyOf(property: PropertyResult, state: ViewState, commands: Comman
       html("p", { class: "stale" }, "古いモデルに対する結果（今のモデルでは確かめていません）"),
     ];
   }
+  const tlc = tlcLines(property).map((line) => html("p", { class: "checker" }, line));
+  if (isGuardOnly(property)) return [title, checker, ...tlc];
   const replay = replayOf(state);
   const playing = replay?.property.id === property.id ? replay : null;
   const traces = property.counterexamples.map((trace, index) => {
@@ -961,7 +970,7 @@ function propertyOf(property: PropertyResult, state: ViewState, commands: Comman
     );
     return chosen ? html("div", {}, pick, ...replayControls(playing, commands)) : pick;
   });
-  return [title, checker, html("div", { class: "actions" }, ...traces)];
+  return [title, checker, ...tlc, html("div", { class: "actions" }, ...traces)];
 }
 
 function replayControls(replay: Replay, commands: Commands): Content[] {

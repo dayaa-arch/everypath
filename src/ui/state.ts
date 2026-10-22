@@ -9,7 +9,8 @@ import type {
   StateNode,
   Step,
 } from "../core/types.js";
-import { isLiveViolation, selectedIds } from "./facts.js";
+import { isLiveViolation } from "../core/verdict.js";
+import { selectedIds } from "./facts.js";
 import { type Point, place, relayout, snap } from "./layout.js";
 import { buildPrompt, type Prompt } from "./prompt.js";
 import type { GraphEvent, Layout, TlcEvent } from "./wire.js";
