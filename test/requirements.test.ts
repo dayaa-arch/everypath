@@ -11,9 +11,9 @@ import {
   javaEnv,
   propertyOf,
   readOutput,
-  readReview,
   ready,
   request,
+  reviewFiles,
   reviewPath,
   serveEnv,
   serveRepo,
@@ -288,11 +288,64 @@ describe("R-01: serve writes only under .everypath/", () => {
       since,
     });
 
-    assert.ok((await readReview(root)).approvals.Home, "the approval was written");
+    assert.equal((await reviewFiles(root)).length, 1, "the approval was written");
     assert.ok(await readOutput(root, "layout.json"), "the layout was written");
     assert.match(await readOutput(root, "tla", "Model.tla"), /MODULE Model/);
     assert.deepEqual(await snapshot(root), hashes);
     assert.deepEqual(await listing(root), entries);
+  });
+});
+
+/** Every path under `.everypath/`, root-relative to it with `/`, directories ending in `/`. */
+async function underOutput(root: string): Promise<string[]> {
+  const output = join(root, ".everypath");
+  const entries = await readdir(output, { recursive: true, withFileTypes: true });
+  return entries
+    .map((entry) => {
+      const path = relative(output, join(entry.parentPath, entry.name)).replaceAll("\\", "/");
+      return entry.isDirectory() ? `${path}/` : path;
+    })
+    .sort();
+}
+
+describe("R-01: approve and revoke add records under .everypath/review/ and nothing else (docs/specs/team-review.md condition 10)", () => {
+  it("leaves every file outside .everypath/ and the legacy review.json byte-identical", async () => {
+    const legacy = `${JSON.stringify({ version: 1, approvals: { Home: { hash: "0".repeat(40), at: "2026-10-21T00:00:00.000Z", by: "old", note: "" } } }, null, 2)}\n`;
+    const root = await makeRepo({
+      ".gitignore": ".everypath/*\n!.everypath/review.json\n",
+      "src/home.ts": ts("@state Home", "@state-initial", "@state-next ログイン on:logout"),
+      "src/login.ts": ts("@state ログイン", "@state-next Home on:login_ok"),
+      ".everypath/review.json": legacy,
+    });
+    const hashes = await snapshot(root);
+    const entries = await listing(root);
+    const serve = await serveRepo(root);
+    const events = await ready(serve);
+    const since = events.received.length;
+
+    const steps = [
+      await request(serve, "POST", reviewPath("ログイン"), { body: { note: "確認済み" } }),
+      await request(serve, "DELETE", reviewPath("Home")),
+      await request(serve, "POST", reviewPath("Home"), { body: { note: "" } }),
+      await request(serve, "DELETE", reviewPath("ログイン")),
+    ];
+    for (const step of steps) assert.ok(succeeded(step), `${step.status} ${step.text}`);
+    await events.graph((graph) => graph.nodes.some((n) => n.id === "Home" && n.status.reviewed), {
+      since,
+    });
+
+    assert.deepEqual(await snapshot(root), hashes);
+    assert.deepEqual(await listing(root), entries);
+    assert.equal(await readOutput(root, "review.json"), legacy);
+    const added = (await underOutput(root)).filter(
+      (path) => !["graph.json", "history.jsonl", "review.json", "serve.json"].includes(path),
+    );
+    const records = added.filter((path) => /^review\/[0-9a-f]{16}\.jsonl$/.test(path));
+    assert.equal(records.length, 4, added.join("\n"));
+    assert.deepEqual(
+      added.filter((path) => !records.includes(path)),
+      [".gitignore", "review/"],
+    );
   });
 });
 

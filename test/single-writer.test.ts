@@ -174,10 +174,17 @@ describe("single writer: the writers it knows", () => {
   it("reads the writers of workspace.ts from its exports, and none of its readers", async () => {
     const names = await workspaceWriters();
 
-    const writers = ["writeWorkspace", "writeApproval", "commitTlc", "replaceFile", "writeProofs"];
+    const writers = [
+      "writeWorkspace",
+      "writeReviewChange",
+      "commitTlc",
+      "replaceFile",
+      "writeProofs",
+    ];
     for (const writer of [...writers, "writeServeRecord", "removeServeRecord"]) {
       assert.ok(names.includes(writer), `${writer} in ${names.join(", ")}`);
     }
+    assert.ok(!names.includes("writeApproval"), "review.json has no writer any more");
     const readers = ["readWorkspace", "readOutput", "isScanInput", "serializeGraph"];
     for (const reader of [...readers, "readServeRecord"]) {
       assert.ok(!names.includes(reader), reader);
@@ -225,7 +232,7 @@ describe("single writer: the check fails on a planted violation", () => {
       "server/c.ts": 'import { replaceFile as put } from "../core/workspace.js";\n',
       "server/d.ts": 'import * as workspace from "../core/workspace.js";\n',
       "server/e.ts":
-        'import { commitTlc, readOutput, writeApproval } from "../core/workspace.js";\n',
+        'import { commitTlc, readOutput, writeReviewChange } from "../core/workspace.js";\n',
       "server/f.ts": 'import { checkTlc, exportTla, runTlc } from "../core/tla/run.js";\n',
       "server/g.ts": 'import { prove, readProofOutput } from "../core/prove.js";\n',
       "server/writer.ts":
@@ -239,7 +246,7 @@ describe("single writer: the check fails on a planted violation", () => {
       "src/server/c.ts: imports replaceFile from ../core/workspace.js",
       "src/server/d.ts: imports the whole of ../core/workspace.js, which includes the writers",
       "src/server/e.ts: imports commitTlc from ../core/workspace.js",
-      "src/server/e.ts: imports writeApproval from ../core/workspace.js",
+      "src/server/e.ts: imports writeReviewChange from ../core/workspace.js",
       "src/server/f.ts: imports checkTlc from ../core/tla/run.js",
       "src/server/f.ts: imports exportTla from ../core/tla/run.js",
       "src/server/g.ts: imports prove from ../core/prove.js",
