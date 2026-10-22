@@ -59,7 +59,6 @@ type FileFacts = {
 /** A file that becomes part of a node, with that node's id. */
 type Member = { readonly file: FileFacts; readonly id: StateName };
 
-/** A node-to-node link, and the files it comes from. */
 type Link = { readonly from: StateName; readonly to: StateName; readonly via: readonly string[] };
 
 /** A `@state-next` edge before the code is compared with it. */

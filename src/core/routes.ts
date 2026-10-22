@@ -7,7 +7,6 @@ type Segment = { readonly kind: "literal"; readonly text: string } | { readonly 
 /** A `@state-route` path. `path` is as written, less one trailing `/`. */
 export type Route = { readonly path: string; readonly segments: readonly Segment[] };
 
-/** A `@state-route` one file declares, with the state that file belongs to. */
 export type RouteClaim = {
   readonly file: string;
   readonly line: number;
@@ -123,11 +122,8 @@ export function resolveRoute(table: RouteTable, path: string): StateName | null 
   const exact = table.exact.get(path);
   if (exact !== undefined) return exact;
   const parts = segmentsOf(path);
-  const fits = (segment: Segment, index: number): boolean => {
-    const part = parts[index];
-    if (part === undefined) return false;
-    return segment.kind === "param" ? part !== "" : segment.text === part;
-  };
+  const fits = (segment: Segment, index: number): boolean =>
+    segment.kind === "param" ? (parts[index] ?? "") !== "" : segment.text === parts[index];
   const states = new Set(
     table.patterns
       .filter(({ segments }) => segments.length === parts.length && segments.every(fits))
