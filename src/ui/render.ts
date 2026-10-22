@@ -14,6 +14,7 @@ import { modelSlice } from "./model.js";
 import { type Prompt, promptLabel, promptTargets } from "./prompt.js";
 import { type Action, type Replay, replayOf, type TlcView, type ViewState } from "./state.js";
 import {
+  checkedByLabel,
   headerCounts,
   reviewQueue,
   rowOf,
@@ -940,9 +941,11 @@ function propertyOf(property: PropertyResult, state: ViewState, commands: Comman
     html("strong", {}, property.id),
     property.description === null ? null : `　${property.description}`,
   );
+  const checker = html("p", { class: "checker" }, checkedByLabel(property));
   if (property.staleModel === true) {
     return [
       title,
+      checker,
       html("p", { class: "stale" }, "古いモデルに対する結果（今のモデルでは確かめていません）"),
     ];
   }
@@ -958,7 +961,7 @@ function propertyOf(property: PropertyResult, state: ViewState, commands: Comman
     );
     return chosen ? html("div", {}, pick, ...replayControls(playing, commands)) : pick;
   });
-  return [title, html("div", { class: "actions" }, ...traces)];
+  return [title, checker, html("div", { class: "actions" }, ...traces)];
 }
 
 function replayControls(replay: Replay, commands: Commands): Content[] {

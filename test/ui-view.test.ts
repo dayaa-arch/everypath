@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { analyze } from "../src/core/scan.js";
 import { type Box, relayout } from "../src/ui/layout.js";
 import { initialState, reduce } from "../src/ui/state.js";
-import { headerCounts, sceneOf, stepEvent } from "../src/ui/view.js";
+import { checkedByLabel, headerCounts, sceneOf, stepEvent } from "../src/ui/view.js";
 import { exampleRepo } from "./helpers/tlc.js";
 import {
   counterexample,
@@ -72,5 +72,23 @@ describe("edge labels (docs/specs/viewer-panels.md condition 9)", () => {
     const texts = labels.map((label) => label.text);
     assert.ok(texts.includes("signup_done"));
     assert.ok(texts.includes("login_fail [retries==3]"));
+  });
+});
+
+describe("which checker decided a property (SPEC §19 item 8)", () => {
+  it("names TLC with its explored states, the quick check, and both apart", () => {
+    const tlc = { ...property("p", "violated"), checkedBy: "tlc" as const, statesExplored: 33 };
+    const bfs = { ...property("p", "violated"), checkedBy: "bfs" as const };
+    const both = { ...property("p", "ok"), checkedBy: "both" as const, statesExplored: 82 };
+
+    assert.equal(checkedByLabel(tlc), "全探索（TLC）で判定、33 状態");
+    assert.equal(checkedByLabel(bfs), "簡易検査（変数を見ない到達性）で判定");
+    assert.equal(checkedByLabel(both), "簡易検査と全探索（TLC）で判定、82 状態");
+  });
+
+  it("leaves the state count out when TLC did not report one", () => {
+    const tlc = { ...property("p", "violated"), checkedBy: "tlc" as const, statesExplored: null };
+
+    assert.equal(checkedByLabel(tlc), "全探索（TLC）で判定");
   });
 });
