@@ -717,9 +717,20 @@ function groupBy<T, K>(items: readonly T[], key: (item: T) => K): Map<K, T[]> {
   return groups;
 }
 
+/**
+ * CRLF is hashed as LF: git on Windows checks text out with CRLF, and an approval or a proof made on
+ * one OS must still match the same content on another. latin1 maps each byte to one code unit, so
+ * nothing else in the bytes changes.
+ */
 function sha1(parts: readonly Buffer[]): string {
   const hash = createHash("sha1");
-  for (const part of parts) hash.update(part);
+  for (const part of parts) {
+    hash.update(
+      part.includes(13)
+        ? Buffer.from(part.toString("latin1").replaceAll("\r\n", "\n"), "latin1")
+        : part,
+    );
+  }
   return hash.digest("hex");
 }
 

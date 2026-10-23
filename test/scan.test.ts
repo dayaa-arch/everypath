@@ -475,6 +475,16 @@ describe("scan: hash, findings, risks, review", () => {
     assert.equal(node(graph, "X").lines, 3);
   });
 
+  it("gives a file checked out with CRLF the same hash as its LF twin, so approvals hold across OSes", async () => {
+    const lf = ts("@state X", "@state-desc first");
+    const crlf = lf.replaceAll("\n", "\r\n");
+    const unix = await scan(await makeRepo({ "src/x.ts": lf }), { now: T1 });
+    const windows = await scan(await makeRepo({ "src/x.ts": crlf }), { now: T1 });
+
+    assert.equal(node(windows, "X").hash, node(unix, "X").hash);
+    assert.equal(node(unix, "X").hash, sha1(lf));
+  });
+
   it("normalizes semgrep findings and attaches risks", async () => {
     const root = await makeRepo({
       "src/a.ts": ts("@state A", "@state-risk トークン期限を未検証"),
