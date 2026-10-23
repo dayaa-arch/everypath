@@ -14,10 +14,23 @@ export type Config = {
   readonly ignore: readonly Glob[];
   /** What `everypath prove` runs, or `null` when the key is absent or unusable. */
   readonly proof: Prover | null;
+  /** `tla.maxHeap`: TLC's `-Xmx`, in megabytes. */
+  readonly tla: { readonly maxHeapMb: number };
 };
 
 /** A compiled `ignore` pattern, tested against a root-relative `/` path. */
 export type Glob = { readonly test: (path: string) => boolean };
+
+/**
+ * 3g: the largest Model.tla `generateTla` makes (`MAX_ARCS` arcs, `MAX_TLA_BYTES` of text) ran out
+ * of memory at 1536m and ran as fast as under the JVM's default from 2560m. The number of states
+ * barely matters: TLC keeps them on disk. Measured by `scripts/bench-tlc-heap.ts`, in
+ * docs/specs/tlc-limits.md.
+ */
+const DEFAULT_TLA: Config["tla"] = { maxHeapMb: 3 * 1024 };
+
+/** The JVM does not start under `-Xmx1m` and rounds anything below about 8 MB up to it. */
+const MIN_HEAP_MB = 8;
 
 export const DEFAULT_CONFIG: Config = {
   aliases: [],
@@ -25,7 +38,29 @@ export const DEFAULT_CONFIG: Config = {
   findings: null,
   ignore: [],
   proof: null,
+  tla: DEFAULT_TLA,
 };
+
+/** A heap size as `-Xmx` and `tla.maxHeap` write it: whole gigabytes as `g`, else megabytes. */
+export function heapText(megabytes: number): string {
+  return megabytes % 1024 === 0 ? `${megabytes / 1024}g` : `${megabytes}m`;
+}
+
+/** `"3g"` or `"512m"`, either case, at least `MIN_HEAP_MB`. */
+function heapOf(raw: unknown): number | null {
+  const match = typeof raw === "string" ? /^([1-9]\d*)([mg])$/i.exec(raw) : null;
+  if (match === null) return null;
+  const [, digits = "", unit = ""] = match;
+  const megabytes = Number(digits) * (unit.toLowerCase() === "g" ? 1024 : 1);
+  return Number.isSafeInteger(megabytes) && megabytes >= MIN_HEAP_MB ? megabytes : null;
+}
+
+function tlaOf(raw: unknown): Config["tla"] | null {
+  if (!isRecord(raw)) return null;
+  if (raw.maxHeap === undefined) return DEFAULT_TLA;
+  const maxHeapMb = heapOf(raw.maxHeap);
+  return maxHeapMb === null ? null : { maxHeapMb };
+}
 
 /** The command of each tool when `proof.command` is left out. `command` has none: it must be written. */
 const DEFAULT_COMMANDS: Readonly<Record<ProofTool, string | null>> = {
@@ -191,6 +226,12 @@ export function parseConfig(value: unknown): {
       '{"tool": "dafny" か "verus" か "command", "command": "{files} を含む命令"}（tool が command なら command は必須）',
       proverOf,
       null,
+    ),
+    tla: read(
+      "tla",
+      `{"maxHeap": "6g"} の形（maxHeap は ${MIN_HEAP_MB}m 以上の整数に m か g を付けた、TLC の Java のヒープの上限）`,
+      tlaOf,
+      DEFAULT_TLA,
     ),
   };
   return { config, warnings };

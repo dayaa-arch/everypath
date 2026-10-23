@@ -10,8 +10,12 @@ export type TlcReport =
       readonly trace: Counterexample;
       readonly distinctStates: number | null;
     }
-  | { readonly kind: "error"; readonly message: string; readonly distinctStates: number | null };
+  | { readonly kind: "error"; readonly message: string; readonly distinctStates: number | null }
+  /** Its own kind, because what to say depends on the heap TLC had, which only the run knows. */
+  | { readonly kind: "out-of-memory"; readonly distinctStates: number | null };
 
+/** TLC's own message for an `OutOfMemoryError` it caught, or the JVM's for one it did not. */
+const OUT_OF_MEMORY = /^Error: Java ran out of memory|java\.lang\.OutOfMemoryError/m;
 const COMPLETED = /^Model checking completed\. No error has been found\./m;
 const INVARIANT_VIOLATED = /^Error: Invariant (\S+) is violated/;
 const TEMPORAL_VIOLATED = /^Error: Temporal properties were violated\./;
@@ -30,6 +34,7 @@ function lastStateCount(output: string): number | null {
 export function parseTlcOutput(output: string, names: TlaNames): TlcReport {
   const distinctStates = lastStateCount(output);
   const fail = (message: string): TlcReport => ({ kind: "error", message, distinctStates });
+  if (OUT_OF_MEMORY.test(output)) return { kind: "out-of-memory", distinctStates };
   if (COMPLETED.test(output)) {
     return distinctStates === null
       ? fail("TLC は成功と報告しましたが、状態数を読めません")

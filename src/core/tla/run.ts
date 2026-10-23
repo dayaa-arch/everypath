@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { CONFIG_FILE, heapText } from "../config.js";
 import { errorMessage } from "../json.js";
 import { TYPE_OK_PROPERTY } from "../properties.js";
 import { analyze } from "../scan.js";
@@ -23,10 +24,20 @@ const DOWNLOAD_TIMEOUT_MS = 60_000;
 /** `check --tlc` without `--timeout`, and every run the server starts. */
 const DEFAULT_TIMEOUT_MS = 120_000;
 
+/**
+ * The most of TLC's output a run keeps, in characters: its end, where the parser finds the error, the
+ * trace and the last state count. 40 times the 416 KB of a 2,999-step trace over 9,000,000 states,
+ * and far below the longest string Node can hold, which unbounded output passed.
+ */
+const MAX_OUTPUT = 16 * 1024 * 1024;
+
+/** What starts TLC's JVM. */
+type Java = { readonly jar: string; readonly maxHeapMb: number };
+
+/** `truncated`: the output outgrew `MAX_OUTPUT` and `output` is its end, from a line start. */
 type TlcRun =
   | { readonly kind: "missing"; readonly what: "java" | "jar"; readonly jar: string }
-  | { readonly kind: "exited"; readonly output: string }
-  | { readonly kind: "timeout"; readonly output: string };
+  | { readonly kind: "exited" | "timeout"; readonly output: string; readonly truncated: boolean };
 
 type Missing = Extract<TlcRun, { readonly kind: "missing" }>;
 
@@ -92,7 +103,7 @@ export async function runTlc(
   }: { readonly timeoutMs?: number; readonly signal?: AbortSignal } = {},
 ): Promise<TlcOutcome> {
   const at = new Date();
-  const { graph, flat } = await analyze(root, { now: at });
+  const { graph, flat, config } = await analyze(root, { now: at });
   const jar = jarPath();
   const absent = await missingTool(jar);
   if (absent !== null) return { kind: "missing", guide: installGuide(absent) };
@@ -103,7 +114,8 @@ export async function runTlc(
   const directory = await mkdtemp(join(tmpdir(), "everypath-tla-"));
   try {
     await writeFile(join(directory, "Model.tla"), model.tla);
-    const outcome = await verify(directory, jar, model, timeoutMs, signal);
+    const java = { jar, maxHeapMb: config.tla.maxHeapMb };
+    const outcome = await verify(directory, java, model, timeoutMs, signal);
     if (outcome.kind === "missing") return { kind: "missing", guide: installGuide(outcome) };
     const record: TlcRecord = {
       version: 1,
@@ -218,32 +230,40 @@ async function missingTool(jar: string): Promise<Missing | null> {
 }
 
 /**
- * `java -XX:+UseParallelGC -jar <jar> -workers 1 -deadlock -config Model.cfg -metadir <tmp> Model.tla`
- * One worker keeps the breadth-first search deterministic, so the same model always yields the same
- * shortest trace; with several workers the trace and the states explored change from run to run.
- * in `directory`, stdout and stderr interleaved. Killed after `budgetMs` or by `signal`. `-deadlock` keeps a state
- * with no exit (ロック) from counting as an error. TLC writes nothing outside the metadir.
+ * `java -Xmx<heap> -XX:+UseParallelGC -jar <jar> -workers 1 -deadlock -config Model.cfg -metadir <tmp>
+ * Model.tla` in `directory`, stdout and stderr interleaved and kept up to `MAX_OUTPUT`. One worker
+ * keeps the breadth-first search deterministic, so the same model always yields the same shortest
+ * trace; with several workers the trace and the states explored change from run to run. `-Xmx` comes
+ * after `JAVA_TOOL_OPTIONS`, so it wins. Killed after `budgetMs` or by `signal`. `-deadlock` keeps a
+ * state with no exit (ロック) from counting as an error. TLC writes nothing outside the metadir.
  */
 async function runJava(
   directory: string,
-  jar: string,
+  { jar, maxHeapMb }: Java,
   budgetMs: number,
   signal: AbortSignal | undefined,
 ): Promise<TlcRun> {
   const metadir = await mkdtemp(join(tmpdir(), "everypath-tlc-"));
   try {
     return await new Promise<TlcRun>((resolve) => {
-      const args = ["-XX:+UseParallelGC", "-jar", jar, "-workers", "1", "-deadlock"];
+      const heap = `-Xmx${heapText(maxHeapMb)}`;
+      const args = [heap, "-XX:+UseParallelGC", "-jar", jar, "-workers", "1", "-deadlock"];
       const child = spawn(
         "java",
         [...args, "-config", "Model.cfg", "-metadir", metadir, "Model.tla"],
         { cwd: directory, stdio: ["ignore", "pipe", "pipe"], signal, killSignal: "SIGKILL" },
       );
+      // Trimmed only once it is twice the limit, so a long output is sliced rarely.
       let output = "";
+      let dropped = false;
       let timedOut = false;
       for (const stream of [child.stdout, child.stderr]) {
         stream.setEncoding("utf8").on("data", (chunk: string) => {
           output += chunk;
+          if (output.length > 2 * MAX_OUTPUT) {
+            output = output.slice(-MAX_OUTPUT);
+            dropped = true;
+          }
         });
       }
       const timer = setTimeout(() => {
@@ -259,12 +279,28 @@ async function runJava(
       });
       child.on("close", () => {
         clearTimeout(timer);
-        resolve({ kind: timedOut ? "timeout" : "exited", output });
+        resolve({ kind: timedOut ? "timeout" : "exited", ...kept(output, dropped) });
       });
     });
   } finally {
     await rm(metadir, { recursive: true, force: true });
   }
+}
+
+/** At most `MAX_OUTPUT` characters of the end, without the line the cut went through. */
+function kept(
+  output: string,
+  dropped: boolean,
+): { readonly output: string; readonly truncated: boolean } {
+  if (!dropped && output.length <= MAX_OUTPUT) return { output, truncated: false };
+  const end = output.slice(-MAX_OUTPUT);
+  return { output: end.slice(end.indexOf("\n") + 1), truncated: true };
+}
+
+/** TLC ran out of heap. Every run reads the same Model.tla, so no later run would fit either. */
+function outOfMemory(maxHeapMb: number): string {
+  const larger = heapText(2 * maxHeapMb);
+  return `TLC のメモリが足りませんでした（Java のヒープの上限 ${heapText(maxHeapMb)}）。${CONFIG_FILE} の tla.maxHeap で上限を上げるか（例: "tla": {"maxHeap": "${larger}"}）、モデルを小さくしてください`;
 }
 
 type Verdict = Pick<PropertyResult, "result" | "counterexamples" | "statesExplored">;
@@ -312,7 +348,7 @@ type Verified =
  */
 async function verify(
   directory: string,
-  jar: string,
+  java: Java,
   model: TlaModel,
   timeoutMs: number,
   signal: AbortSignal | undefined,
@@ -321,6 +357,8 @@ async function verify(
   const verdicts = new Map<string, Verdict>();
   let error: string | null = null;
   let states: number | null = null;
+  /** Why no later run can succeed: TLC ran out of memory. */
+  let spent: string | null = null;
 
   const fail = (message: string): TlcReport => {
     error ??= message;
@@ -330,14 +368,23 @@ async function verify(
     const timeout = `タイムアウトしました（${timeoutMs / 1000} 秒）`;
     const left = deadline - Date.now();
     if (left <= 0) return fail(timeout);
+    if (spent !== null) return fail(spent);
     signal?.throwIfAborted();
     await writeFile(join(directory, "Model.cfg"), model.cfg(checks));
-    const run = await runJava(directory, jar, left, signal);
+    const run = await runJava(directory, java, left, signal);
     signal?.throwIfAborted();
     if (run.kind === "missing") return run;
     const report = parseTlcOutput(run.output, model.names);
     states = report.distinctStates ?? states;
     if (run.kind === "timeout") return fail(timeout);
+    if (report.kind === "out-of-memory") {
+      spent = outOfMemory(java.maxHeapMb);
+      return fail(spent);
+    }
+    if (report.kind === "error" && run.truncated) {
+      const limit = `${MAX_OUTPUT / 1024 / 1024} Mi 文字`;
+      return fail(`TLC の出力が上限の ${limit}を超えたので先頭を捨てました。${report.message}`);
+    }
     if (report.kind === "error") error ??= report.message;
     return report;
   };

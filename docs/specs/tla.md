@@ -59,6 +59,8 @@ Prototype で確かめたこと（手書きの example モデルを TLC 2.19 で
 
 `docs/specs/typeok.md` で変えたこと。`TypeOK` の判定は `result.json` の `typeOk` ではなく `properties` の最後に、予約した id `TypeOK` の性質として入る。上のデータの形の `ResultFile.typeOk` と `TlcCheck.typeOk` は無くなった。`check --tlc` は `TypeOK` をほかの性質と同じ行の形で出す。
 
+`docs/specs/tlc-limits.md` で決めたこと。TLC は `java -Xmx3g -XX:+UseParallelGC -jar …` で動く。上限は `everypath.config.json` の `"tla": {"maxHeap": "6g"}`（8m 以上の整数に m か g）で変え、読めない値は警告を出して既定に戻す。`3g` は実測で決めた。`generateTla` が作る最大のモデル（`MAX_ARCS` の手前の 19,740 本、`MAX_TLA_BYTES` の手前の 8.1 MB）は 2048m で 25 秒、2560m から JVM の既定（3641 MB）と同じ 15 秒で通り、7.3 MB のモデルは 1536m で足りなかった。必要量は状態数ではなく `Model.tla` の大きさで決まる（900 万状態のモデルは 64m でも通る）。TLC の出力は末尾の 16 Mi 文字だけを持つ（2,999 歩の反例が 416 KB。上限が無いと 600 MB の出力で Node の文字列の上限を超えて落ちた）。先頭を捨てて読めなかったときは、捨てたことをエラーに書く。TLC の「Java ran out of memory」と JVM の `java.lang.OutOfMemoryError` は、上限の値と `tla.maxHeap` の上げ方を書いた日本語の `error` になり、残りの性質では TLC を走らせない。
+
 ## 非目標
 - サーバーとビューア（`/check/tlc`、ステップ再生）、`never-reach` の TLC 検査、`dep-only-via`
 - `everypath.config.json` の `tla.jar`。環境変数と既定の場所だけを読む
