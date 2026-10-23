@@ -191,6 +191,10 @@ node dist/cli.js check example --tlc
 | `everypath tla install` | `tla2tools.jar` を `~/.everypath/` に置く |
 | `everypath serve [dir] [--port 4747] [--open]` | 監視して図を配るサーバーを起動する |
 
+## 動作環境
+
+Node.js 22 以上の macOS と Linux で動きます。0.1.0 では Windows には対応していません（`docs/decisions/0005-no-windows-in-0-1.md`）。全探索（`check --tlc`）を使うときだけ Java が要ります。
+
 ## ライセンス
 
 MIT ライセンスです。全文は [LICENSE](LICENSE) にあります。
