@@ -190,3 +190,7 @@ node dist/cli.js check example --tlc
 | `everypath tla export [dir]` | `.everypath/tla/Model.tla` と `Model.cfg` を書く |
 | `everypath tla install` | `tla2tools.jar` を `~/.everypath/` に置く |
 | `everypath serve [dir] [--port 4747] [--open]` | 監視して図を配るサーバーを起動する |
+
+## ライセンス
+
+MIT ライセンスです。全文は [LICENSE](LICENSE) にあります。
