@@ -1,7 +1,16 @@
 {
   "name": "everypath",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Agent-declared statecharts, model-checked with TLA+, drawn as a review map",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dayaa-arch/everypath.git"
+  },
+  "homepage": "https://github.com/dayaa-arch/everypath#readme",
+  "bugs": {
+    "url": "https://github.com/dayaa-arch/everypath/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -19,7 +28,8 @@
     "dist/",
     "skill/",
     "templates/",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && tsx scripts/build-ui.ts",
