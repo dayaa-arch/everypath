@@ -381,15 +381,10 @@ function tlcEvent(outcome: TlcOutcome): TlcEvent {
     case "unmodeled":
       return { type: "tlc", status: "error", states: null, message: outcome.reason };
     case "checked": {
-      const { states, error, typeOk } = outcome.record;
+      const { states, error } = outcome.record;
       return error !== null
         ? { type: "tlc", status: "error", states, message: error }
-        : {
-            type: "tlc",
-            status: "done",
-            states,
-            message: typeOk === null ? null : "違反 TypeOK 変数が宣言した範囲を外れました",
-          };
+        : { type: "tlc", status: "done", states, message: null };
     }
   }
 }

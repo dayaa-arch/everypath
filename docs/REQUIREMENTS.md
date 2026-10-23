@@ -36,7 +36,7 @@ AI にコードを書かせている開発者が、自分のアプリの振る�
 - Claude Code 以外のエージェント専用の連携。`graph.json` と指示文は中立に保つので、専用スキルやプラグインは作らない。
 - TLA+ 以外のチェッカ（Apalache、Alloy）への切替。`SPEC.md` §16 フェーズ 3 から外す（決定 0002）。
 
-後回し: `SPEC.md` §16 の 3 つのフェーズはすべて入った（フェーズ 2 は `docs/plans/phase-2.md`、フェーズ 3 は `docs/plans/phase-3.md`、2026-10-23 まで）。残るのはフェーズ 1 から持ち越した 3 つ（TypeOK 違反のグラフ表示、Linux での監視の実機確認、TLC のメモリ上限）と、Dafny と Verus の読み手の実物での確認（使う時まで行わない）。
+後回し: `SPEC.md` §16 の 3 つのフェーズはすべて入った（フェーズ 2 は `docs/plans/phase-2.md`、フェーズ 3 は `docs/plans/phase-3.md`、2026-10-23 まで）。残るのはフェーズ 1 から持ち越した 2 つ（Linux での監視の実機確認、TLC のメモリ上限。TypeOK 違反のグラフ表示は `docs/specs/typeok.md` で入れた）と、Dafny と Verus の読み手の実物での確認（使う時まで行わない）。
 
 ## 用語
 

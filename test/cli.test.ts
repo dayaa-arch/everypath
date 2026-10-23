@@ -131,7 +131,8 @@ const VIOLATED_EXAMPLE = `違反 no-unauth-home [invariant] 未認証で Home・
 成立 lock-after-3 [invariant] 4 回目の失敗は存在しない
 成立 logout-eventually-login [leads-to] ログアウトしたら必ずログイン画面に戻る
 成立 no-dead-end [no-dead-end] ロックと遷移を持たない DB層 のほかに行き止まりが無い
-性質 4 件: 違反 1、成立 3
+成立 TypeOK [invariant] 変数が宣言した範囲に収まる
+性質 5 件: 違反 1、成立 4
 `;
 
 async function checkTlcWith(script: FakeJavaScript) {
@@ -191,7 +192,7 @@ describe("everypath check --tlc", () => {
 
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /成立 no-unauth-home/);
-    assert.match(result.stdout, /性質 4 件: 成立 4/);
+    assert.match(result.stdout, /性質 5 件: 成立 5/);
   });
 
   it("exits 1 and says what TLC reported when it fails", async () => {
@@ -218,7 +219,10 @@ describe("everypath check --tlc", () => {
 
     assert.equal(result.status, 1);
     assert.match(result.stdout, /成立 no-unauth-home/);
-    assert.ok(result.stdout.includes("違反 TypeOK 変数が宣言した範囲を外れました"), result.stdout);
+    assert.ok(
+      result.stdout.includes("違反 TypeOK [invariant] 変数が宣言した範囲に収まる"),
+      result.stdout,
+    );
     assert.ok(result.stdout.includes("  3. →(reset_done) Home（authed=FALSE, retries=0）"));
   });
 

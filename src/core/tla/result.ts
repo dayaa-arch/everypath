@@ -1,6 +1,6 @@
 import { parseEventName, parseStateName, parseVarName } from "../expr.js";
 import { asInteger, asItems, asText, isRecord } from "../json.js";
-import { PROPERTIES_FILE } from "../properties.js";
+import { PROPERTIES_FILE, TYPE_OK_PROPERTY } from "../properties.js";
 import type {
   Counterexample,
   PropertyResult,
@@ -25,10 +25,8 @@ export type TlcRecord = {
   readonly tla: string;
   readonly cfg: string;
   readonly names: TlaNames;
-  /** Every property TLC decided, `checkedBy` "tlc" or "both", in file order. */
+  /** Every property TLC decided, `checkedBy` "tlc" or "both", in file order, then `TypeOK`. */
   readonly properties: readonly PropertyResult[];
-  /** The variables left their declared ranges. */
-  readonly typeOk: Counterexample | null;
   /** Distinct states in the last TLC output that gave a count. */
   readonly states: number | null;
   /** The first TLC error or timeout. Any non-null value fails `check --tlc`. */
@@ -140,11 +138,9 @@ export function parseTlcSummary(raw: unknown): TlcSummary | null {
     }
     case "checked": {
       const rejected = asTexts(raw.rejected);
-      const typeOk = raw.typeOk === null ? null : parseCounterexample(raw.typeOk);
       const error = raw.error === null ? null : asText(raw.error);
-      if (rejected === null || (raw.typeOk !== null && typeOk === null)) return null;
-      if (raw.error !== null && error === null) return null;
-      return { kind: "checked", rejected, typeOk, error };
+      if (rejected === null || (raw.error !== null && error === null)) return null;
+      return { kind: "checked", rejected, error };
     }
     default:
       return null;
@@ -187,7 +183,8 @@ function awaitsTlc({ checkedBy, result }: PropertyResult): boolean {
  * quick check reached is never replaced, whatever `result.json` says. A quick-check `ok` gets none,
  * because no behavior takes a path the graph does not have. When this scan's model (`generated`)
  * has a key other than the one TLC checked, or there is none, the verdict is marked `staleModel`.
- * `checkedBy` stays the quick lane's.
+ * `checkedBy` stays the quick lane's. TLC's verdict on `TypeOK`, which the quick lane has no result
+ * for, goes last, under the same staleness.
  */
 export function withTlcResults(
   generated: Generated,
@@ -197,7 +194,7 @@ export function withTlcResults(
   if (stored === null) return quick;
   const fresh = generated.ok && modelKey(generated.model) === stored.key;
   const stale: { readonly staleModel?: true } = fresh ? {} : { staleModel: true };
-  return quick.map((result): PropertyResult => {
+  const laid = quick.map((result): PropertyResult => {
     const verdict = stored.byId.get(result.id);
     if (verdict === undefined || verdict.kind !== result.kind) return result;
     if (awaitsTlc(result)) return { ...result, ...verdict, ...stale };
@@ -206,4 +203,6 @@ export function withTlcResults(
     const tlc = { result: verdict.result, counterexamples, statesExplored, checkedAt, ...stale };
     return { ...result, tlc };
   });
+  const typeOk = stored.byId.get(TYPE_OK_PROPERTY.id);
+  return typeOk === undefined ? laid : [...laid, { ...typeOk, ...TYPE_OK_PROPERTY, ...stale }];
 }

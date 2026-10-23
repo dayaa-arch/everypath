@@ -21,6 +21,19 @@ export const PROPERTIES_FILE = "everypath.properties.json";
 
 export const NO_PROPERTIES: PropertiesFile = { entry: null, properties: [] };
 
+/**
+ * The property TLC checks on every run beside the file's: Model.tla's `TypeOK`, that every variable
+ * stays in its declared range. It is a result and never a definition, so a graph has it only when
+ * `result.json` holds TLC's verdict on it. The file may use any other non-empty id, so this one is
+ * refused there.
+ */
+export const TYPE_OK_PROPERTY = {
+  id: "TypeOK" as PropertyId,
+  kind: "invariant",
+  description: "変数が宣言した範囲に収まる",
+  checkedBy: "tlc",
+} as const satisfies Pick<PropertyResult, "id" | "kind" | "description" | "checkedBy">;
+
 type Kind = PropertyDef["kind"];
 /** A definition without the fields every kind shares. */
 type BodyOf<K extends Kind> =
@@ -132,7 +145,7 @@ function isKind(value: unknown): value is Kind {
   return typeof value === "string" && Object.hasOwn(BODY_PARSERS, value);
 }
 
-/** The only place a `PropertyId` is made. */
+/** The only place a `PropertyId` is made from the file. `TYPE_OK_PROPERTY` holds the other one. */
 function propertyId(raw: unknown): PropertyId | null {
   return typeof raw === "string" && raw.trim() !== "" ? (raw as PropertyId) : null;
 }
@@ -145,6 +158,11 @@ function parseDefinition(
   if (!isRecord(raw)) return fail("定義が JSON オブジェクトではありません");
   if (id === null) return fail("id がありません。空でない文字列を書いてください");
   if (taken.has(id)) return fail("id が先の定義と重複しています");
+  if (id === TYPE_OK_PROPERTY.id) {
+    return fail(
+      `id ${id} は everypath が予約しています（TLC が毎回確かめる「${TYPE_OK_PROPERTY.description}」に使います）。別の id にしてください`,
+    );
+  }
   if (raw.kind === undefined) return fail("kind がありません");
   if (!isKind(raw.kind)) {
     const kinds = Object.keys(BODY_PARSERS).join("、");
